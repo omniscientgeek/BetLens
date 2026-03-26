@@ -1,0 +1,36 @@
+{
+  "commits": [
+    {
+      "hash": "e63d48ec",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-26 09:30:09 -0600",
+      "subject": "The auto commit did not work. :(",
+      "is_claude": false
+    },
+    {
+      "hash": "c8f97d2b",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-26 09:28:34 -0600",
+      "subject": "I am adding the DEVLOG to source control. This should be auto committed using the custom app I use for development going forward.",
+      "is_claude": false
+    },
+    {
+      "hash": "91f5291c",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-26 09:06:36 -0600",
+      "subject": "Persist devnotes conversations to JSON and auto-load on page view",
+      "is_claude": true
+    }
+  ],
+  "summary": {
+    "total_commits": 3,
+    "claude_commits": 1,
+    "user_commits": 2,
+    "claude_percentage": 33.3,
+    "user_percentage": 66.7,
+    "generated_at": "2026-03-26T10:31:25.174925"
+  }
+}
