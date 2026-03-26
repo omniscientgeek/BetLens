@@ -15,4 +15,9 @@ At first I was thinking of having RAG and MCP for calculation. I might use MCP t
 ## Current plan
 _Thu, Mar 26, 2026 at 08:07 AM_
 
-I am going to calculate the odds for each line, then determine the best line. Then work on the best line. Finally, start on the AI integration. I am leaning towards using Claude with a previous integration I use. This emulates the terminal and allows me to use the Claude Scription without the Claude API penalty cost. I am thinking of testing different AI integrations to see if there are any differences. I will need to research how well different AI models handle sports betting. I have a feeling the frontier models will all perform similarly. 
+I am going to calculate the odds for each line, then determine the best line. Then work on the best line. Finally, start on the AI integration. I am leaning towards using Claude with a previous integration I use. This emulates the terminal and allows me to use the Claude Scription without the Claude API penalty cost. I am thinking of testing different AI integrations to see if there are any differences. I will need to research how well different AI models handle sports betting. I have a feeling the frontier models will all perform similarly.
+
+## Websockets
+_Thu, Mar 26, 2026 at 09:29 AM_
+
+I am going to use websockets for providing the latest status. This will help the website be responsive and display the latest without the webpage keep requesting for the latest data.
