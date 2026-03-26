@@ -212,7 +212,7 @@ def get_devnotes(project_id):
 
 def _parse_notes_file():
     """Parse NOTES.md and return individual notes split by ## headings."""
-    notes_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "NOTES.md"))
+    notes_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "DEVLOG.md"))
     if not os.path.isfile(notes_path):
         return []
 
