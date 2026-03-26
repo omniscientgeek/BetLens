@@ -1,0 +1,2093 @@
+{
+  "description": "Sample odds dataset for Betstamp AI Agent take-home. 10 NBA games x 8 sportsbooks = 80 records. Contains intentionally seeded anomalies for the agent to detect.",
+  "generated": "2026-03-17T18:42:00Z",
+  "notes": [
+    "All odds are in American format",
+    "Spreads and totals may vary by 0.5 across books (this is normal)",
+    "Pinnacle generally has the tightest margins (lowest vig)",
+    "There are intentional anomalies seeded in this data \u2014 your agent should find them",
+    "last_updated times that are significantly older than others may indicate stale data"
+  ],
+  "odds": [
+    {
+      "game_id": "nba_20260320_lal_bos",
+      "sport": "NBA",
+      "home_team": "Boston Celtics",
+      "away_team": "Los Angeles Lakers",
+      "commence_time": "2026-03-20T00:10:00Z",
+      "sportsbook": "DraftKings",
+      "markets": {
+        "spread": {
+          "home_line": -5.5,
+          "home_odds": -111,
+          "away_line": 5.5,
+          "away_odds": -111
+        },
+        "moneyline": {
+          "home_odds": -228,
+          "away_odds": 196
+        },
+        "total": {
+          "line": 220.0,
+          "over_odds": -115,
+          "under_odds": -116
+        }
+      },
+      "last_updated": "2026-03-19T18:04:00Z"
+    },
+    {
+      "game_id": "nba_20260320_lal_bos",
+      "sport": "NBA",
+      "home_team": "Boston Celtics",
+      "away_team": "Los Angeles Lakers",
+      "commence_time": "2026-03-20T00:10:00Z",
+      "sportsbook": "FanDuel",
+      "markets": {
+        "spread": {
+          "home_line": -5.5,
+          "home_odds": -111,
+          "away_line": 5.5,
+          "away_odds": -102
+        },
+        "moneyline": {
+          "home_odds": -213,
+          "away_odds": 173
+        },
+        "total": {
+          "line": 219.0,
+          "over_odds": -112,
+          "under_odds": -105
+        }
+      },
+      "last_updated": "2026-03-19T18:27:00Z"
+    },
+    {
+      "game_id": "nba_20260320_lal_bos",
+      "sport": "NBA",
+      "home_team": "Boston Celtics",
+      "away_team": "Los Angeles Lakers",
+      "commence_time": "2026-03-20T00:10:00Z",
+      "sportsbook": "BetMGM",
+      "markets": {
+        "spread": {
+          "home_line": -5.5,
+          "home_odds": -118,
+          "away_line": 5.5,
+          "away_odds": -113
+        },
+        "moneyline": {
+          "home_odds": -210,
+          "away_odds": 186
+        },
+        "total": {
+          "line": 219.5,
+          "over_odds": -108,
+          "under_odds": -110
+        }
+      },
+      "last_updated": "2026-03-19T18:32:00Z"
+    },
+    {
+      "game_id": "nba_20260320_lal_bos",
+      "sport": "NBA",
+      "home_team": "Boston Celtics",
+      "away_team": "Los Angeles Lakers",
+      "commence_time": "2026-03-20T00:10:00Z",
+      "sportsbook": "Caesars",
+      "markets": {
+        "spread": {
+          "home_line": -5.0,
+          "home_odds": -115,
+          "away_line": 5.0,
+          "away_odds": -107
+        },
+        "moneyline": {
+          "home_odds": -221,
+          "away_odds": 192
+        },
+        "total": {
+          "line": 220.0,
+          "over_odds": -110,
+          "under_odds": -117
+        }
+      },
+      "last_updated": "2026-03-19T18:12:00Z"
+    },
+    {
+      "game_id": "nba_20260320_lal_bos",
+      "sport": "NBA",
+      "home_team": "Boston Celtics",
+      "away_team": "Los Angeles Lakers",
+      "commence_time": "2026-03-20T00:10:00Z",
+      "sportsbook": "PointsBet",
+      "markets": {
+        "spread": {
+          "home_line": -4.5,
+          "home_odds": -106,
+          "away_line": 4.5,
+          "away_odds": -116
+        },
+        "moneyline": {
+          "home_odds": -190,
+          "away_odds": 162
+        },
+        "total": {
+          "line": 219.5,
+          "over_odds": -107,
+          "under_odds": -112
+        }
+      },
+      "last_updated": "2026-03-19T09:15:00Z"
+    },
+    {
+      "game_id": "nba_20260320_lal_bos",
+      "sport": "NBA",
+      "home_team": "Boston Celtics",
+      "away_team": "Los Angeles Lakers",
+      "commence_time": "2026-03-20T00:10:00Z",
+      "sportsbook": "bet365",
+      "markets": {
+        "spread": {
+          "home_line": -6.0,
+          "home_odds": -116,
+          "away_line": 6.0,
+          "away_odds": -111
+        },
+        "moneyline": {
+          "home_odds": -229,
+          "away_odds": 185
+        },
+        "total": {
+          "line": 219.5,
+          "over_odds": -110,
+          "under_odds": -104
+        }
+      },
+      "last_updated": "2026-03-19T18:01:00Z"
+    },
+    {
+      "game_id": "nba_20260320_lal_bos",
+      "sport": "NBA",
+      "home_team": "Boston Celtics",
+      "away_team": "Los Angeles Lakers",
+      "commence_time": "2026-03-20T00:10:00Z",
+      "sportsbook": "Pinnacle",
+      "markets": {
+        "spread": {
+          "home_line": -5.5,
+          "home_odds": -111,
+          "away_line": 5.5,
+          "away_odds": -112
+        },
+        "moneyline": {
+          "home_odds": -211,
+          "away_odds": 181
+        },
+        "total": {
+          "line": 219.5,
+          "over_odds": -108,
+          "under_odds": -108
+        }
+      },
+      "last_updated": "2026-03-19T18:00:00Z"
+    },
+    {
+      "game_id": "nba_20260320_lal_bos",
+      "sport": "NBA",
+      "home_team": "Boston Celtics",
+      "away_team": "Los Angeles Lakers",
+      "commence_time": "2026-03-20T00:10:00Z",
+      "sportsbook": "BetRivers",
+      "markets": {
+        "spread": {
+          "home_line": -6.0,
+          "home_odds": -111,
+          "away_line": 6.0,
+          "away_odds": -113
+        },
+        "moneyline": {
+          "home_odds": -218,
+          "away_odds": 185
+        },
+        "total": {
+          "line": 219.5,
+          "over_odds": -110,
+          "under_odds": -111
+        }
+      },
+      "last_updated": "2026-03-19T17:58:00Z"
+    },
+    {
+      "game_id": "nba_20260320_gsw_nyk",
+      "sport": "NBA",
+      "home_team": "New York Knicks",
+      "away_team": "Golden State Warriors",
+      "commence_time": "2026-03-20T00:40:00Z",
+      "sportsbook": "DraftKings",
+      "markets": {
+        "spread": {
+          "home_line": -3.0,
+          "home_odds": -117,
+          "away_line": 3.0,
+          "away_odds": -111
+        },
+        "moneyline": {
+          "home_odds": -166,
+          "away_odds": 130
+        },
+        "total": {
+          "line": 224.0,
+          "over_odds": -106,
+          "under_odds": -110
+        }
+      },
+      "last_updated": "2026-03-19T18:37:00Z"
+    },
+    {
+      "game_id": "nba_20260320_gsw_nyk",
+      "sport": "NBA",
+      "home_team": "New York Knicks",
+      "away_team": "Golden State Warriors",
+      "commence_time": "2026-03-20T00:40:00Z",
+      "sportsbook": "FanDuel",
+      "markets": {
+        "spread": {
+          "home_line": -2.5,
+          "home_odds": -106,
+          "away_line": 2.5,
+          "away_odds": -104
+        },
+        "moneyline": {
+          "home_odds": -163,
+          "away_odds": 128
+        },
+        "total": {
+          "line": 224.5,
+          "over_odds": -114,
+          "under_odds": -111
+        }
+      },
+      "last_updated": "2026-03-19T18:06:00Z"
+    },
+    {
+      "game_id": "nba_20260320_gsw_nyk",
+      "sport": "NBA",
+      "home_team": "New York Knicks",
+      "away_team": "Golden State Warriors",
+      "commence_time": "2026-03-20T00:40:00Z",
+      "sportsbook": "BetMGM",
+      "markets": {
+        "spread": {
+          "home_line": -3.0,
+          "home_odds": -105,
+          "away_line": 3.0,
+          "away_odds": -106
+        },
+        "moneyline": {
+          "home_odds": -156,
+          "away_odds": 127
+        },
+        "total": {
+          "line": 224.0,
+          "over_odds": -114,
+          "under_odds": -102
+        }
+      },
+      "last_updated": "2026-03-19T18:10:00Z"
+    },
+    {
+      "game_id": "nba_20260320_gsw_nyk",
+      "sport": "NBA",
+      "home_team": "New York Knicks",
+      "away_team": "Golden State Warriors",
+      "commence_time": "2026-03-20T00:40:00Z",
+      "sportsbook": "Caesars",
+      "markets": {
+        "spread": {
+          "home_line": -3.5,
+          "home_odds": -114,
+          "away_line": 3.5,
+          "away_odds": -113
+        },
+        "moneyline": {
+          "home_odds": -146,
+          "away_odds": 133
+        },
+        "total": {
+          "line": 224.0,
+          "over_odds": -116,
+          "under_odds": -106
+        }
+      },
+      "last_updated": "2026-03-19T18:17:00Z"
+    },
+    {
+      "game_id": "nba_20260320_gsw_nyk",
+      "sport": "NBA",
+      "home_team": "New York Knicks",
+      "away_team": "Golden State Warriors",
+      "commence_time": "2026-03-20T00:40:00Z",
+      "sportsbook": "PointsBet",
+      "markets": {
+        "spread": {
+          "home_line": -3.0,
+          "home_odds": -110,
+          "away_line": 3.0,
+          "away_odds": -118
+        },
+        "moneyline": {
+          "home_odds": -146,
+          "away_odds": 143
+        },
+        "total": {
+          "line": 224.0,
+          "over_odds": -115,
+          "under_odds": -110
+        }
+      },
+      "last_updated": "2026-03-19T18:00:00Z"
+    },
+    {
+      "game_id": "nba_20260320_gsw_nyk",
+      "sport": "NBA",
+      "home_team": "New York Knicks",
+      "away_team": "Golden State Warriors",
+      "commence_time": "2026-03-20T00:40:00Z",
+      "sportsbook": "bet365",
+      "markets": {
+        "spread": {
+          "home_line": -3.0,
+          "home_odds": -113,
+          "away_line": 3.0,
+          "away_odds": -104
+        },
+        "moneyline": {
+          "home_odds": -167,
+          "away_odds": 143
+        },
+        "total": {
+          "line": 224.0,
+          "over_odds": -110,
+          "under_odds": -102
+        }
+      },
+      "last_updated": "2026-03-19T18:30:00Z"
+    },
+    {
+      "game_id": "nba_20260320_gsw_nyk",
+      "sport": "NBA",
+      "home_team": "New York Knicks",
+      "away_team": "Golden State Warriors",
+      "commence_time": "2026-03-20T00:40:00Z",
+      "sportsbook": "Pinnacle",
+      "markets": {
+        "spread": {
+          "home_line": -3.0,
+          "home_odds": -108,
+          "away_line": 3.0,
+          "away_odds": -111
+        },
+        "moneyline": {
+          "home_odds": -147,
+          "away_odds": 136
+        },
+        "total": {
+          "line": 224.0,
+          "over_odds": -109,
+          "under_odds": -112
+        }
+      },
+      "last_updated": "2026-03-19T18:32:00Z"
+    },
+    {
+      "game_id": "nba_20260320_gsw_nyk",
+      "sport": "NBA",
+      "home_team": "New York Knicks",
+      "away_team": "Golden State Warriors",
+      "commence_time": "2026-03-20T00:40:00Z",
+      "sportsbook": "BetRivers",
+      "markets": {
+        "spread": {
+          "home_line": -3.0,
+          "home_odds": -108,
+          "away_line": 3.0,
+          "away_odds": -103
+        },
+        "moneyline": {
+          "home_odds": -167,
+          "away_odds": 123
+        },
+        "total": {
+          "line": 223.5,
+          "over_odds": -107,
+          "under_odds": -109
+        }
+      },
+      "last_updated": "2026-03-19T18:26:00Z"
+    },
+    {
+      "game_id": "nba_20260320_mia_phi",
+      "sport": "NBA",
+      "home_team": "Philadelphia 76ers",
+      "away_team": "Miami Heat",
+      "commence_time": "2026-03-20T01:10:00Z",
+      "sportsbook": "DraftKings",
+      "markets": {
+        "spread": {
+          "home_line": -2.0,
+          "home_odds": -116,
+          "away_line": 2.0,
+          "away_odds": -114
+        },
+        "moneyline": {
+          "home_odds": -133,
+          "away_odds": 114
+        },
+        "total": {
+          "line": 211.5,
+          "over_odds": -103,
+          "under_odds": -113
+        }
+      },
+      "last_updated": "2026-03-19T18:25:00Z"
+    },
+    {
+      "game_id": "nba_20260320_mia_phi",
+      "sport": "NBA",
+      "home_team": "Philadelphia 76ers",
+      "away_team": "Miami Heat",
+      "commence_time": "2026-03-20T01:10:00Z",
+      "sportsbook": "FanDuel",
+      "markets": {
+        "spread": {
+          "home_line": -1.5,
+          "home_odds": -112,
+          "away_line": 1.5,
+          "away_odds": -112
+        },
+        "moneyline": {
+          "home_odds": -115,
+          "away_odds": 102
+        },
+        "total": {
+          "line": 211.0,
+          "over_odds": -106,
+          "under_odds": -107
+        }
+      },
+      "last_updated": "2026-03-19T18:13:00Z"
+    },
+    {
+      "game_id": "nba_20260320_mia_phi",
+      "sport": "NBA",
+      "home_team": "Philadelphia 76ers",
+      "away_team": "Miami Heat",
+      "commence_time": "2026-03-20T01:10:00Z",
+      "sportsbook": "BetMGM",
+      "markets": {
+        "spread": {
+          "home_line": -1.5,
+          "home_odds": -111,
+          "away_line": 1.5,
+          "away_odds": -111
+        },
+        "moneyline": {
+          "home_odds": -135,
+          "away_odds": 103
+        },
+        "total": {
+          "line": 211.0,
+          "over_odds": -118,
+          "under_odds": -111
+        }
+      },
+      "last_updated": "2026-03-19T18:04:00Z"
+    },
+    {
+      "game_id": "nba_20260320_mia_phi",
+      "sport": "NBA",
+      "home_team": "Philadelphia 76ers",
+      "away_team": "Miami Heat",
+      "commence_time": "2026-03-20T01:10:00Z",
+      "sportsbook": "Caesars",
+      "markets": {
+        "spread": {
+          "home_line": -2.0,
+          "home_odds": -117,
+          "away_line": 2.0,
+          "away_odds": -111
+        },
+        "moneyline": {
+          "home_odds": -135,
+          "away_odds": 94
+        },
+        "total": {
+          "line": 211.0,
+          "over_odds": -108,
+          "under_odds": -116
+        }
+      },
+      "last_updated": "2026-03-19T18:09:00Z"
+    },
+    {
+      "game_id": "nba_20260320_mia_phi",
+      "sport": "NBA",
+      "home_team": "Philadelphia 76ers",
+      "away_team": "Miami Heat",
+      "commence_time": "2026-03-20T01:10:00Z",
+      "sportsbook": "PointsBet",
+      "markets": {
+        "spread": {
+          "home_line": -1.0,
+          "home_odds": -103,
+          "away_line": 1.0,
+          "away_odds": -111
+        },
+        "moneyline": {
+          "home_odds": -122,
+          "away_odds": 106
+        },
+        "total": {
+          "line": 210.5,
+          "over_odds": -112,
+          "under_odds": -115
+        }
+      },
+      "last_updated": "2026-03-19T18:35:00Z"
+    },
+    {
+      "game_id": "nba_20260320_mia_phi",
+      "sport": "NBA",
+      "home_team": "Philadelphia 76ers",
+      "away_team": "Miami Heat",
+      "commence_time": "2026-03-20T01:10:00Z",
+      "sportsbook": "bet365",
+      "markets": {
+        "spread": {
+          "home_line": -1.5,
+          "home_odds": -105,
+          "away_line": 1.5,
+          "away_odds": -104
+        },
+        "moneyline": {
+          "home_odds": -114,
+          "away_odds": 94
+        },
+        "total": {
+          "line": 211.0,
+          "over_odds": -115,
+          "under_odds": -117
+        }
+      },
+      "last_updated": "2026-03-19T18:16:00Z"
+    },
+    {
+      "game_id": "nba_20260320_mia_phi",
+      "sport": "NBA",
+      "home_team": "Philadelphia 76ers",
+      "away_team": "Miami Heat",
+      "commence_time": "2026-03-20T01:10:00Z",
+      "sportsbook": "Pinnacle",
+      "markets": {
+        "spread": {
+          "home_line": -1.5,
+          "home_odds": -113,
+          "away_line": 1.5,
+          "away_odds": -112
+        },
+        "moneyline": {
+          "home_odds": -131,
+          "away_odds": 99
+        },
+        "total": {
+          "line": 211.0,
+          "over_odds": -109,
+          "under_odds": -110
+        }
+      },
+      "last_updated": "2026-03-19T18:33:00Z"
+    },
+    {
+      "game_id": "nba_20260320_mia_phi",
+      "sport": "NBA",
+      "home_team": "Philadelphia 76ers",
+      "away_team": "Miami Heat",
+      "commence_time": "2026-03-20T01:10:00Z",
+      "sportsbook": "BetRivers",
+      "markets": {
+        "spread": {
+          "home_line": -1.5,
+          "home_odds": -111,
+          "away_line": 1.5,
+          "away_odds": -116
+        },
+        "moneyline": {
+          "home_odds": -123,
+          "away_odds": 110
+        },
+        "total": {
+          "line": 211.0,
+          "over_odds": -115,
+          "under_odds": -117
+        }
+      },
+      "last_updated": "2026-03-19T18:00:00Z"
+    },
+    {
+      "game_id": "nba_20260320_den_mil",
+      "sport": "NBA",
+      "home_team": "Milwaukee Bucks",
+      "away_team": "Denver Nuggets",
+      "commence_time": "2026-03-20T01:40:00Z",
+      "sportsbook": "DraftKings",
+      "markets": {
+        "spread": {
+          "home_line": -2.0,
+          "home_odds": -116,
+          "away_line": 2.0,
+          "away_odds": -111
+        },
+        "moneyline": {
+          "home_odds": -137,
+          "away_odds": 111
+        },
+        "total": {
+          "line": 228.5,
+          "over_odds": -103,
+          "under_odds": -103
+        }
+      },
+      "last_updated": "2026-03-19T18:28:00Z"
+    },
+    {
+      "game_id": "nba_20260320_den_mil",
+      "sport": "NBA",
+      "home_team": "Milwaukee Bucks",
+      "away_team": "Denver Nuggets",
+      "commence_time": "2026-03-20T01:40:00Z",
+      "sportsbook": "FanDuel",
+      "markets": {
+        "spread": {
+          "home_line": -2.0,
+          "home_odds": -113,
+          "away_line": 2.0,
+          "away_odds": -106
+        },
+        "moneyline": {
+          "home_odds": -142,
+          "away_odds": 110
+        },
+        "total": {
+          "line": 228.5,
+          "over_odds": -110,
+          "under_odds": -104
+        }
+      },
+      "last_updated": "2026-03-19T18:23:00Z"
+    },
+    {
+      "game_id": "nba_20260320_den_mil",
+      "sport": "NBA",
+      "home_team": "Milwaukee Bucks",
+      "away_team": "Denver Nuggets",
+      "commence_time": "2026-03-20T01:40:00Z",
+      "sportsbook": "BetMGM",
+      "markets": {
+        "spread": {
+          "home_line": -2.0,
+          "home_odds": -103,
+          "away_line": 2.0,
+          "away_odds": -114
+        },
+        "moneyline": {
+          "home_odds": -195,
+          "away_odds": 165
+        },
+        "total": {
+          "line": 228.5,
+          "over_odds": -112,
+          "under_odds": -117
+        }
+      },
+      "last_updated": "2026-03-19T18:04:00Z"
+    },
+    {
+      "game_id": "nba_20260320_den_mil",
+      "sport": "NBA",
+      "home_team": "Milwaukee Bucks",
+      "away_team": "Denver Nuggets",
+      "commence_time": "2026-03-20T01:40:00Z",
+      "sportsbook": "Caesars",
+      "markets": {
+        "spread": {
+          "home_line": -2.0,
+          "home_odds": -117,
+          "away_line": 2.0,
+          "away_odds": -117
+        },
+        "moneyline": {
+          "home_odds": -124,
+          "away_odds": 113
+        },
+        "total": {
+          "line": 229.0,
+          "over_odds": -102,
+          "under_odds": -102
+        }
+      },
+      "last_updated": "2026-03-19T18:31:00Z"
+    },
+    {
+      "game_id": "nba_20260320_den_mil",
+      "sport": "NBA",
+      "home_team": "Milwaukee Bucks",
+      "away_team": "Denver Nuggets",
+      "commence_time": "2026-03-20T01:40:00Z",
+      "sportsbook": "PointsBet",
+      "markets": {
+        "spread": {
+          "home_line": -2.5,
+          "home_odds": -116,
+          "away_line": 2.5,
+          "away_odds": -116
+        },
+        "moneyline": {
+          "home_odds": -121,
+          "away_odds": 105
+        },
+        "total": {
+          "line": 228.5,
+          "over_odds": -106,
+          "under_odds": -115
+        }
+      },
+      "last_updated": "2026-03-19T18:05:00Z"
+    },
+    {
+      "game_id": "nba_20260320_den_mil",
+      "sport": "NBA",
+      "home_team": "Milwaukee Bucks",
+      "away_team": "Denver Nuggets",
+      "commence_time": "2026-03-20T01:40:00Z",
+      "sportsbook": "bet365",
+      "markets": {
+        "spread": {
+          "home_line": -2.5,
+          "home_odds": -105,
+          "away_line": 2.5,
+          "away_odds": -102
+        },
+        "moneyline": {
+          "home_odds": -132,
+          "away_odds": 106
+        },
+        "total": {
+          "line": 228.5,
+          "over_odds": -112,
+          "under_odds": -108
+        }
+      },
+      "last_updated": "2026-03-19T18:26:00Z"
+    },
+    {
+      "game_id": "nba_20260320_den_mil",
+      "sport": "NBA",
+      "home_team": "Milwaukee Bucks",
+      "away_team": "Denver Nuggets",
+      "commence_time": "2026-03-20T01:40:00Z",
+      "sportsbook": "Pinnacle",
+      "markets": {
+        "spread": {
+          "home_line": -2.0,
+          "home_odds": -108,
+          "away_line": 2.0,
+          "away_odds": -111
+        },
+        "moneyline": {
+          "home_odds": -128,
+          "away_odds": 108
+        },
+        "total": {
+          "line": 228.5,
+          "over_odds": -107,
+          "under_odds": -113
+        }
+      },
+      "last_updated": "2026-03-19T18:41:00Z"
+    },
+    {
+      "game_id": "nba_20260320_den_mil",
+      "sport": "NBA",
+      "home_team": "Milwaukee Bucks",
+      "away_team": "Denver Nuggets",
+      "commence_time": "2026-03-20T01:40:00Z",
+      "sportsbook": "BetRivers",
+      "markets": {
+        "spread": {
+          "home_line": -2.0,
+          "home_odds": -115,
+          "away_line": 2.0,
+          "away_odds": -116
+        },
+        "moneyline": {
+          "home_odds": -125,
+          "away_odds": 104
+        },
+        "total": {
+          "line": 228.5,
+          "over_odds": -102,
+          "under_odds": -110
+        }
+      },
+      "last_updated": "2026-03-19T18:33:00Z"
+    },
+    {
+      "game_id": "nba_20260320_dal_phx",
+      "sport": "NBA",
+      "home_team": "Phoenix Suns",
+      "away_team": "Dallas Mavericks",
+      "commence_time": "2026-03-20T02:10:00Z",
+      "sportsbook": "DraftKings",
+      "markets": {
+        "spread": {
+          "home_line": -4.0,
+          "home_odds": -111,
+          "away_line": 4.0,
+          "away_odds": -107
+        },
+        "moneyline": {
+          "home_odds": -183,
+          "away_odds": 148
+        },
+        "total": {
+          "line": 226.0,
+          "over_odds": -104,
+          "under_odds": -109
+        }
+      },
+      "last_updated": "2026-03-19T18:02:00Z"
+    },
+    {
+      "game_id": "nba_20260320_dal_phx",
+      "sport": "NBA",
+      "home_team": "Phoenix Suns",
+      "away_team": "Dallas Mavericks",
+      "commence_time": "2026-03-20T02:10:00Z",
+      "sportsbook": "FanDuel",
+      "markets": {
+        "spread": {
+          "home_line": -4.0,
+          "home_odds": -102,
+          "away_line": 4.0,
+          "away_odds": -118
+        },
+        "moneyline": {
+          "home_odds": -171,
+          "away_odds": 160
+        },
+        "total": {
+          "line": 226.0,
+          "over_odds": -109,
+          "under_odds": -115
+        }
+      },
+      "last_updated": "2026-03-19T18:33:00Z"
+    },
+    {
+      "game_id": "nba_20260320_dal_phx",
+      "sport": "NBA",
+      "home_team": "Phoenix Suns",
+      "away_team": "Dallas Mavericks",
+      "commence_time": "2026-03-20T02:10:00Z",
+      "sportsbook": "BetMGM",
+      "markets": {
+        "spread": {
+          "home_line": -4.0,
+          "home_odds": -114,
+          "away_line": 4.0,
+          "away_odds": -110
+        },
+        "moneyline": {
+          "home_odds": -183,
+          "away_odds": 162
+        },
+        "total": {
+          "line": 226.0,
+          "over_odds": -112,
+          "under_odds": -108
+        }
+      },
+      "last_updated": "2026-03-19T18:28:00Z"
+    },
+    {
+      "game_id": "nba_20260320_dal_phx",
+      "sport": "NBA",
+      "home_team": "Phoenix Suns",
+      "away_team": "Dallas Mavericks",
+      "commence_time": "2026-03-20T02:10:00Z",
+      "sportsbook": "Caesars",
+      "markets": {
+        "spread": {
+          "home_line": -4.0,
+          "home_odds": -102,
+          "away_line": 4.0,
+          "away_odds": -103
+        },
+        "moneyline": {
+          "home_odds": -184,
+          "away_odds": 144
+        },
+        "total": {
+          "line": 226.0,
+          "over_odds": -116,
+          "under_odds": -105
+        }
+      },
+      "last_updated": "2026-03-19T18:24:00Z"
+    },
+    {
+      "game_id": "nba_20260320_dal_phx",
+      "sport": "NBA",
+      "home_team": "Phoenix Suns",
+      "away_team": "Dallas Mavericks",
+      "commence_time": "2026-03-20T02:10:00Z",
+      "sportsbook": "PointsBet",
+      "markets": {
+        "spread": {
+          "home_line": -3.5,
+          "home_odds": -110,
+          "away_line": 3.5,
+          "away_odds": -113
+        },
+        "moneyline": {
+          "home_odds": -169,
+          "away_odds": 157
+        },
+        "total": {
+          "line": 226.0,
+          "over_odds": -105,
+          "under_odds": -118
+        }
+      },
+      "last_updated": "2026-03-19T18:34:00Z"
+    },
+    {
+      "game_id": "nba_20260320_dal_phx",
+      "sport": "NBA",
+      "home_team": "Phoenix Suns",
+      "away_team": "Dallas Mavericks",
+      "commence_time": "2026-03-20T02:10:00Z",
+      "sportsbook": "bet365",
+      "markets": {
+        "spread": {
+          "home_line": -4.5,
+          "home_odds": -107,
+          "away_line": 4.5,
+          "away_odds": -114
+        },
+        "moneyline": {
+          "home_odds": -179,
+          "away_odds": 147
+        },
+        "total": {
+          "line": 226.0,
+          "over_odds": -117,
+          "under_odds": -109
+        }
+      },
+      "last_updated": "2026-03-19T18:18:00Z"
+    },
+    {
+      "game_id": "nba_20260320_dal_phx",
+      "sport": "NBA",
+      "home_team": "Phoenix Suns",
+      "away_team": "Dallas Mavericks",
+      "commence_time": "2026-03-20T02:10:00Z",
+      "sportsbook": "Pinnacle",
+      "markets": {
+        "spread": {
+          "home_line": -4.0,
+          "home_odds": -107,
+          "away_line": 4.0,
+          "away_odds": -113
+        },
+        "moneyline": {
+          "home_odds": -181,
+          "away_odds": 149
+        },
+        "total": {
+          "line": 226.0,
+          "over_odds": -108,
+          "under_odds": -112
+        }
+      },
+      "last_updated": "2026-03-19T17:59:00Z"
+    },
+    {
+      "game_id": "nba_20260320_dal_phx",
+      "sport": "NBA",
+      "home_team": "Phoenix Suns",
+      "away_team": "Dallas Mavericks",
+      "commence_time": "2026-03-20T02:10:00Z",
+      "sportsbook": "BetRivers",
+      "markets": {
+        "spread": {
+          "home_line": -3.5,
+          "home_odds": -114,
+          "away_line": 3.5,
+          "away_odds": -111
+        },
+        "moneyline": {
+          "home_odds": -187,
+          "away_odds": 148
+        },
+        "total": {
+          "line": 228.0,
+          "over_odds": -105,
+          "under_odds": -118
+        }
+      },
+      "last_updated": "2026-03-19T11:30:00Z"
+    },
+    {
+      "game_id": "nba_20260320_min_sac",
+      "sport": "NBA",
+      "home_team": "Sacramento Kings",
+      "away_team": "Minnesota Timberwolves",
+      "commence_time": "2026-03-20T02:40:00Z",
+      "sportsbook": "DraftKings",
+      "markets": {
+        "spread": {
+          "home_line": 1.5,
+          "home_odds": -105,
+          "away_line": -1.5,
+          "away_odds": -111
+        },
+        "moneyline": {
+          "home_odds": 101,
+          "away_odds": -112
+        },
+        "total": {
+          "line": 221.5,
+          "over_odds": -115,
+          "under_odds": -106
+        }
+      },
+      "last_updated": "2026-03-19T18:39:00Z"
+    },
+    {
+      "game_id": "nba_20260320_min_sac",
+      "sport": "NBA",
+      "home_team": "Sacramento Kings",
+      "away_team": "Minnesota Timberwolves",
+      "commence_time": "2026-03-20T02:40:00Z",
+      "sportsbook": "FanDuel",
+      "markets": {
+        "spread": {
+          "home_line": 1.5,
+          "home_odds": -107,
+          "away_line": -1.5,
+          "away_odds": -109
+        },
+        "moneyline": {
+          "home_odds": 100,
+          "away_odds": -130
+        },
+        "total": {
+          "line": 222.0,
+          "over_odds": -118,
+          "under_odds": -112
+        }
+      },
+      "last_updated": "2026-03-19T18:16:00Z"
+    },
+    {
+      "game_id": "nba_20260320_min_sac",
+      "sport": "NBA",
+      "home_team": "Sacramento Kings",
+      "away_team": "Minnesota Timberwolves",
+      "commence_time": "2026-03-20T02:40:00Z",
+      "sportsbook": "BetMGM",
+      "markets": {
+        "spread": {
+          "home_line": 1.5,
+          "home_odds": -110,
+          "away_line": -1.5,
+          "away_odds": -107
+        },
+        "moneyline": {
+          "home_odds": 113,
+          "away_odds": -121
+        },
+        "total": {
+          "line": 221.5,
+          "over_odds": -106,
+          "under_odds": -108
+        }
+      },
+      "last_updated": "2026-03-19T18:40:00Z"
+    },
+    {
+      "game_id": "nba_20260320_min_sac",
+      "sport": "NBA",
+      "home_team": "Sacramento Kings",
+      "away_team": "Minnesota Timberwolves",
+      "commence_time": "2026-03-20T02:40:00Z",
+      "sportsbook": "Caesars",
+      "markets": {
+        "spread": {
+          "home_line": 2.0,
+          "home_odds": -117,
+          "away_line": -2.0,
+          "away_odds": -115
+        },
+        "moneyline": {
+          "home_odds": 112,
+          "away_odds": -124
+        },
+        "total": {
+          "line": 222.0,
+          "over_odds": -107,
+          "under_odds": -108
+        }
+      },
+      "last_updated": "2026-03-19T18:14:00Z"
+    },
+    {
+      "game_id": "nba_20260320_min_sac",
+      "sport": "NBA",
+      "home_team": "Sacramento Kings",
+      "away_team": "Minnesota Timberwolves",
+      "commence_time": "2026-03-20T02:40:00Z",
+      "sportsbook": "PointsBet",
+      "markets": {
+        "spread": {
+          "home_line": 1.5,
+          "home_odds": -106,
+          "away_line": -1.5,
+          "away_odds": -112
+        },
+        "moneyline": {
+          "home_odds": 101,
+          "away_odds": -136
+        },
+        "total": {
+          "line": 221.5,
+          "over_odds": -105,
+          "under_odds": -118
+        }
+      },
+      "last_updated": "2026-03-19T18:08:00Z"
+    },
+    {
+      "game_id": "nba_20260320_min_sac",
+      "sport": "NBA",
+      "home_team": "Sacramento Kings",
+      "away_team": "Minnesota Timberwolves",
+      "commence_time": "2026-03-20T02:40:00Z",
+      "sportsbook": "bet365",
+      "markets": {
+        "spread": {
+          "home_line": 1.5,
+          "home_odds": -112,
+          "away_line": -1.5,
+          "away_odds": -107
+        },
+        "moneyline": {
+          "home_odds": 106,
+          "away_odds": -135
+        },
+        "total": {
+          "line": 221.5,
+          "over_odds": -108,
+          "under_odds": -108
+        }
+      },
+      "last_updated": "2026-03-19T17:59:00Z"
+    },
+    {
+      "game_id": "nba_20260320_min_sac",
+      "sport": "NBA",
+      "home_team": "Sacramento Kings",
+      "away_team": "Minnesota Timberwolves",
+      "commence_time": "2026-03-20T02:40:00Z",
+      "sportsbook": "Pinnacle",
+      "markets": {
+        "spread": {
+          "home_line": 1.5,
+          "home_odds": -111,
+          "away_line": -1.5,
+          "away_odds": -109
+        },
+        "moneyline": {
+          "home_odds": 118,
+          "away_odds": -116
+        },
+        "total": {
+          "line": 221.5,
+          "over_odds": -110,
+          "under_odds": -111
+        }
+      },
+      "last_updated": "2026-03-19T18:16:00Z"
+    },
+    {
+      "game_id": "nba_20260320_min_sac",
+      "sport": "NBA",
+      "home_team": "Sacramento Kings",
+      "away_team": "Minnesota Timberwolves",
+      "commence_time": "2026-03-20T02:40:00Z",
+      "sportsbook": "BetRivers",
+      "markets": {
+        "spread": {
+          "home_line": 1.5,
+          "home_odds": -112,
+          "away_line": -1.5,
+          "away_odds": -105
+        },
+        "moneyline": {
+          "home_odds": 114,
+          "away_odds": -125
+        },
+        "total": {
+          "line": 221.5,
+          "over_odds": -113,
+          "under_odds": -109
+        }
+      },
+      "last_updated": "2026-03-19T18:16:00Z"
+    },
+    {
+      "game_id": "nba_20260320_cle_okc",
+      "sport": "NBA",
+      "home_team": "Oklahoma City Thunder",
+      "away_team": "Cleveland Cavaliers",
+      "commence_time": "2026-03-20T03:10:00Z",
+      "sportsbook": "DraftKings",
+      "markets": {
+        "spread": {
+          "home_line": -6.5,
+          "home_odds": -112,
+          "away_line": 6.5,
+          "away_odds": -105
+        },
+        "moneyline": {
+          "home_odds": -254,
+          "away_odds": 222
+        },
+        "total": {
+          "line": 215.5,
+          "over_odds": -108,
+          "under_odds": -104
+        }
+      },
+      "last_updated": "2026-03-19T18:13:00Z"
+    },
+    {
+      "game_id": "nba_20260320_cle_okc",
+      "sport": "NBA",
+      "home_team": "Oklahoma City Thunder",
+      "away_team": "Cleveland Cavaliers",
+      "commence_time": "2026-03-20T03:10:00Z",
+      "sportsbook": "FanDuel",
+      "markets": {
+        "spread": {
+          "home_line": -6.5,
+          "home_odds": -113,
+          "away_line": 6.5,
+          "away_odds": -116
+        },
+        "moneyline": {
+          "home_odds": -263,
+          "away_odds": 219
+        },
+        "total": {
+          "line": 215.5,
+          "over_odds": -108,
+          "under_odds": -116
+        }
+      },
+      "last_updated": "2026-03-19T18:26:00Z"
+    },
+    {
+      "game_id": "nba_20260320_cle_okc",
+      "sport": "NBA",
+      "home_team": "Oklahoma City Thunder",
+      "away_team": "Cleveland Cavaliers",
+      "commence_time": "2026-03-20T03:10:00Z",
+      "sportsbook": "BetMGM",
+      "markets": {
+        "spread": {
+          "home_line": -6.5,
+          "home_odds": -114,
+          "away_line": 6.5,
+          "away_odds": -118
+        },
+        "moneyline": {
+          "home_odds": -271,
+          "away_odds": 210
+        },
+        "total": {
+          "line": 214.5,
+          "over_odds": -103,
+          "under_odds": -116
+        }
+      },
+      "last_updated": "2026-03-19T18:12:00Z"
+    },
+    {
+      "game_id": "nba_20260320_cle_okc",
+      "sport": "NBA",
+      "home_team": "Oklahoma City Thunder",
+      "away_team": "Cleveland Cavaliers",
+      "commence_time": "2026-03-20T03:10:00Z",
+      "sportsbook": "Caesars",
+      "markets": {
+        "spread": {
+          "home_line": -6.5,
+          "home_odds": -112,
+          "away_line": 6.5,
+          "away_odds": -106
+        },
+        "moneyline": {
+          "home_odds": -257,
+          "away_odds": 215
+        },
+        "total": {
+          "line": 215.0,
+          "over_odds": -111,
+          "under_odds": -114
+        }
+      },
+      "last_updated": "2026-03-19T18:00:00Z"
+    },
+    {
+      "game_id": "nba_20260320_cle_okc",
+      "sport": "NBA",
+      "home_team": "Oklahoma City Thunder",
+      "away_team": "Cleveland Cavaliers",
+      "commence_time": "2026-03-20T03:10:00Z",
+      "sportsbook": "PointsBet",
+      "markets": {
+        "spread": {
+          "home_line": -6.5,
+          "home_odds": -115,
+          "away_line": 6.5,
+          "away_odds": -105
+        },
+        "moneyline": {
+          "home_odds": -265,
+          "away_odds": 208
+        },
+        "total": {
+          "line": 215.0,
+          "over_odds": -102,
+          "under_odds": -104
+        }
+      },
+      "last_updated": "2026-03-19T18:38:00Z"
+    },
+    {
+      "game_id": "nba_20260320_cle_okc",
+      "sport": "NBA",
+      "home_team": "Oklahoma City Thunder",
+      "away_team": "Cleveland Cavaliers",
+      "commence_time": "2026-03-20T03:10:00Z",
+      "sportsbook": "bet365",
+      "markets": {
+        "spread": {
+          "home_line": -6.5,
+          "home_odds": -115,
+          "away_line": 6.5,
+          "away_odds": -104
+        },
+        "moneyline": {
+          "home_odds": -268,
+          "away_odds": 217
+        },
+        "total": {
+          "line": 215.0,
+          "over_odds": -102,
+          "under_odds": -108
+        }
+      },
+      "last_updated": "2026-03-19T18:13:00Z"
+    },
+    {
+      "game_id": "nba_20260320_cle_okc",
+      "sport": "NBA",
+      "home_team": "Oklahoma City Thunder",
+      "away_team": "Cleveland Cavaliers",
+      "commence_time": "2026-03-20T03:10:00Z",
+      "sportsbook": "Pinnacle",
+      "markets": {
+        "spread": {
+          "home_line": -6.5,
+          "home_odds": -109,
+          "away_line": 6.5,
+          "away_odds": -110
+        },
+        "moneyline": {
+          "home_odds": -255,
+          "away_odds": 217
+        },
+        "total": {
+          "line": 215.0,
+          "over_odds": -112,
+          "under_odds": -108
+        }
+      },
+      "last_updated": "2026-03-19T18:11:00Z"
+    },
+    {
+      "game_id": "nba_20260320_cle_okc",
+      "sport": "NBA",
+      "home_team": "Oklahoma City Thunder",
+      "away_team": "Cleveland Cavaliers",
+      "commence_time": "2026-03-20T03:10:00Z",
+      "sportsbook": "BetRivers",
+      "markets": {
+        "spread": {
+          "home_line": -6.5,
+          "home_odds": -110,
+          "away_line": 6.5,
+          "away_odds": -102
+        },
+        "moneyline": {
+          "home_odds": -257,
+          "away_odds": 223
+        },
+        "total": {
+          "line": 215.0,
+          "over_odds": -111,
+          "under_odds": -110
+        }
+      },
+      "last_updated": "2026-03-19T18:13:00Z"
+    },
+    {
+      "game_id": "nba_20260320_chi_tor",
+      "sport": "NBA",
+      "home_team": "Toronto Raptors",
+      "away_team": "Chicago Bulls",
+      "commence_time": "2026-03-20T03:40:00Z",
+      "sportsbook": "DraftKings",
+      "markets": {
+        "spread": {
+          "home_line": 3.0,
+          "home_odds": -108,
+          "away_line": -3.0,
+          "away_odds": -116
+        },
+        "moneyline": {
+          "home_odds": 112,
+          "away_odds": -148
+        },
+        "total": {
+          "line": 218.5,
+          "over_odds": -111,
+          "under_odds": -106
+        }
+      },
+      "last_updated": "2026-03-19T17:57:00Z"
+    },
+    {
+      "game_id": "nba_20260320_chi_tor",
+      "sport": "NBA",
+      "home_team": "Toronto Raptors",
+      "away_team": "Chicago Bulls",
+      "commence_time": "2026-03-20T03:40:00Z",
+      "sportsbook": "FanDuel",
+      "markets": {
+        "spread": {
+          "home_line": 2.0,
+          "home_odds": -108,
+          "away_line": -2.0,
+          "away_odds": -104
+        },
+        "moneyline": {
+          "home_odds": 121,
+          "away_odds": -151
+        },
+        "total": {
+          "line": 218.5,
+          "over_odds": -112,
+          "under_odds": -105
+        }
+      },
+      "last_updated": "2026-03-19T18:17:00Z"
+    },
+    {
+      "game_id": "nba_20260320_chi_tor",
+      "sport": "NBA",
+      "home_team": "Toronto Raptors",
+      "away_team": "Chicago Bulls",
+      "commence_time": "2026-03-20T03:40:00Z",
+      "sportsbook": "BetMGM",
+      "markets": {
+        "spread": {
+          "home_line": 2.5,
+          "home_odds": -118,
+          "away_line": -2.5,
+          "away_odds": -106
+        },
+        "moneyline": {
+          "home_odds": 123,
+          "away_odds": -152
+        },
+        "total": {
+          "line": 218.0,
+          "over_odds": -107,
+          "under_odds": -109
+        }
+      },
+      "last_updated": "2026-03-19T18:17:00Z"
+    },
+    {
+      "game_id": "nba_20260320_chi_tor",
+      "sport": "NBA",
+      "home_team": "Toronto Raptors",
+      "away_team": "Chicago Bulls",
+      "commence_time": "2026-03-20T03:40:00Z",
+      "sportsbook": "Caesars",
+      "markets": {
+        "spread": {
+          "home_line": 2.5,
+          "home_odds": -105,
+          "away_line": -2.5,
+          "away_odds": -111
+        },
+        "moneyline": {
+          "home_odds": 123,
+          "away_odds": -145
+        },
+        "total": {
+          "line": 218.0,
+          "over_odds": -110,
+          "under_odds": -105
+        }
+      },
+      "last_updated": "2026-03-19T18:10:00Z"
+    },
+    {
+      "game_id": "nba_20260320_chi_tor",
+      "sport": "NBA",
+      "home_team": "Toronto Raptors",
+      "away_team": "Chicago Bulls",
+      "commence_time": "2026-03-20T03:40:00Z",
+      "sportsbook": "PointsBet",
+      "markets": {
+        "spread": {
+          "home_line": 3.0,
+          "home_odds": -106,
+          "away_line": -3.0,
+          "away_odds": -113
+        },
+        "moneyline": {
+          "home_odds": 122,
+          "away_odds": -148
+        },
+        "total": {
+          "line": 218.0,
+          "over_odds": -118,
+          "under_odds": -106
+        }
+      },
+      "last_updated": "2026-03-19T18:04:00Z"
+    },
+    {
+      "game_id": "nba_20260320_chi_tor",
+      "sport": "NBA",
+      "home_team": "Toronto Raptors",
+      "away_team": "Chicago Bulls",
+      "commence_time": "2026-03-20T03:40:00Z",
+      "sportsbook": "bet365",
+      "markets": {
+        "spread": {
+          "home_line": 2.5,
+          "home_odds": -114,
+          "away_line": -2.5,
+          "away_odds": -104
+        },
+        "moneyline": {
+          "home_odds": 113,
+          "away_odds": -151
+        },
+        "total": {
+          "line": 218.5,
+          "over_odds": -110,
+          "under_odds": -106
+        }
+      },
+      "last_updated": "2026-03-19T18:21:00Z"
+    },
+    {
+      "game_id": "nba_20260320_chi_tor",
+      "sport": "NBA",
+      "home_team": "Toronto Raptors",
+      "away_team": "Chicago Bulls",
+      "commence_time": "2026-03-20T03:40:00Z",
+      "sportsbook": "Pinnacle",
+      "markets": {
+        "spread": {
+          "home_line": 2.5,
+          "home_odds": -107,
+          "away_line": -2.5,
+          "away_odds": -110
+        },
+        "moneyline": {
+          "home_odds": 116,
+          "away_odds": -128
+        },
+        "total": {
+          "line": 218.0,
+          "over_odds": -107,
+          "under_odds": -110
+        }
+      },
+      "last_updated": "2026-03-19T18:25:00Z"
+    },
+    {
+      "game_id": "nba_20260320_chi_tor",
+      "sport": "NBA",
+      "home_team": "Toronto Raptors",
+      "away_team": "Chicago Bulls",
+      "commence_time": "2026-03-20T03:40:00Z",
+      "sportsbook": "BetRivers",
+      "markets": {
+        "spread": {
+          "home_line": 2.5,
+          "home_odds": -117,
+          "away_line": -2.5,
+          "away_odds": -107
+        },
+        "moneyline": {
+          "home_odds": 115,
+          "away_odds": -132
+        },
+        "total": {
+          "line": 218.0,
+          "over_odds": -116,
+          "under_odds": -117
+        }
+      },
+      "last_updated": "2026-03-19T18:40:00Z"
+    },
+    {
+      "game_id": "nba_20260320_atl_cha",
+      "sport": "NBA",
+      "home_team": "Charlotte Hornets",
+      "away_team": "Atlanta Hawks",
+      "commence_time": "2026-03-20T04:10:00Z",
+      "sportsbook": "DraftKings",
+      "markets": {
+        "spread": {
+          "home_line": 3.5,
+          "home_odds": -114,
+          "away_line": -3.5,
+          "away_odds": -111
+        },
+        "moneyline": {
+          "home_odds": 132,
+          "away_odds": -162
+        },
+        "total": {
+          "line": 222.0,
+          "over_odds": -115,
+          "under_odds": -112
+        }
+      },
+      "last_updated": "2026-03-19T18:12:00Z"
+    },
+    {
+      "game_id": "nba_20260320_atl_cha",
+      "sport": "NBA",
+      "home_team": "Charlotte Hornets",
+      "away_team": "Atlanta Hawks",
+      "commence_time": "2026-03-20T04:10:00Z",
+      "sportsbook": "FanDuel",
+      "markets": {
+        "spread": {
+          "home_line": 3.5,
+          "home_odds": -113,
+          "away_line": -3.5,
+          "away_odds": -115
+        },
+        "moneyline": {
+          "home_odds": 152,
+          "away_odds": -172
+        },
+        "total": {
+          "line": 222.5,
+          "over_odds": -109,
+          "under_odds": -115
+        }
+      },
+      "last_updated": "2026-03-19T18:04:00Z"
+    },
+    {
+      "game_id": "nba_20260320_atl_cha",
+      "sport": "NBA",
+      "home_team": "Charlotte Hornets",
+      "away_team": "Atlanta Hawks",
+      "commence_time": "2026-03-20T04:10:00Z",
+      "sportsbook": "BetMGM",
+      "markets": {
+        "spread": {
+          "home_line": 4.0,
+          "home_odds": -106,
+          "away_line": -4.0,
+          "away_odds": -106
+        },
+        "moneyline": {
+          "home_odds": 150,
+          "away_odds": -171
+        },
+        "total": {
+          "line": 222.5,
+          "over_odds": -116,
+          "under_odds": -111
+        }
+      },
+      "last_updated": "2026-03-19T18:35:00Z"
+    },
+    {
+      "game_id": "nba_20260320_atl_cha",
+      "sport": "NBA",
+      "home_team": "Charlotte Hornets",
+      "away_team": "Atlanta Hawks",
+      "commence_time": "2026-03-20T04:10:00Z",
+      "sportsbook": "Caesars",
+      "markets": {
+        "spread": {
+          "home_line": 4.5,
+          "home_odds": -115,
+          "away_line": -4.5,
+          "away_odds": -117
+        },
+        "moneyline": {
+          "home_odds": 155,
+          "away_odds": -182
+        },
+        "total": {
+          "line": 222.5,
+          "over_odds": -105,
+          "under_odds": -107
+        }
+      },
+      "last_updated": "2026-03-19T08:00:00Z"
+    },
+    {
+      "game_id": "nba_20260320_atl_cha",
+      "sport": "NBA",
+      "home_team": "Charlotte Hornets",
+      "away_team": "Atlanta Hawks",
+      "commence_time": "2026-03-20T04:10:00Z",
+      "sportsbook": "PointsBet",
+      "markets": {
+        "spread": {
+          "home_line": 3.5,
+          "home_odds": -105,
+          "away_line": -3.5,
+          "away_odds": -103
+        },
+        "moneyline": {
+          "home_odds": 131,
+          "away_odds": -164
+        },
+        "total": {
+          "line": 222.5,
+          "over_odds": -107,
+          "under_odds": -104
+        }
+      },
+      "last_updated": "2026-03-19T18:32:00Z"
+    },
+    {
+      "game_id": "nba_20260320_atl_cha",
+      "sport": "NBA",
+      "home_team": "Charlotte Hornets",
+      "away_team": "Atlanta Hawks",
+      "commence_time": "2026-03-20T04:10:00Z",
+      "sportsbook": "bet365",
+      "markets": {
+        "spread": {
+          "home_line": 3.5,
+          "home_odds": -110,
+          "away_line": -3.5,
+          "away_odds": -103
+        },
+        "moneyline": {
+          "home_odds": 142,
+          "away_odds": -164
+        },
+        "total": {
+          "line": 222.5,
+          "over_odds": -110,
+          "under_odds": -108
+        }
+      },
+      "last_updated": "2026-03-19T18:26:00Z"
+    },
+    {
+      "game_id": "nba_20260320_atl_cha",
+      "sport": "NBA",
+      "home_team": "Charlotte Hornets",
+      "away_team": "Atlanta Hawks",
+      "commence_time": "2026-03-20T04:10:00Z",
+      "sportsbook": "Pinnacle",
+      "markets": {
+        "spread": {
+          "home_line": 3.5,
+          "home_odds": -110,
+          "away_line": -3.5,
+          "away_odds": -112
+        },
+        "moneyline": {
+          "home_odds": 152,
+          "away_odds": -163
+        },
+        "total": {
+          "line": 222.5,
+          "over_odds": -109,
+          "under_odds": -109
+        }
+      },
+      "last_updated": "2026-03-19T17:59:00Z"
+    },
+    {
+      "game_id": "nba_20260320_atl_cha",
+      "sport": "NBA",
+      "home_team": "Charlotte Hornets",
+      "away_team": "Atlanta Hawks",
+      "commence_time": "2026-03-20T04:10:00Z",
+      "sportsbook": "BetRivers",
+      "markets": {
+        "spread": {
+          "home_line": 3.5,
+          "home_odds": -113,
+          "away_line": -3.5,
+          "away_odds": -103
+        },
+        "moneyline": {
+          "home_odds": 134,
+          "away_odds": -166
+        },
+        "total": {
+          "line": 223.0,
+          "over_odds": -110,
+          "under_odds": -108
+        }
+      },
+      "last_updated": "2026-03-19T18:24:00Z"
+    },
+    {
+      "game_id": "nba_20260320_por_uta",
+      "sport": "NBA",
+      "home_team": "Utah Jazz",
+      "away_team": "Portland Trail Blazers",
+      "commence_time": "2026-03-20T04:40:00Z",
+      "sportsbook": "DraftKings",
+      "markets": {
+        "spread": {
+          "home_line": -1.0,
+          "home_odds": -110,
+          "away_line": 1.0,
+          "away_odds": -118
+        },
+        "moneyline": {
+          "home_odds": -111,
+          "away_odds": -111
+        },
+        "total": {
+          "line": 217.0,
+          "over_odds": -116,
+          "under_odds": -111
+        }
+      },
+      "last_updated": "2026-03-19T18:15:00Z"
+    },
+    {
+      "game_id": "nba_20260320_por_uta",
+      "sport": "NBA",
+      "home_team": "Utah Jazz",
+      "away_team": "Portland Trail Blazers",
+      "commence_time": "2026-03-20T04:40:00Z",
+      "sportsbook": "FanDuel",
+      "markets": {
+        "spread": {
+          "home_line": -1.0,
+          "home_odds": -103,
+          "away_line": 1.0,
+          "away_odds": -103
+        },
+        "moneyline": {
+          "home_odds": -113,
+          "away_odds": -117
+        },
+        "total": {
+          "line": 217.0,
+          "over_odds": -116,
+          "under_odds": -109
+        }
+      },
+      "last_updated": "2026-03-19T18:27:00Z"
+    },
+    {
+      "game_id": "nba_20260320_por_uta",
+      "sport": "NBA",
+      "home_team": "Utah Jazz",
+      "away_team": "Portland Trail Blazers",
+      "commence_time": "2026-03-20T04:40:00Z",
+      "sportsbook": "BetMGM",
+      "markets": {
+        "spread": {
+          "home_line": -1.0,
+          "home_odds": -103,
+          "away_line": 1.0,
+          "away_odds": -102
+        },
+        "moneyline": {
+          "home_odds": -116,
+          "away_odds": -104
+        },
+        "total": {
+          "line": 217.5,
+          "over_odds": -108,
+          "under_odds": -107
+        }
+      },
+      "last_updated": "2026-03-19T17:57:00Z"
+    },
+    {
+      "game_id": "nba_20260320_por_uta",
+      "sport": "NBA",
+      "home_team": "Utah Jazz",
+      "away_team": "Portland Trail Blazers",
+      "commence_time": "2026-03-20T04:40:00Z",
+      "sportsbook": "Caesars",
+      "markets": {
+        "spread": {
+          "home_line": -1.0,
+          "home_odds": -111,
+          "away_line": 1.0,
+          "away_odds": -115
+        },
+        "moneyline": {
+          "home_odds": -104,
+          "away_odds": -111
+        },
+        "total": {
+          "line": 223.5,
+          "over_odds": -105,
+          "under_odds": -115
+        }
+      },
+      "last_updated": "2026-03-19T18:07:00Z"
+    },
+    {
+      "game_id": "nba_20260320_por_uta",
+      "sport": "NBA",
+      "home_team": "Utah Jazz",
+      "away_team": "Portland Trail Blazers",
+      "commence_time": "2026-03-20T04:40:00Z",
+      "sportsbook": "PointsBet",
+      "markets": {
+        "spread": {
+          "home_line": -1.0,
+          "home_odds": -112,
+          "away_line": 1.0,
+          "away_odds": -112
+        },
+        "moneyline": {
+          "home_odds": -104,
+          "away_odds": -102
+        },
+        "total": {
+          "line": 217.0,
+          "over_odds": -110,
+          "under_odds": -102
+        }
+      },
+      "last_updated": "2026-03-19T18:03:00Z"
+    },
+    {
+      "game_id": "nba_20260320_por_uta",
+      "sport": "NBA",
+      "home_team": "Utah Jazz",
+      "away_team": "Portland Trail Blazers",
+      "commence_time": "2026-03-20T04:40:00Z",
+      "sportsbook": "bet365",
+      "markets": {
+        "spread": {
+          "home_line": -1.0,
+          "home_odds": -109,
+          "away_line": 1.0,
+          "away_odds": -111
+        },
+        "moneyline": {
+          "home_odds": -116,
+          "away_odds": -112
+        },
+        "total": {
+          "line": 216.5,
+          "over_odds": -109,
+          "under_odds": -118
+        }
+      },
+      "last_updated": "2026-03-19T18:07:00Z"
+    },
+    {
+      "game_id": "nba_20260320_por_uta",
+      "sport": "NBA",
+      "home_team": "Utah Jazz",
+      "away_team": "Portland Trail Blazers",
+      "commence_time": "2026-03-20T04:40:00Z",
+      "sportsbook": "Pinnacle",
+      "markets": {
+        "spread": {
+          "home_line": -1.0,
+          "home_odds": -113,
+          "away_line": 1.0,
+          "away_odds": -109
+        },
+        "moneyline": {
+          "home_odds": -118,
+          "away_odds": -95
+        },
+        "total": {
+          "line": 217.0,
+          "over_odds": -112,
+          "under_odds": -108
+        }
+      },
+      "last_updated": "2026-03-19T18:10:00Z"
+    },
+    {
+      "game_id": "nba_20260320_por_uta",
+      "sport": "NBA",
+      "home_team": "Utah Jazz",
+      "away_team": "Portland Trail Blazers",
+      "commence_time": "2026-03-20T04:40:00Z",
+      "sportsbook": "BetRivers",
+      "markets": {
+        "spread": {
+          "home_line": -1.5,
+          "home_odds": -103,
+          "away_line": 1.5,
+          "away_odds": -103
+        },
+        "moneyline": {
+          "home_odds": -113,
+          "away_odds": -107
+        },
+        "total": {
+          "line": 217.0,
+          "over_odds": -113,
+          "under_odds": -117
+        }
+      },
+      "last_updated": "2026-03-19T18:25:00Z"
+    }
+  ]
+}
