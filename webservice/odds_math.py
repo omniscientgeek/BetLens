@@ -5,6 +5,7 @@ Provides:
 1. Implied Probability  – convert American odds → probability
 2. Vig (Vigorish)       – bookmaker margin per market
 3. No-Vig / Fair Odds   – true probability with vig removed
+4. Expected Value (EV)  – edge vs consensus fair probability
 """
 
 
@@ -112,3 +113,57 @@ def fair_odds_to_american(fair_prob: float) -> int:
     if fair_prob > 0.5:
         return -round(fair_prob / (1 - fair_prob) * 100)
     return round((1 - fair_prob) / fair_prob * 100)
+
+
+def expected_value(book_odds: int | float, fair_prob: float) -> dict:
+    """Calculate the Expected Value (EV) of a bet.
+
+    EV measures whether a bet is +EV (profitable long-term) or -EV by
+    comparing the book's implied probability against the consensus fair
+    probability (true probability with vig removed).
+
+    Formula:
+        ev_edge   = fair_prob - book_implied_prob
+        ev_pct    = ev_edge * 100  (as percentage points)
+        ev_dollar = (decimal_payout * fair_prob) - 1  (profit per $1 wagered)
+
+    A positive ev_edge means the book is underestimating the true
+    probability — you're getting better odds than you should.
+
+    Parameters
+    ----------
+    book_odds : American odds offered by the sportsbook
+    fair_prob : Consensus fair (no-vig) probability for this side (0-1)
+
+    Returns
+    -------
+    dict with keys:
+        book_implied_prob – raw implied probability from book odds
+        fair_prob         – the fair probability passed in
+        ev_edge           – fair_prob - book_implied_prob (positive = +EV)
+        ev_edge_pct       – ev_edge as percentage string (e.g. "+2.35%")
+        ev_dollar         – expected profit per $1 wagered
+        is_positive_ev    – True if ev_edge > 0
+    """
+    book_prob = implied_probability(book_odds)
+
+    # Decimal payout: what $1 returns (including stake)
+    if book_odds < 0:
+        decimal_payout = 1 + (100 / abs(book_odds))
+    elif book_odds > 0:
+        decimal_payout = 1 + (book_odds / 100)
+    else:
+        decimal_payout = 2.0  # even money
+
+    ev_edge = fair_prob - book_prob
+    ev_dollar = (decimal_payout * fair_prob) - 1
+
+    sign = "+" if ev_edge >= 0 else ""
+    return {
+        "book_implied_prob": round(book_prob, 6),
+        "fair_prob": round(fair_prob, 6),
+        "ev_edge": round(ev_edge, 6),
+        "ev_edge_pct": f"{sign}{round(ev_edge * 100, 2)}%",
+        "ev_dollar": round(ev_dollar, 4),
+        "is_positive_ev": ev_edge > 0,
+    }
