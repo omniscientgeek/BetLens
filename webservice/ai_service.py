@@ -208,12 +208,22 @@ async def _call_claude_sdk(provider: dict, system_prompt: str, user_prompt: str,
     start = time.time()
 
     # Use native asyncio subprocess — no eventlet workaround needed
+    # Force UTF-8 encoding for the Node.js subprocess on Windows to prevent
+    # multi-byte characters (e.g. emojis) from being mangled by the system
+    # code page.
+    child_env = {**os.environ, "NODE_OPTIONS": "--input-type=module", "PYTHONIOENCODING": "utf-8"}
+    # On Windows, set active code page to UTF-8 for child process pipes
+    if os.name == "nt":
+        child_env["PYTHONUTF8"] = "1"
+        child_env["CHCP"] = "65001"
+
     proc = await asyncio.create_subprocess_exec(
         node_bin, _WRAPPER_SCRIPT,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=service_dir,
+        env=child_env,
     )
 
     input_bytes = json.dumps(command_payload).encode("utf-8")
@@ -228,7 +238,7 @@ async def _call_claude_sdk(provider: dict, system_prompt: str, user_prompt: str,
 
     elapsed = round(time.time() - start, 2)
 
-    stdout_text = stdout_bytes.decode("utf-8", errors="replace")
+    stdout_text = stdout_bytes.decode("utf-8")
     stderr_text = stderr_bytes.decode("utf-8", errors="replace")
 
     if proc.returncode != 0 and not stdout_text.strip():

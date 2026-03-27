@@ -17,6 +17,12 @@
       "env": {
         "MCP_PROJECT_MANAGER_API_URL": "http://localhost:5288"
       }
+    },
+    "betstamp-intelligence": {
+      "command": "python",
+      "args": [
+        "C:/Users/justi/source/repos/BetStamp/mcp-server/mcp_server.py"
+      ]
     }
   }
 }

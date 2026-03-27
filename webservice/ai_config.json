@@ -1,62 +1,67 @@
 {
+  "failover_enabled": true,
   "providers": [
     {
-      "id": "claude",
-      "name": "Claude (Anthropic)",
-      "type": "anthropic",
-      "model": "claude-sonnet-4-20250514",
+      "api_key_set": false,
       "enabled": true,
-      "priority": 1,
-      "api_key_env": "ANTHROPIC_API_KEY",
-      "max_tokens": 4096,
-      "temperature": 0.3
-    },
-    {
-      "id": "openai",
-      "name": "OpenAI GPT-4o",
-      "type": "openai",
-      "model": "gpt-4o",
-      "enabled": false,
-      "priority": 2,
-      "api_key_env": "OPENAI_API_KEY",
-      "max_tokens": 4096,
-      "temperature": 0.3
-    },
-    {
-      "id": "openai-mini",
-      "name": "OpenAI GPT-4o Mini",
-      "type": "openai",
-      "model": "gpt-4o-mini",
-      "enabled": false,
-      "priority": 3,
-      "api_key_env": "OPENAI_API_KEY",
-      "max_tokens": 4096,
-      "temperature": 0.3
-    },
-    {
       "id": "claude-sdk",
-      "name": "Claude Code SDK",
-      "type": "claude_sdk",
-      "model": "claude-sonnet-4-20250514",
-      "enabled": false,
-      "priority": 4,
       "max_tokens": 4096,
-      "temperature": 0.3
+      "model": "claude-sonnet-4-20250514",
+      "name": "Claude Code SDK",
+      "priority": 1,
+      "temperature": 0.3,
+      "type": "claude_sdk"
     },
     {
-      "id": "custom",
-      "name": "Custom Endpoint",
-      "type": "openai_compatible",
-      "model": "default",
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "api_key_set": false,
       "enabled": false,
-      "priority": 99,
-      "api_key_env": "CUSTOM_AI_API_KEY",
-      "base_url": "http://localhost:11434/v1",
+      "id": "claude",
       "max_tokens": 4096,
-      "temperature": 0.3
+      "model": "claude-sonnet-4-20250514",
+      "name": "Claude (Anthropic)",
+      "priority": 1,
+      "temperature": 0.3,
+      "type": "anthropic"
+    },
+    {
+      "api_key_env": "OPENAI_API_KEY",
+      "api_key_set": false,
+      "enabled": false,
+      "id": "openai",
+      "max_tokens": 4096,
+      "model": "gpt-4o",
+      "name": "OpenAI GPT-4o",
+      "priority": 2,
+      "temperature": 0.3,
+      "type": "openai"
+    },
+    {
+      "api_key_env": "OPENAI_API_KEY",
+      "api_key_set": false,
+      "enabled": false,
+      "id": "openai-mini",
+      "max_tokens": 4096,
+      "model": "gpt-4o-mini",
+      "name": "OpenAI GPT-4o Mini",
+      "priority": 3,
+      "temperature": 0.3,
+      "type": "openai"
+    },
+    {
+      "api_key_env": "CUSTOM_AI_API_KEY",
+      "api_key_set": false,
+      "base_url": "http://localhost:11434/v1",
+      "enabled": false,
+      "id": "custom",
+      "max_tokens": 4096,
+      "model": "default",
+      "name": "Custom Endpoint",
+      "priority": 99,
+      "temperature": 0.3,
+      "type": "openai_compatible"
     }
   ],
-  "failover_enabled": true,
-  "timeout_seconds": 60,
-  "retry_attempts": 2
+  "retry_attempts": 2,
+  "timeout_seconds": 60
 }

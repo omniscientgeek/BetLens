@@ -9,7 +9,8 @@
  * Migrated from: SeniorAIDeveloper/desktop-service/claude-sdk-wrapper.mjs
  *
  * Input (JSON on stdin):
- *   { "system_prompt": "...", "user_prompt": "...", "model": "...", "max_turns": 1, "cwd": "..." }
+ *   { "system_prompt": "...", "user_prompt": "...", "model": "...", "max_turns": 1, "cwd": "...",
+ *     "use_mcp": false, "mcp_config_path": "..." }
  *
  * Output (JSON on stdout):
  *   { "type": "result", "text": "...", "session_id": "...", "usage": {...} }
@@ -17,7 +18,13 @@
  *   { "type": "error", "message": "..." }
  */
 import { query } from '@anthropic-ai/claude-agent-sdk';
+import { readFileSync } from 'fs';
 import readline from 'readline';
+
+// Ensure stdout writes UTF-8 on all platforms (prevents emoji mojibake on Windows)
+if (typeof process.stdout.setDefaultEncoding === 'function') {
+  process.stdout.setDefaultEncoding('utf-8');
+}
 
 // Global handler for unhandled promise rejections — prevents Node.js from crashing
 // when the SDK's ProcessTransport throws after the CLI process exits unexpectedly.
@@ -59,7 +66,7 @@ rl.on('close', async () => {
 });
 
 async function handleQuery(command) {
-  const { system_prompt, user_prompt, model, max_turns, cwd, timeout_seconds } = command;
+  const { system_prompt, user_prompt, model, max_turns, cwd, timeout_seconds, use_mcp, mcp_config_path } = command;
 
   if (!user_prompt) {
     sendResult({ type: 'error', message: 'user_prompt is required' });
@@ -67,14 +74,30 @@ async function handleQuery(command) {
   }
 
   const resolvedCwd = cwd || process.cwd();
-  process.stderr.write(`[claude-sdk] Starting query: model=${model || 'default'}, cwd=${resolvedCwd}\n`);
+  const mcpEnabled = use_mcp === true;
+  process.stderr.write(`[claude-sdk] Starting query: model=${model || 'default'}, cwd=${resolvedCwd}, mcp=${mcpEnabled}\n`);
 
   const options = {
     cwd: resolvedCwd,
-    settingSources: [],          // Don't load user/project settings for pipeline calls
-    maxTurns: max_turns || 1,    // Single turn for analysis/brief phases
-    permissionMode: 'plan',      // Read-only, no tool execution needed
+    settingSources: [],          // Don't load user/project settings — we inject MCP config directly
+    maxTurns: mcpEnabled ? (max_turns || 10) : (max_turns || 1),
+    permissionMode: mcpEnabled ? 'bypassPermissions' : 'plan',
   };
+
+  // When MCP is enabled, load the betstamp-intelligence server config
+  if (mcpEnabled) {
+    const defaultMcpPath = mcp_config_path || new URL('../mcp-server/.mcp.json', import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1');
+    try {
+      const raw = readFileSync(defaultMcpPath, 'utf-8');
+      const parsed = JSON.parse(raw);
+      if (parsed.mcpServers) {
+        options.mcpServers = parsed.mcpServers;
+        process.stderr.write(`[claude-sdk] Loaded MCP servers: ${Object.keys(parsed.mcpServers).join(', ')}\n`);
+      }
+    } catch (err) {
+      process.stderr.write(`[claude-sdk] Warning: could not load MCP config from ${defaultMcpPath}: ${err.message}\n`);
+    }
+  }
 
   if (model) {
     options.model = model;

@@ -238,3 +238,29 @@ The leader is typically the sharpest; followers that lag create exploitable wind
 _Thu, Mar 26, 2026 at 12:39 PM_
 
 I have a generative process for the devnotes. This is because if I deploy to a server, all the Claude data will be lost.
+
+## AI Summarizer
+_Thu, Mar 26, 2026 at 06:55 PM_
+
+I believe it will be beneficial to summarize the AI summary to a quick and simple overview of the analysis
+
+## I started to add the AI code
+_Thu, Mar 26, 2026 at 7:36 PM_
+
+## Ai versus code
+_Thu, Mar 26, 2026 at 7:49 PM_
+
+I don't trust AI to do basic arithmetic including greater than or less that. I am planning to use MCP to return the best or worst in a json format. This way AI does not calculate anything. The Json will need to return a description that is hard coded. From this the AI can take the information and rationalize the reason and thoughts.
+
+## Force ai to use the MCP
+_Thu, Mar 26, 2026 at 7:53 PM_
+
+I will need to add some guard rails, sub agent and/or system prompt to make sure the AI use the MCP. I am thinking of stressing testing this to make sure the mcp works.
+
+## Historical betting might be helpful for this project
+_Thu, Mar 26, 2026 at 8:18 PM_
+
+## Long term improvement
+_Fri, Mar 27, 2026 at 11:42 AM_
+
+Long term the data files should be cleaned up to minimize the disk space usage.
