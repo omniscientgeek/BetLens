@@ -13,6 +13,7 @@ Usage:
 import sys
 import os
 import json
+import random
 from datetime import datetime, timezone
 from math import sqrt, log, inf
 from statistics import pstdev, mean
@@ -387,8 +388,6 @@ def _compute_consensus(by_game: dict[str, list[dict]]) -> dict[str, dict]:
 # ---------------------------------------------------------------------------
 # Sharp vs. Crowd — Pinnacle (sharp book) vs all-book average (crowd wisdom)
 # ---------------------------------------------------------------------------
-
-SHARP_BOOK = "Pinnacle"
 
 
 def _compute_sharp_vs_crowd(by_game: dict[str, list[dict]]) -> dict[str, dict]:
@@ -1580,14 +1579,16 @@ def get_fair_odds(game_id: Optional[str] = None, filename: Optional[str] = None)
     """Get the consensus no-vig "fair" odds for each game and market.
 
     Removes the vig from each sportsbook's odds, then averages across all
-    books to produce a consensus true probability baseline. Useful for
-    comparing any single book's line against the market-implied fair price.
+    books to produce a consensus true probability baseline (crowd wisdom).
+    Also compares against Pinnacle's no-vig odds (sharp wisdom) to highlight
+    where recreational books may be mispricing.
 
     Args:
         game_id: Filter to a specific game. Optional (shows all games).
         filename: Data file to load. Optional.
 
-    Returns consensus fair probabilities and fair American odds per game per market.
+    Returns consensus fair probabilities, fair American odds, and sharp vs crowd
+    divergence data per game per market.
     """
     cache_key = f"fair_odds:{game_id or 'all'}"
     cached = _cache.get_analysis(filename, cache_key)
@@ -1599,6 +1600,9 @@ def get_fair_odds(game_id: Optional[str] = None, filename: Optional[str] = None)
         enriched = [r for r in enriched if r.get("game_id") == game_id]
     games = _group_by_game(enriched)
 
+    # Load sharp vs crowd data for all games
+    sharp_vs_crowd = _cache.load_sharp_vs_crowd(filename)
+
     fair_odds_list = []
     for gid, records in games.items():
         first = records[0]
@@ -1609,6 +1613,8 @@ def get_fair_odds(game_id: Optional[str] = None, filename: Optional[str] = None)
             "away_team": first.get("away_team"),
             "markets": {},
         }
+
+        game_svc = sharp_vs_crowd.get(gid, {})
 
         for market_type in ("spread", "moneyline", "total"):
             market_records = [r["markets"][market_type] for r in records if market_type in r.get("markets", {})]
@@ -1642,6 +1648,10 @@ def get_fair_odds(game_id: Optional[str] = None, filename: Optional[str] = None)
                     lines = [m.get("home_line", 0) for m in market_records]
                     market_entry["consensus_line"] = round(sum(lines) / len(lines), 1)
 
+                # Attach sharp vs crowd divergence data
+                if market_type in game_svc:
+                    market_entry["sharp_vs_crowd"] = game_svc[market_type]
+
                 game_entry["markets"][market_type] = market_entry
             else:
                 over_probs = [m.get("over_implied_prob", 0) for m in market_records]
@@ -1655,7 +1665,7 @@ def get_fair_odds(game_id: Optional[str] = None, filename: Optional[str] = None)
                 fair_under = avg_under / total_prob if total_prob else 0.5
 
                 lines = [m.get("line", 0) for m in market_records]
-                game_entry["markets"]["total"] = {
+                total_entry = {
                     "consensus_line": round(sum(lines) / len(lines), 1),
                     "over_fair_prob": round(fair_over, 6),
                     "under_fair_prob": round(fair_under, 6),
@@ -1667,12 +1677,42 @@ def get_fair_odds(game_id: Optional[str] = None, filename: Optional[str] = None)
                     "books_sampled": len(market_records),
                 }
 
+                # Attach sharp vs crowd divergence data
+                if "total" in game_svc:
+                    total_entry["sharp_vs_crowd"] = game_svc["total"]
+
+                game_entry["markets"]["total"] = total_entry
+
         fair_odds_list.append(game_entry)
+
+    # Summarize mispricing alerts across all games
+    mispricing_alerts = []
+    for game in fair_odds_list:
+        for mkt_name, mkt_data in game.get("markets", {}).items():
+            svc = mkt_data.get("sharp_vs_crowd", {})
+            if svc.get("mispriced_side"):
+                mispricing_alerts.append({
+                    "game_id": game["game_id"],
+                    "home_team": game.get("home_team"),
+                    "away_team": game.get("away_team"),
+                    "market": mkt_name,
+                    "mispriced_side": svc["mispriced_side"],
+                    "direction": svc["mispriced_direction"],
+                    "divergence_pct": svc["max_divergence_pct"],
+                })
+    mispricing_alerts.sort(key=lambda x: x["divergence_pct"], reverse=True)
 
     result = {
         "games": fair_odds_list,
         "count": len(fair_odds_list),
-        "context": f"Consensus fair (no-vig) odds for {len(fair_odds_list)} games. Compare individual book lines against these baselines to find value.",
+        "mispricing_alerts": mispricing_alerts,
+        "mispricing_count": len(mispricing_alerts),
+        "context": (
+            f"Consensus fair (no-vig) odds for {len(fair_odds_list)} games. "
+            f"Includes sharp (Pinnacle) vs crowd (all 8 books) divergence. "
+            f"{len(mispricing_alerts)} market(s) show significant divergence (>=1pp) — "
+            f"these highlight where recreational books may be mispricing vs the sharp line."
+        ),
     }
     _cache.set_analysis(filename, cache_key, result)
     return json.dumps(result, indent=2)
@@ -1727,6 +1767,7 @@ def get_market_summary(filename: Optional[str] = None) -> str:
     correlation_data = json.loads(get_market_correlations(filename))
     synthetic_data = json.loads(get_synthetic_hold_free_market(filename=filename))
     entropy_data = json.loads(get_market_entropy(filename=filename))
+    cross_mkt_data = json.loads(find_cross_market_arbitrage(filename))
 
     result = {
         "summary": {
@@ -1815,7 +1856,12 @@ def get_market_summary(filename: Optional[str] = None) -> str:
             "by_market_type": synthetic_data.get("aggregate", {}).get("by_market_type", {}),
             "top_3_games": synthetic_data.get("games", [])[:3],
         },
-        "context": "Full market summary with sportsbook rankings, hold percentage, arb opportunities, middles, +EV bets, stale lines, sharp money movement, outliers (odds + line), fair odds, power rankings, sharpness scores, market correlations, entropy-based market efficiency, and synthetic hold-free market. Drill into specific tools for more detail.",
+        "cross_market_arbitrage": {
+            "count": cross_mkt_data.get("count", 0),
+            "breakdown": cross_mkt_data.get("breakdown", {}),
+            "top_3": cross_mkt_data.get("cross_market_opportunities", [])[:3],
+        },
+        "context": "Full market summary with sportsbook rankings, hold percentage, arb opportunities (same-market + cross-market), middles, +EV bets, stale lines, sharp money movement, outliers (odds + line), fair odds, power rankings, sharpness scores, market correlations, entropy-based market efficiency, and synthetic hold-free market. Drill into specific tools for more detail.",
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
     _cache.set_analysis(filename, cache_key, result)
@@ -2715,6 +2761,7 @@ def get_daily_digest(filename: Optional[str] = None) -> str:
     rankings_data = json.loads(get_book_rankings(filename))
     power_data = json.loads(get_power_rankings(filename))
     movement_data = json.loads(infer_odds_movement(filename))
+    cross_mkt_data = json.loads(find_cross_market_arbitrage(filename))
 
     # Build lookup sets for cross-referencing stale lines, outliers, and sharp movement
     stale_keys = set()
@@ -2829,6 +2876,14 @@ def get_daily_digest(filename: Optional[str] = None) -> str:
                 "direction": mv.get("dominant_sharp_direction"),
                 "description": mv.get("context", ""),
             })
+    for xm in cross_mkt_data.get("cross_market_opportunities", [])[:3]:
+        interesting.append({
+            "type": "cross_market_arbitrage",
+            "arb_type": xm.get("type", ""),
+            "game": f"{xm.get('away_team', '?')} @ {xm.get('home_team', '?')}",
+            "edge_pct": xm.get("edge_pct") or xm.get("prob_discrepancy_pct") or xm.get("gap_pct"),
+            "description": xm.get("context", ""),
+        })
 
     book_grades = {}
     for r in rankings_data.get("rankings", []):
@@ -4107,6 +4162,322 @@ def get_zscore_anomalies(
     _cache.set_analysis(filename, cache_key, result)
     return json.dumps(result, indent=2)
 
+
+@mcp.tool()
+def find_cross_market_arbitrage(filename: Optional[str] = None, min_edge_pct: float = 0.0) -> str:
+    """Find arbitrage opportunities ACROSS different market types at different sportsbooks.
+
+    Unlike standard arbitrage (which compares the same market across books), this
+    looks for mispricings between market types — e.g., a moneyline at one book vs.
+    a spread at another that covers an overlapping outcome at better combined value.
+
+    Cross-market arb scenarios detected:
+    1. ML vs Spread: Moneyline underdog at Book A + spread favorite at Book B
+       (opposing sides, different market types — gap = "favorite wins by < spread")
+    2. ML vs Spread (tight lines): When spread is small (<=3.5), ML and spread
+       cover nearly identical outcomes — price discrepancies are exploitable
+    3. Implied probability inconsistency: ML implies Team A wins 60% but spread
+       odds at another book imply they cover 55% on a tight line — mispricing signal
+
+    Args:
+        filename: Data file to load. Optional.
+        min_edge_pct: Minimum edge % to report (default 0 = show all). E.g., 1.0 = only edges >=1%.
+
+    Returns cross-market arbitrage opportunities sorted by edge, including the
+    gap/middle zone where neither bet wins.
+    """
+    cache_key = f"cross_market_arb:{min_edge_pct}"
+    cached = _cache.get_analysis(filename, cache_key)
+    if cached is not None:
+        return json.dumps(cached, indent=2)
+
+    odds = _load_odds(filename)
+    games = _cache.load_by_game(filename)
+    opportunities = []
+
+    for game_id, records in games.items():
+        first = records[0]
+        game_info = {
+            "game_id": game_id,
+            "sport": first.get("sport"),
+            "home_team": first.get("home_team"),
+            "away_team": first.get("away_team"),
+        }
+
+        # Collect best odds per (market_type, side) across all books
+        # For spread, also track the line value
+        best: dict[tuple, dict] = {}  # (market, side) -> {odds, book, line?}
+
+        for r in records:
+            book = r["sportsbook"]
+            mkts = r.get("markets", {})
+
+            # Moneyline
+            ml = mkts.get("moneyline", {})
+            if "home_odds" in ml:
+                k = ("moneyline", "home")
+                if k not in best or ml["home_odds"] > best[k]["odds"]:
+                    best[k] = {"odds": ml["home_odds"], "book": book}
+            if "away_odds" in ml:
+                k = ("moneyline", "away")
+                if k not in best or ml["away_odds"] > best[k]["odds"]:
+                    best[k] = {"odds": ml["away_odds"], "book": book}
+
+            # Spread
+            sp = mkts.get("spread", {})
+            if "home_odds" in sp and "home_line" in sp:
+                k = ("spread", "home")
+                if k not in best or sp["home_odds"] > best[k]["odds"]:
+                    best[k] = {"odds": sp["home_odds"], "book": book, "line": sp["home_line"]}
+            if "away_odds" in sp:
+                a_line = sp.get("away_line", -sp.get("home_line", 0))
+                k = ("spread", "away")
+                if k not in best or sp["away_odds"] > best[k]["odds"]:
+                    best[k] = {"odds": sp["away_odds"], "book": book, "line": a_line}
+
+            # Total
+            tot = mkts.get("total", {})
+            if "over_odds" in tot and "line" in tot:
+                k = ("total", "over")
+                if k not in best or tot["over_odds"] > best[k]["odds"]:
+                    best[k] = {"odds": tot["over_odds"], "book": book, "line": tot["line"]}
+            if "under_odds" in tot and "line" in tot:
+                k = ("total", "under")
+                if k not in best or tot["under_odds"] > best[k]["odds"]:
+                    best[k] = {"odds": tot["under_odds"], "book": book, "line": tot["line"]}
+
+        # --- Cross-market comparisons ---
+
+        # 1. ML Home vs Spread Away (opposing sides, different markets)
+        #    ML Home = "home wins outright"
+        #    Spread Away = "away covers +X" = "away wins OR loses by < X"
+        #    Gap zone = "home wins by less than spread" (neither side fully wins)
+        ml_home = best.get(("moneyline", "home"))
+        sp_away = best.get(("spread", "away"))
+        if ml_home and sp_away and ml_home["book"] != sp_away["book"]:
+            prob_ml_h = implied_probability(ml_home["odds"])
+            prob_sp_a = implied_probability(sp_away["odds"])
+            combined = prob_ml_h + prob_sp_a
+            if combined < 1.0:
+                edge = round((1.0 - combined) * 100, 3)
+                if edge >= min_edge_pct:
+                    a_line = sp_away.get("line", "?")
+                    abs_line = abs(a_line) if isinstance(a_line, (int, float)) else "?"
+                    opportunities.append({
+                        **game_info,
+                        "type": "ml_home_vs_spread_away",
+                        "leg_a": {
+                            "market": "moneyline",
+                            "side": "home",
+                            "sportsbook": ml_home["book"],
+                            "odds": ml_home["odds"],
+                            "implied_prob": round(prob_ml_h, 6),
+                            "covers": f"{first.get('home_team')} wins outright",
+                        },
+                        "leg_b": {
+                            "market": "spread",
+                            "side": "away",
+                            "sportsbook": sp_away["book"],
+                            "odds": sp_away["odds"],
+                            "line": a_line,
+                            "implied_prob": round(prob_sp_a, 6),
+                            "covers": f"{first.get('away_team')} +{a_line} (wins or loses by < {abs_line})",
+                        },
+                        "combined_implied": round(combined, 6),
+                        "edge_pct": edge,
+                        "gap_zone": f"{first.get('home_team')} wins by exactly 1 to {int(abs_line) if isinstance(abs_line, (int, float)) else '?'} pts — neither bet wins",
+                        "context": (
+                            f"CROSS-MKT ARB: ML {first.get('home_team')} at {ml_home['book']} ({ml_home['odds']}) "
+                            f"+ Spread {first.get('away_team')} +{a_line} at {sp_away['book']} ({sp_away['odds']}) "
+                            f"= {edge}% edge (gap: home wins by <{int(abs_line) if isinstance(abs_line, (int, float)) else '?'})"
+                        ),
+                    })
+
+        # 2. ML Away vs Spread Home (mirror of above)
+        ml_away = best.get(("moneyline", "away"))
+        sp_home = best.get(("spread", "home"))
+        if ml_away and sp_home and ml_away["book"] != sp_home["book"]:
+            prob_ml_a = implied_probability(ml_away["odds"])
+            prob_sp_h = implied_probability(sp_home["odds"])
+            combined = prob_ml_a + prob_sp_h
+            if combined < 1.0:
+                edge = round((1.0 - combined) * 100, 3)
+                if edge >= min_edge_pct:
+                    h_line = sp_home.get("line", "?")
+                    abs_line = abs(h_line) if isinstance(h_line, (int, float)) else "?"
+                    opportunities.append({
+                        **game_info,
+                        "type": "ml_away_vs_spread_home",
+                        "leg_a": {
+                            "market": "moneyline",
+                            "side": "away",
+                            "sportsbook": ml_away["book"],
+                            "odds": ml_away["odds"],
+                            "implied_prob": round(prob_ml_a, 6),
+                            "covers": f"{first.get('away_team')} wins outright",
+                        },
+                        "leg_b": {
+                            "market": "spread",
+                            "side": "home",
+                            "sportsbook": sp_home["book"],
+                            "odds": sp_home["odds"],
+                            "line": h_line,
+                            "implied_prob": round(prob_sp_h, 6),
+                            "covers": f"{first.get('home_team')} {h_line} (wins by > {abs_line})",
+                        },
+                        "combined_implied": round(combined, 6),
+                        "edge_pct": edge,
+                        "gap_zone": f"{first.get('home_team')} wins by 1 to {int(abs_line) if isinstance(abs_line, (int, float)) else '?'} pts — neither bet wins",
+                        "context": (
+                            f"CROSS-MKT ARB: ML {first.get('away_team')} at {ml_away['book']} ({ml_away['odds']}) "
+                            f"+ Spread {first.get('home_team')} {h_line} at {sp_home['book']} ({sp_home['odds']}) "
+                            f"= {edge}% edge (gap: home wins by <{int(abs_line) if isinstance(abs_line, (int, float)) else '?'})"
+                        ),
+                    })
+
+        # 3. Tight-spread equivalence: when spread is small (<=3.5), ML and spread
+        #    cover nearly the same outcome — compare implied probabilities across books
+        #    to find cross-market mispricings
+        sp_home_data = best.get(("spread", "home"))
+        sp_away_data = best.get(("spread", "away"))
+
+        for side_label, ml_entry, sp_entry in [
+            ("home", ml_home, sp_home_data),
+            ("away", ml_away, sp_away_data),
+        ]:
+            if not ml_entry or not sp_entry:
+                continue
+            spread_line = sp_entry.get("line")
+            if spread_line is None or abs(spread_line) > 3.5:
+                continue
+            # Different books only — same-book isn't cross-market arb
+            if ml_entry["book"] == sp_entry["book"]:
+                continue
+
+            ml_prob = implied_probability(ml_entry["odds"])
+            sp_prob = implied_probability(sp_entry["odds"])
+            prob_diff = abs(ml_prob - sp_prob) * 100
+            cheaper_market = "spread" if sp_prob < ml_prob else "moneyline"
+            cheaper_entry = sp_entry if sp_prob < ml_prob else ml_entry
+            expensive_entry = ml_entry if sp_prob < ml_prob else sp_entry
+
+            if prob_diff >= max(min_edge_pct, 1.0):  # At least 1% discrepancy
+                team_name = first.get("home_team") if side_label == "home" else first.get("away_team")
+                opportunities.append({
+                    **game_info,
+                    "type": "tight_spread_ml_mismatch",
+                    "side": side_label,
+                    "team": team_name,
+                    "spread_line": spread_line,
+                    "moneyline_leg": {
+                        "sportsbook": ml_entry["book"],
+                        "odds": ml_entry["odds"],
+                        "implied_prob": round(ml_prob, 6),
+                    },
+                    "spread_leg": {
+                        "sportsbook": sp_entry["book"],
+                        "odds": sp_entry["odds"],
+                        "line": spread_line,
+                        "implied_prob": round(sp_prob, 6),
+                    },
+                    "prob_discrepancy_pct": round(prob_diff, 3),
+                    "cheaper_market": cheaper_market,
+                    "recommendation": (
+                        f"Bet {team_name} via {cheaper_market} at {cheaper_entry['book']} "
+                        f"({cheaper_entry['odds']}) — {round(prob_diff, 1)}% cheaper than "
+                        f"{expensive_entry['book']}'s {'ML' if cheaper_market == 'spread' else 'spread'}"
+                    ),
+                    "context": (
+                        f"TIGHT-SPREAD MISMATCH: {team_name} ML at {ml_entry['book']} "
+                        f"({ml_entry['odds']}, {round(ml_prob*100,1)}%) vs spread {spread_line} "
+                        f"at {sp_entry['book']} ({sp_entry['odds']}, {round(sp_prob*100,1)}%). "
+                        f"Discrepancy: {round(prob_diff, 1)}% — bet the {cheaper_market}."
+                    ),
+                })
+
+        # 4. Cross-market implied probability consistency check
+        #    Compare what ML implies about win probability vs what spread odds imply
+        #    across ALL books. Flag games where markets disagree significantly.
+        ml_probs_home_list = []
+        sp_probs_home_list = []
+        for r in records:
+            mkts = r.get("markets", {})
+            ml_data = mkts.get("moneyline", {})
+            sp_data = mkts.get("spread", {})
+            if "home_odds" in ml_data:
+                ml_probs_home_list.append(implied_probability(ml_data["home_odds"]))
+            if "home_odds" in sp_data and "away_odds" in sp_data:
+                nv = no_vig_probabilities(sp_data["home_odds"], sp_data["away_odds"])
+                sp_probs_home_list.append(nv[0])
+
+        if ml_probs_home_list and sp_probs_home_list:
+            # Remove vig from ML too for fair comparison
+            ml_fair_probs = []
+            for r in records:
+                ml_data = r.get("markets", {}).get("moneyline", {})
+                if "home_odds" in ml_data and "away_odds" in ml_data:
+                    nv = no_vig_probabilities(ml_data["home_odds"], ml_data["away_odds"])
+                    ml_fair_probs.append(nv[0])
+            if ml_fair_probs:
+                avg_ml_fair = sum(ml_fair_probs) / len(ml_fair_probs)
+                avg_sp_fair = sum(sp_probs_home_list) / len(sp_probs_home_list)
+                cross_mkt_gap = abs(avg_ml_fair - avg_sp_fair) * 100
+                if cross_mkt_gap >= max(min_edge_pct, 2.0):
+                    favored_mkt = "moneyline" if avg_ml_fair > avg_sp_fair else "spread"
+                    bullish_team = first.get("home_team") if avg_ml_fair > avg_sp_fair else first.get("away_team")
+                    opportunities.append({
+                        **game_info,
+                        "type": "cross_market_probability_gap",
+                        "ml_consensus_fair_prob_home": round(avg_ml_fair, 6),
+                        "spread_consensus_fair_prob_home": round(avg_sp_fair, 6),
+                        "gap_pct": round(cross_mkt_gap, 3),
+                        "interpretation": (
+                            f"Moneyline market implies {first.get('home_team')} has a "
+                            f"{round(avg_ml_fair * 100, 1)}% chance, but spread market implies "
+                            f"{round(avg_sp_fair * 100, 1)}% — a {round(cross_mkt_gap, 1)}% gap. "
+                            f"The {favored_mkt} market is more bullish on {bullish_team}."
+                        ),
+                        "actionable": (
+                            "Look for value betting against the more expensive market. "
+                            "If ML is higher, the spread may be underpricing the favorite."
+                        ),
+                        "context": (
+                            f"CROSS-MKT GAP: {first.get('home_team')} ML fair "
+                            f"{round(avg_ml_fair*100,1)}% vs Spread fair "
+                            f"{round(avg_sp_fair*100,1)}% — "
+                            f"{round(cross_mkt_gap,1)}% inconsistency between markets."
+                        ),
+                    })
+
+    # Sort by edge/discrepancy
+    def _sort_key(opp):
+        return opp.get("edge_pct", 0) or opp.get("prob_discrepancy_pct", 0) or opp.get("gap_pct", 0)
+    opportunities.sort(key=_sort_key, reverse=True)
+
+    arb_count = sum(1 for o in opportunities if o["type"] in ("ml_home_vs_spread_away", "ml_away_vs_spread_home"))
+    mismatch_count = sum(1 for o in opportunities if o["type"] == "tight_spread_ml_mismatch")
+    gap_count = sum(1 for o in opportunities if o["type"] == "cross_market_probability_gap")
+
+    result = {
+        "cross_market_opportunities": opportunities,
+        "count": len(opportunities),
+        "breakdown": {
+            "ml_vs_spread_arbs": arb_count,
+            "tight_spread_mismatches": mismatch_count,
+            "cross_market_prob_gaps": gap_count,
+        },
+        "context": (
+            f"Found {len(opportunities)} cross-market opportunities: "
+            f"{arb_count} ML-vs-spread arbs, {mismatch_count} tight-spread mismatches, "
+            f"{gap_count} cross-market probability gaps."
+            + (f" Best: {opportunities[0]['context']}" if opportunities else " Markets are well-aligned across types.")
+        ),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _cache.set_analysis(filename, cache_key, result)
+    return json.dumps(result, indent=2)
+
+
 @mcp.resource("betstamp://data/{filename}")
 def get_raw_data(filename: str) -> str:
     """Access raw odds data from a file."""
@@ -4132,6 +4503,7 @@ def get_glossary() -> str:
             "steam_move": "A sudden, sharp line movement typically driven by professional/sharp bettors.",
             "reverse_line_movement": "When the line moves in the opposite direction of where the public is betting — often a sign of sharp action.",
             "synthetic_hold_free_market": "A constructed 'perfect book' built by combining the best available odds across all sportsbooks for every side of every market. Shows the edge a sharp bettor gets by always shopping for the best line. A negative synthetic hold means the bettor has an inherent advantage.",
+            "cross_market_arbitrage": "Arbitrage across different market types (e.g., moneyline at one book vs. spread at another). Unlike standard arbs (same market, different books), cross-market arbs exploit mispricings between how different markets price the same game. Often have a 'gap zone' where neither bet wins.",
             "hold": "Hold percentage — the sportsbook's overall margin across all markets. Calculated as (sum of implied probabilities - 1) x 100. Lower hold = fairer book. Use get_hold_percentage for per-sportsbook breakdowns by market type.",
         }
     }, indent=2)
