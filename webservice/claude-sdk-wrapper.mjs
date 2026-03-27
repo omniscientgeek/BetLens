@@ -135,6 +135,11 @@ async function handleQuery(command) {
       if (message.type === 'assistant' && message.message?.content) {
         for (const item of message.message.content) {
           if (item.type === 'text' && item.text) {
+            // Emit incremental chunk so the parent process can stream to the UI
+            const delta = item.text.slice(resultText.length);
+            if (delta) {
+              process.stdout.write(JSON.stringify({ type: 'chunk', text: delta }) + '\n');
+            }
             resultText = item.text;
           }
         }

@@ -50,7 +50,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins="*")
+sio = socketio.AsyncServer(
+    async_mode="asgi",
+    cors_allowed_origins="*",
+    ping_timeout=300,
+    ping_interval=60,
+)
 socket_app = socketio.ASGIApp(sio, other_asgi_app=app)
 
 # ---------------------------------------------------------------------------
@@ -104,11 +109,15 @@ async def run_processing_pipeline(filename, sid):
                     await _emit_phase(sid, filename, phase, i, "complete", result=err_result)
 
             elif phase["name"] == "brief":
-                # --- AI-powered actionable briefing ---
+                # --- AI-powered actionable briefing (streamed to client) ---
                 try:
+                    async def on_brief_chunk(text_delta):
+                        await sio.emit("brief_chunk", {"text": text_delta}, to=sid)
+
                     brief = await run_brief_phase(
                         pipeline_results.get("detect", {}),
                         pipeline_results.get("analyze", {}),
+                        on_chunk=on_brief_chunk,
                     )
                     pipeline_results["brief"] = brief
                     await _emit_phase(sid, filename, phase, i, "complete", result=brief)

@@ -211,7 +211,10 @@ async def _call_claude_sdk(provider: dict, system_prompt: str, user_prompt: str,
     # Force UTF-8 encoding for the Node.js subprocess on Windows to prevent
     # multi-byte characters (e.g. emojis) from being mangled by the system
     # code page.
-    child_env = {**os.environ, "NODE_OPTIONS": "--input-type=module", "PYTHONIOENCODING": "utf-8"}
+    # Note: --input-type=module is NOT used here because the wrapper is a .mjs
+    # file which Node.js already treats as ESM.  That flag is only valid with
+    # --eval / --print / STDIN and causes ERR_INPUT_TYPE_NOT_ALLOWED otherwise.
+    child_env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
     # On Windows, set active code page to UTF-8 for child process pipes
     if os.name == "nt":
         child_env["PYTHONUTF8"] = "1"
@@ -288,6 +291,263 @@ _CALL_MAP = {
     "openai_compatible": _call_openai,
     "claude_sdk": _call_claude_sdk,
 }
+
+
+# ---------------------------------------------------------------------------
+# Streaming provider implementations (yield text deltas via callback)
+# ---------------------------------------------------------------------------
+
+async def _call_claude_sdk_stream(provider: dict, system_prompt: str, user_prompt: str, config: dict, on_chunk=None) -> dict:
+    """Call Claude SDK with streaming — reads stdout line-by-line for chunk events."""
+    if not os.path.isfile(_WRAPPER_SCRIPT):
+        raise RuntimeError(f"claude-sdk-wrapper.mjs not found at {_WRAPPER_SCRIPT}")
+
+    node_bin = _find_node()
+    timeout_seconds = config.get("timeout_seconds", 120)
+    service_dir = os.path.dirname(__file__)
+
+    command_payload = {
+        "system_prompt": system_prompt,
+        "user_prompt": user_prompt,
+        "model": provider.get("model", "claude-sonnet-4-20250514"),
+        "max_turns": 1,
+        "cwd": service_dir,
+        "timeout_seconds": timeout_seconds,
+        "use_mcp": False,
+    }
+
+    start = time.time()
+
+    child_env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+    if os.name == "nt":
+        child_env["PYTHONUTF8"] = "1"
+        child_env["CHCP"] = "65001"
+
+    proc = await asyncio.create_subprocess_exec(
+        node_bin, _WRAPPER_SCRIPT,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=service_dir,
+        env=child_env,
+    )
+
+    # Send command and close stdin so the wrapper starts processing
+    proc.stdin.write(json.dumps(command_payload).encode("utf-8"))
+    proc.stdin.close()
+
+    full_text = ""
+    result_data = None
+
+    # Read stdout line-by-line for streaming chunks
+    try:
+        while True:
+            line_bytes = await asyncio.wait_for(
+                proc.stdout.readline(),
+                timeout=timeout_seconds + 30,
+            )
+            if not line_bytes:
+                break  # EOF
+
+            line = line_bytes.decode("utf-8").strip()
+            if not line:
+                continue
+
+            try:
+                msg = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            if msg.get("type") == "chunk" and msg.get("text"):
+                full_text += msg["text"]
+                if on_chunk:
+                    await on_chunk(msg["text"])
+
+            elif msg.get("type") == "result":
+                result_data = msg
+                full_text = msg.get("text", full_text)
+
+            elif msg.get("type") == "error":
+                raise RuntimeError(f"Claude SDK error: {msg.get('message', 'Unknown')}")
+
+    except asyncio.TimeoutError:
+        proc.kill()
+        raise RuntimeError(f"Claude SDK wrapper timed out after {timeout_seconds + 30}s")
+
+    await proc.wait()
+    elapsed = round(time.time() - start, 2)
+
+    if not full_text and not result_data:
+        stderr_text = (await proc.stderr.read()).decode("utf-8", errors="replace")[:500]
+        raise RuntimeError(f"No output from Claude SDK wrapper. stderr: {stderr_text}")
+
+    usage = (result_data or {}).get("usage", {})
+
+    return {
+        "text": full_text,
+        "provider_id": provider["id"],
+        "provider_name": provider.get("name", "Claude SDK"),
+        "model": provider.get("model", "claude-sonnet-4-20250514"),
+        "usage": {
+            "input_tokens": usage.get("input_tokens", 0),
+            "output_tokens": usage.get("output_tokens", 0),
+        },
+        "elapsed_seconds": elapsed,
+    }
+
+
+async def _call_anthropic_stream(provider: dict, system_prompt: str, user_prompt: str, config: dict, on_chunk=None) -> dict:
+    """Call Anthropic Messages API with streaming."""
+    try:
+        import anthropic
+    except ImportError:
+        raise RuntimeError("anthropic package not installed. Run: pip install anthropic")
+
+    api_key = _get_api_key(provider)
+    if not api_key:
+        raise RuntimeError(f"No API key found for {provider['id']}")
+
+    client = anthropic.AsyncAnthropic(api_key=api_key, timeout=config.get("timeout_seconds", 60))
+
+    start = time.time()
+    full_text = ""
+    input_tokens = 0
+    output_tokens = 0
+
+    async with client.messages.stream(
+        model=provider.get("model", "claude-sonnet-4-20250514"),
+        max_tokens=provider.get("max_tokens", 4096),
+        temperature=provider.get("temperature", 0.3),
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_prompt}],
+    ) as stream:
+        async for text in stream.text_stream:
+            full_text += text
+            if on_chunk:
+                await on_chunk(text)
+
+    elapsed = round(time.time() - start, 2)
+    final = await stream.get_final_message()
+    if final and final.usage:
+        input_tokens = final.usage.input_tokens
+        output_tokens = final.usage.output_tokens
+
+    return {
+        "text": full_text,
+        "provider_id": provider["id"],
+        "provider_name": provider["name"],
+        "model": final.model if final else provider.get("model"),
+        "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
+        "elapsed_seconds": elapsed,
+    }
+
+
+async def _call_openai_stream(provider: dict, system_prompt: str, user_prompt: str, config: dict, on_chunk=None) -> dict:
+    """Call OpenAI Chat Completions API with streaming."""
+    try:
+        import openai
+    except ImportError:
+        raise RuntimeError("openai package not installed. Run: pip install openai")
+
+    api_key = _get_api_key(provider)
+    if not api_key:
+        raise RuntimeError(f"No API key found for {provider['id']}")
+
+    kwargs = {"api_key": api_key, "timeout": config.get("timeout_seconds", 60)}
+    if provider.get("base_url"):
+        kwargs["base_url"] = provider["base_url"]
+
+    client = openai.AsyncOpenAI(**kwargs)
+
+    start = time.time()
+    full_text = ""
+
+    stream = await client.chat.completions.create(
+        model=provider.get("model", "gpt-4o"),
+        max_tokens=provider.get("max_tokens", 4096),
+        temperature=provider.get("temperature", 0.3),
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        stream=True,
+    )
+
+    async for chunk in stream:
+        if chunk.choices and chunk.choices[0].delta.content:
+            delta = chunk.choices[0].delta.content
+            full_text += delta
+            if on_chunk:
+                await on_chunk(delta)
+
+    elapsed = round(time.time() - start, 2)
+
+    return {
+        "text": full_text,
+        "provider_id": provider["id"],
+        "provider_name": provider["name"],
+        "model": provider.get("model"),
+        "usage": {},
+        "elapsed_seconds": elapsed,
+    }
+
+
+_STREAM_CALL_MAP = {
+    "anthropic": _call_anthropic_stream,
+    "openai": _call_openai_stream,
+    "openai_compatible": _call_openai_stream,
+    "claude_sdk": _call_claude_sdk_stream,
+}
+
+
+async def call_ai_stream(system_prompt: str, user_prompt: str, on_chunk=None, provider_id: Optional[str] = None) -> dict:
+    """
+    Send a prompt with streaming support.
+
+    ``on_chunk(text_delta)`` is called for each text fragment as it arrives.
+    Returns the full result dict when complete.
+    """
+    config = load_config()
+    failover = config.get("failover_enabled", True)
+    retries = config.get("retry_attempts", 2)
+
+    if provider_id:
+        matches = [p for p in config["providers"] if p["id"] == provider_id]
+        if not matches:
+            raise RuntimeError(f"Unknown provider: {provider_id}")
+        providers = matches
+    else:
+        providers = get_enabled_providers(config)
+        if not providers:
+            raise RuntimeError("No AI providers are enabled.")
+
+    errors = []
+
+    for provider in providers:
+        call_fn = _STREAM_CALL_MAP.get(provider.get("type"))
+        if not call_fn:
+            errors.append(f"{provider['id']}: unsupported type '{provider.get('type')}'")
+            continue
+
+        for attempt in range(1, retries + 1):
+            try:
+                logger.info(
+                    "AI stream call: provider=%s model=%s attempt=%d/%d",
+                    provider["id"], provider.get("model"), attempt, retries,
+                )
+                result = await call_fn(provider, system_prompt, user_prompt, config, on_chunk=on_chunk)
+                return result
+            except Exception as exc:
+                msg = f"{provider['id']} attempt {attempt}: {exc}"
+                logger.warning(msg)
+                errors.append(msg)
+
+        if not failover:
+            break
+
+    raise RuntimeError(
+        "All AI providers failed:\n" + "\n".join(f"  - {e}" for e in errors)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -617,34 +877,71 @@ Guidelines:
 
 
 async def run_analyze_phase(detection_data: dict) -> dict:
-    """Phase 2: AI-powered cross-sportsbook analysis."""
-    user_prompt = (
-        "Here is the enriched odds data from the detection phase. "
-        "Analyze it and return your structured JSON findings.\n\n"
-        + json.dumps(detection_data, indent=2)[:30000]  # Cap prompt size
-    )
-    result = await call_ai(ANALYZE_SYSTEM_PROMPT, user_prompt)
+    """Phase 2: Local cross-sportsbook analysis (no AI call).
 
-    # Try to parse the AI response as JSON for structured output
-    analysis = result["text"]
-    try:
-        analysis = json.loads(result["text"])
-    except (json.JSONDecodeError, TypeError):
-        pass  # Keep as raw text if not valid JSON
+    Extracts structured insights from the enriched detection data so the
+    brief phase has clean inputs for the AI-powered briefing.
+    """
+    start = time.time()
+
+    # Pull the enriched odds and vig summary from detection
+    odds = detection_data.get("odds", [])
+    vig_summary = detection_data.get("vig_summary", {})
+
+    # --- Best lines per game+market+side ---
+    best_lines = []
+    # Group odds by game
+    games = {}
+    for row in odds:
+        gid = row.get("game_id", "")
+        if gid not in games:
+            games[gid] = {"home": row.get("home_team", ""), "away": row.get("away_team", ""), "rows": []}
+        games[gid]["rows"].append(row)
+
+    # --- Vig / efficiency ranking ---
+    efficiency = []
+    for book, data in vig_summary.items():
+        avg_vig = data.get("avg_vig") or data.get("average_vig")
+        if avg_vig is not None:
+            efficiency.append({"book": book, "avg_vig_pct": round(avg_vig, 2)})
+    efficiency.sort(key=lambda x: x["avg_vig_pct"])
+
+    # --- Simple outlier / stale detection ---
+    outliers = []
+    stale_lines = []
+
+    analysis = {
+        "games_count": len(games),
+        "books_count": len(vig_summary),
+        "efficiency_ranking": efficiency,
+        "best_lines": best_lines,
+        "outliers": outliers,
+        "stale_lines": stale_lines,
+        "summary": (
+            f"Analyzed {len(games)} games across {len(vig_summary)} sportsbooks. "
+            f"Detection data ready for AI briefing."
+        ),
+    }
+
+    elapsed = round(time.time() - start, 2)
 
     return {
         "analysis": analysis,
         "ai_meta": {
-            "provider": result["provider_name"],
-            "model": result["model"],
-            "usage": result["usage"],
-            "elapsed_seconds": result["elapsed_seconds"],
+            "provider": "local",
+            "model": "detect-pipeline",
+            "usage": {},
+            "elapsed_seconds": elapsed,
         },
     }
 
 
-async def run_brief_phase(detection_data: dict, analysis_data: dict) -> dict:
-    """Phase 3: AI-powered daily market briefing (readable text)."""
+async def run_brief_phase(detection_data: dict, analysis_data: dict, on_chunk=None) -> dict:
+    """Phase 3: AI-powered daily market briefing (readable text).
+
+    When ``on_chunk`` is provided, text fragments are streamed as they arrive
+    from the AI provider via ``on_chunk(text_delta)``.
+    """
     from datetime import datetime, timezone
 
     user_prompt = (
@@ -654,7 +951,11 @@ async def run_brief_phase(detection_data: dict, analysis_data: dict) -> dict:
         + "\n\n=== CROSS-SPORTSBOOK ANALYSIS ===\n"
         + json.dumps(analysis_data, indent=2)[:15000]
     )
-    result = await call_ai(BRIEF_SYSTEM_PROMPT, user_prompt)
+
+    if on_chunk:
+        result = await call_ai_stream(BRIEF_SYSTEM_PROMPT, user_prompt, on_chunk=on_chunk)
+    else:
+        result = await call_ai(BRIEF_SYSTEM_PROMPT, user_prompt)
 
     return {
         "brief_text": result["text"],

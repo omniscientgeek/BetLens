@@ -57,6 +57,12 @@ function BetLens() {
   // Pipeline results (used by BriefPanel and ChatPanel)
   const [pipelineResults, setPipelineResults] = useState(null);
 
+  // Incremental phase results (captured as each phase completes)
+  const [phaseResults, setPhaseResults] = useState({});
+
+  // Streaming brief text (accumulated from brief_chunk events)
+  const [streamingBrief, setStreamingBrief] = useState("");
+
   // Fetch available JSON files on mount
   useEffect(() => {
     fetch(`${API_BASE}/files`)
@@ -82,6 +88,8 @@ function BetLens() {
     setPipeline(null);
     setPipelineComplete(false);
     setPipelineError(null);
+    setPhaseResults({});
+    setStreamingBrief("");
 
     if (!filename) return;
 
@@ -120,11 +128,23 @@ function BetLens() {
         totalPhases: data.totalPhases,
         label: data.label,
       });
+      // Capture phase results as they complete
+      if (data.status === "complete" && data.result) {
+        setPhaseResults((prev) => ({ ...prev, [data.phase]: data.result }));
+      }
+    });
+
+    // Accumulate streaming brief text chunks as they arrive
+    socket.on("brief_chunk", (data) => {
+      if (data.text) {
+        setStreamingBrief((prev) => prev + data.text);
+      }
     });
 
     socket.on("processing_complete", (data) => {
       setPipelineComplete(true);
       setPipelineResults(data.results || null);
+      setStreamingBrief(""); // Clear streaming text — final brief is in results
       socket.disconnect();
       socketRef.current = null;
     });
@@ -134,6 +154,42 @@ function BetLens() {
       socket.disconnect();
       socketRef.current = null;
     });
+  };
+
+  // Convert analyze-phase result into a BriefPanel-compatible shape
+  const buildInterimBrief = (analyzeResult) => {
+    if (!analyzeResult) return null;
+    const { analysis, ai_meta } = analyzeResult;
+    let briefText;
+    if (typeof analysis === "string") {
+      briefText = analysis;
+    } else if (analysis && typeof analysis === "object") {
+      const parts = [];
+      if (analysis.summary) parts.push(`## Summary\n${analysis.summary}`);
+      if (analysis.best_lines?.length) {
+        parts.push(
+          `## Best Lines\n${analysis.best_lines.map((l) => `- ${typeof l === "string" ? l : JSON.stringify(l)}`).join("\n")}`
+        );
+      }
+      if (analysis.arbitrage?.length) {
+        parts.push(
+          `## Arbitrage Opportunities\n${analysis.arbitrage.map((a) => `- ${typeof a === "string" ? a : JSON.stringify(a)}`).join("\n")}`
+        );
+      }
+      if (analysis.outliers?.length) {
+        parts.push(
+          `## Outlier Lines\n${analysis.outliers.map((o) => `- ${typeof o === "string" ? o : JSON.stringify(o)}`).join("\n")}`
+        );
+      }
+      briefText = parts.length > 0 ? parts.join("\n\n") : JSON.stringify(analysis, null, 2);
+    } else {
+      briefText = "Analysis complete. Generating full briefing...";
+    }
+    return {
+      brief_text: briefText,
+      generated_at: new Date().toISOString(),
+      ai_meta: ai_meta,
+    };
   };
 
   // Determine step status for the pipeline stepper
@@ -194,6 +250,18 @@ function BetLens() {
             );
           })}
         </div>
+      )}
+
+      {/* Show streaming brief text as it arrives during the brief phase */}
+      {!pipelineComplete && !pipelineError && streamingBrief && (
+        <BriefPanel
+          briefResult={{
+            brief_text: streamingBrief,
+            generated_at: new Date().toISOString(),
+            ai_meta: null,
+          }}
+          isInterim={true}
+        />
       )}
 
       {pipelineComplete && (
