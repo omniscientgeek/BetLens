@@ -1,0 +1,22 @@
+{
+  "mcpServers": {
+    "chrome-devtools": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "chrome-devtools-mcp@latest",
+        "--isolated",
+        "--autoConnect"
+      ]
+    },
+    "mcp-project-manager": {
+      "command": "node",
+      "args": [
+        "C:/Users/justi/source/repos/ExpoMPC/tools/mcp-server/build/index.js"
+      ],
+      "env": {
+        "MCP_PROJECT_MANAGER_API_URL": "http://localhost:5288"
+      }
+    }
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "providers": [
+    {
+      "id": "claude",
+      "name": "Claude (Anthropic)",
+      "type": "anthropic",
+      "model": "claude-sonnet-4-20250514",
+      "enabled": true,
+      "priority": 1,
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "max_tokens": 4096,
+      "temperature": 0.3
+    },
+    {
+      "id": "openai",
+      "name": "OpenAI GPT-4o",
+      "type": "openai",
+      "model": "gpt-4o",
+      "enabled": false,
+      "priority": 2,
+      "api_key_env": "OPENAI_API_KEY",
+      "max_tokens": 4096,
+      "temperature": 0.3
+    },
+    {
+      "id": "openai-mini",
+      "name": "OpenAI GPT-4o Mini",
+      "type": "openai",
+      "model": "gpt-4o-mini",
+      "enabled": false,
+      "priority": 3,
+      "api_key_env": "OPENAI_API_KEY",
+      "max_tokens": 4096,
+      "temperature": 0.3
+    },
+    {
+      "id": "custom",
+      "name": "Custom Endpoint",
+      "type": "openai_compatible",
+      "model": "default",
+      "enabled": false,
+      "priority": 99,
+      "api_key_env": "CUSTOM_AI_API_KEY",
+      "base_url": "http://localhost:11434/v1",
+      "max_tokens": 4096,
+      "temperature": 0.3
+    }
+  ],
+  "failover_enabled": true,
+  "timeout_seconds": 60,
+  "retry_attempts": 2
+}

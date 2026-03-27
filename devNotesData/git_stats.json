@@ -1,6 +1,30 @@
 {
   "commits": [
     {
+      "hash": "ec942e70",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-26 12:29:34 -0600",
+      "subject": "Fix devnotes not loading on Generate click",
+      "is_claude": true
+    },
+    {
+      "hash": "88d8def9",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-26 11:03:04 -0600",
+      "subject": "Move sample.json to dedicated data folder for JSON viewer",
+      "is_claude": true
+    },
+    {
+      "hash": "059d913c",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-26 10:42:04 -0600",
+      "subject": "Add git commit history analysis with Claude vs User contribution stats",
+      "is_claude": true
+    },
+    {
       "hash": "e63d48ec",
       "author": "Justin",
       "email": "justin@omniscientgeek.com",
@@ -26,11 +50,11 @@
     }
   ],
   "summary": {
-    "total_commits": 3,
-    "claude_commits": 1,
+    "total_commits": 6,
+    "claude_commits": 4,
     "user_commits": 2,
-    "claude_percentage": 33.3,
-    "user_percentage": 66.7,
-    "generated_at": "2026-03-26T10:31:25.174925"
+    "claude_percentage": 66.7,
+    "user_percentage": 33.3,
+    "generated_at": "2026-03-26T14:43:50.053464"
   }
 }

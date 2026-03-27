@@ -9,6 +9,14 @@ from datetime import datetime
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
+from detect import run_detection
+from ai_service import (
+    load_config as load_ai_config,
+    save_config as save_ai_config,
+    get_enabled_providers,
+    run_analyze_phase,
+    run_brief_phase,
+)
 
 app = Flask(__name__)
 CORS(app)
@@ -24,32 +32,69 @@ PHASES = [
 ]
 
 
+def _emit_phase(sid, filename, phase, i, status, result=None):
+    """Helper to emit a phase_update event."""
+    payload = {
+        "filename": filename,
+        "phase": phase["name"],
+        "label": phase["label"],
+        "status": status,
+        "phaseIndex": i,
+        "totalPhases": len(PHASES),
+    }
+    if result is not None:
+        payload["result"] = result
+    socketio.emit("phase_update", payload, to=sid)
+
+
 def run_processing_pipeline(filename, sid):
     """Execute the 3-phase pipeline, emitting status updates via WebSocket."""
     try:
+        pipeline_results = {}
+
         for i, phase in enumerate(PHASES):
-            socketio.emit("phase_update", {
-                "filename": filename,
-                "phase": phase["name"],
-                "label": phase["label"],
-                "status": "in_progress",
-                "phaseIndex": i,
-                "totalPhases": len(PHASES),
-            }, to=sid)
+            _emit_phase(sid, filename, phase, i, "in_progress")
 
-            # Stub: each phase takes 10 seconds (replace with real logic later)
-            socketio.sleep(10)
+            if phase["name"] == "detect":
+                # --- Real detection: compute probabilities, vig, fair odds ---
+                detection = run_detection(filename)
+                pipeline_results["detect"] = detection
+                _emit_phase(sid, filename, phase, i, "complete", result=detection)
+            elif phase["name"] == "analyze":
+                # --- AI-powered cross-sportsbook analysis ---
+                try:
+                    analysis = run_analyze_phase(pipeline_results.get("detect", {}))
+                    pipeline_results["analyze"] = analysis
+                    _emit_phase(sid, filename, phase, i, "complete", result=analysis)
+                except Exception as exc:
+                    # Graceful degradation: report the error but continue pipeline
+                    err_result = {"error": str(exc), "ai_meta": None}
+                    pipeline_results["analyze"] = err_result
+                    _emit_phase(sid, filename, phase, i, "complete", result=err_result)
 
-            socketio.emit("phase_update", {
-                "filename": filename,
-                "phase": phase["name"],
-                "label": phase["label"],
-                "status": "complete",
-                "phaseIndex": i,
-                "totalPhases": len(PHASES),
-            }, to=sid)
+            elif phase["name"] == "brief":
+                # --- AI-powered actionable briefing ---
+                try:
+                    brief = run_brief_phase(
+                        pipeline_results.get("detect", {}),
+                        pipeline_results.get("analyze", {}),
+                    )
+                    pipeline_results["brief"] = brief
+                    _emit_phase(sid, filename, phase, i, "complete", result=brief)
+                except Exception as exc:
+                    err_result = {"error": str(exc), "ai_meta": None}
+                    pipeline_results["brief"] = err_result
+                    _emit_phase(sid, filename, phase, i, "complete", result=err_result)
 
-        socketio.emit("processing_complete", {"filename": filename}, to=sid)
+            else:
+                # Unknown phase — placeholder
+                socketio.sleep(2)
+                _emit_phase(sid, filename, phase, i, "complete")
+
+        socketio.emit("processing_complete", {
+            "filename": filename,
+            "results": pipeline_results,
+        }, to=sid)
     except Exception as e:
         socketio.emit("processing_error", {
             "filename": filename,
@@ -181,8 +226,11 @@ def list_conversations():
         if parsed and parsed["project"] == project_guid:
             conversations.append(parsed)
 
-    # Sort by created date descending (newest first)
-    conversations.sort(key=lambda c: c.get("created", ""), reverse=True)
+    # Sort by first message timestamp descending (newest first)
+    conversations.sort(
+        key=lambda c: c["messages"][0]["timestamp"] if c.get("messages") else c.get("created", ""),
+        reverse=True,
+    )
 
     result = {"conversations": conversations, "count": len(conversations)}
 
@@ -382,6 +430,90 @@ def get_saved_git_stats():
     with open(filepath, "r", encoding="utf-8") as f:
         data = json.load(f)
     return jsonify(data)
+
+
+# ---------------------------------------------------------------------------
+# AI Configuration Endpoints
+# ---------------------------------------------------------------------------
+
+@app.route("/api/ai/config", methods=["GET"])
+def get_ai_config():
+    """Return the current AI provider configuration (keys redacted)."""
+    try:
+        config = load_ai_config()
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    # Redact API keys — only show whether they are set
+    for p in config.get("providers", []):
+        env_var = p.get("api_key_env", "")
+        p["api_key_set"] = bool(os.environ.get(env_var)) if env_var else False
+        p.pop("api_key", None)  # Never expose direct keys
+
+    return jsonify(config)
+
+
+@app.route("/api/ai/config", methods=["PUT"])
+def update_ai_config():
+    """Update AI provider configuration."""
+    try:
+        new_config = request.get_json()
+        if not new_config or "providers" not in new_config:
+            return jsonify({"error": "Invalid config: 'providers' array required"}), 400
+
+        # Validate providers
+        for p in new_config["providers"]:
+            if not p.get("id") or not p.get("type"):
+                return jsonify({"error": "Each provider needs 'id' and 'type'"}), 400
+
+        save_ai_config(new_config)
+        return jsonify({"status": "ok"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/ai/providers", methods=["GET"])
+def list_ai_providers():
+    """Return a summary of enabled AI providers."""
+    try:
+        config = load_ai_config()
+        providers = []
+        for p in config.get("providers", []):
+            env_var = p.get("api_key_env", "")
+            providers.append({
+                "id": p["id"],
+                "name": p.get("name", p["id"]),
+                "type": p.get("type"),
+                "model": p.get("model"),
+                "enabled": p.get("enabled", False),
+                "priority": p.get("priority", 999),
+                "api_key_set": bool(os.environ.get(env_var)) if env_var else False,
+            })
+        providers.sort(key=lambda x: x["priority"])
+        return jsonify({"providers": providers, "failover_enabled": config.get("failover_enabled", True)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/ai/test", methods=["POST"])
+def test_ai_provider():
+    """Send a quick test prompt to a specific provider to verify it works."""
+    data = request.get_json() or {}
+    provider_id = data.get("provider_id")
+
+    if not provider_id:
+        return jsonify({"error": "provider_id is required"}), 400
+
+    try:
+        from ai_service import call_ai
+        result = call_ai(
+            system_prompt="You are a helpful assistant. Respond in one short sentence.",
+            user_prompt="Say hello and confirm you are working.",
+            provider_id=provider_id,
+        )
+        return jsonify({"status": "ok", "response": result})
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
 
 
 if __name__ == "__main__":
