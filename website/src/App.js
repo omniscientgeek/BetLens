@@ -5,6 +5,7 @@ import DevNotes from "./DevNotes";
 import DataExplorer from "./DataExplorer";
 import AISettings from "./AISettings";
 import ChatPanel from "./ChatPanel";
+import BriefPanel from "./BriefPanel";
 import "./App.css";
 
 const API_BASE = "";
@@ -53,8 +54,7 @@ function BetLens() {
   const [pipelineError, setPipelineError] = useState(null);
   const socketRef = useRef(null);
 
-  // Chat state
-  const [chatOpen, setChatOpen] = useState(false);
+  // Pipeline results (used by BriefPanel and ChatPanel)
   const [pipelineResults, setPipelineResults] = useState(null);
 
   // Fetch available JSON files on mount
@@ -197,7 +197,12 @@ function BetLens() {
       )}
 
       {pipelineComplete && (
-        <div className="pipeline-done">Processing complete</div>
+        <>
+          <div className="pipeline-done">Processing complete</div>
+          {pipelineResults?.brief && (
+            <BriefPanel briefResult={pipelineResults.brief} />
+          )}
+        </>
       )}
 
       {pipelineError && (
@@ -211,18 +216,7 @@ function BetLens() {
         </div>
       )}
 
-      <button
-        className="chat-fab"
-        onClick={() => setChatOpen(!chatOpen)}
-        title="Chat with AI Assistant"
-      >
-        {chatOpen ? '\u00d7' : '\ud83d\udcac'}
-      </button>
-      <ChatPanel
-        pipelineResults={pipelineResults}
-        isOpen={chatOpen}
-        onToggle={() => setChatOpen(!chatOpen)}
-      />
+      <ChatPanel pipelineResults={pipelineResults} />
     </>
   );
 }

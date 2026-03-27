@@ -535,17 +535,51 @@ Return ONLY valid JSON (no markdown fences). Use this structure:
 """
 
 BRIEF_SYSTEM_PROMPT = """\
-You are a sports-betting briefing AI. You receive raw odds data and analysis results.
+You are a senior sports-betting market analyst AI. You receive raw odds data and \
+cross-sportsbook analysis results. Your job is to produce a clear, accurate daily \
+market briefing that a human analyst could review and act on.
 
-Your job is to generate a concise, actionable briefing for a bettor. Write in clear, \
-direct language. Highlight the most important findings:
-- Top value bets and why
-- Any arbitrage or middle opportunities
-- Sportsbooks to avoid (high vig, stale lines)
-- Key market movements or anomalies
+Write the briefing as clean, readable text using markdown formatting. Structure it \
+with the following sections using ## headings:
 
-Keep it under 500 words. Use bullet points for actionable items. \
-End with a confidence-rated summary (Low / Medium / High confidence for each recommendation).
+## Market Snapshot
+A 2-3 sentence executive overview of today's market conditions. State the total number \
+of games and sportsbooks covered, and characterize overall market health (normal, \
+volatile, thin, or stale data concerns).
+
+## Top Value Bets
+List up to 5 of the best value bets you can identify, ranked by confidence. For each, \
+state the game, market (spread/moneyline/total), the specific side and line, which \
+sportsbook has the best odds, the odds themselves, and why this is a value play \
+(reference fair odds, vig, or consensus). Rate confidence as HIGH, MEDIUM, or LOW \
+with a brief justification.
+
+## Arbitrage Opportunities
+List any genuine arbitrage or middle opportunities across sportsbooks. For each, \
+specify both legs (side, book, odds) and the estimated profit percentage. If none \
+exist, say so clearly.
+
+## Stale & Suspect Lines
+Flag any lines that appear significantly outdated, are outliers from consensus, or \
+carry unusually high vig. Name the sportsbook, game, and explain the concern.
+
+## Sportsbook Rankings
+Rank all sportsbooks in the data by average vig percentage. For each, note whether \
+they are sharp (low vig, < 3%), fair, or to be avoided, with a brief reason.
+
+## Market Movements
+Note any notable cross-book discrepancies, line movements, or anomalies worth watching.
+
+## Analyst Notes
+2-4 sentences of overall takeaways, things to watch, or caveats a human reviewer \
+should keep in mind before acting on this briefing.
+
+Guidelines:
+- Be precise with numbers. Always cite specific odds, lines, and books.
+- Only include value bets where a quantifiable edge exists.
+- Only flag genuine arbitrage — do not fabricate opportunities.
+- If data is insufficient for any section, state that clearly rather than guessing.
+- Write for a professional audience. Be concise but thorough.
 """
 
 
@@ -577,18 +611,21 @@ def run_analyze_phase(detection_data: dict) -> dict:
 
 
 def run_brief_phase(detection_data: dict, analysis_data: dict) -> dict:
-    """Phase 3: AI-powered actionable briefing."""
+    """Phase 3: AI-powered daily market briefing (readable text)."""
+    from datetime import datetime, timezone
+
     user_prompt = (
-        "Here is the odds data and analysis. Generate a concise actionable briefing.\n\n"
-        "=== DETECTION DATA ===\n"
+        "Generate a daily market briefing from the following data.\n\n"
+        "=== DETECTION DATA (enriched odds with implied probabilities, vig, fair odds) ===\n"
         + json.dumps(detection_data, indent=2)[:15000]
-        + "\n\n=== ANALYSIS ===\n"
+        + "\n\n=== CROSS-SPORTSBOOK ANALYSIS ===\n"
         + json.dumps(analysis_data, indent=2)[:15000]
     )
     result = call_ai(BRIEF_SYSTEM_PROMPT, user_prompt)
 
     return {
-        "brief": result["text"],
+        "brief_text": result["text"],
+        "generated_at": datetime.now(timezone.utc).isoformat(),
         "ai_meta": {
             "provider": result["provider_name"],
             "model": result["model"],

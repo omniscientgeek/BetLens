@@ -123,7 +123,7 @@ function TypingIndicator() {
   );
 }
 
-function ChatPanel({ pipelineResults, isOpen, onToggle }) {
+function ChatPanel({ pipelineResults }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [conversationId, setConversationId] = useState(null);
@@ -246,7 +246,7 @@ function ChatPanel({ pipelineResults, isOpen, onToggle }) {
   ).length;
 
   return (
-    <div className={`chat-panel ${isOpen ? "chat-panel--open" : ""}`}>
+    <div className="chat-panel">
       <div className="chat-panel-header">
         <h3>
           AI Assistant
@@ -258,9 +258,6 @@ function ChatPanel({ pipelineResults, isOpen, onToggle }) {
           {conversationId && (
             <button onClick={handleNewChat}>New Chat</button>
           )}
-          <button className="chat-close-btn" onClick={onToggle}>
-            &times;
-          </button>
         </div>
       </div>
 
