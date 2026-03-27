@@ -81,7 +81,7 @@ async function handleQuery(command) {
     cwd: resolvedCwd,
     settingSources: [],          // Don't load user/project settings — we inject MCP config directly
     maxTurns: mcpEnabled ? (max_turns || 10) : (max_turns || 1),
-    permissionMode: mcpEnabled ? 'bypassPermissions' : 'plan',
+    permissionMode: mcpEnabled ? 'bypassPermissions' : 'default',
   };
 
   // When MCP is enabled, load the betstamp-intelligence server config
