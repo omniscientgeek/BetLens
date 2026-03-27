@@ -15,7 +15,7 @@ import os
 import json
 import random
 from datetime import datetime, timezone
-from math import sqrt, log, inf
+from math import sqrt, log, exp, lgamma, inf
 from statistics import pstdev, mean
 from typing import Optional
 
@@ -23,7 +23,7 @@ from typing import Optional
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "webservice")))
 
 from mcp.server.fastmcp import FastMCP
-from odds_math import implied_probability, calculate_vig, no_vig_probabilities, fair_odds_to_american, kelly_criterion
+from odds_math import implied_probability, calculate_vig, no_vig_probabilities, shin_probabilities, fair_odds_to_american, kelly_criterion, bayesian_update
 
 # ---------------------------------------------------------------------------
 # Setup
@@ -257,6 +257,162 @@ def _get_pinnacle_fair_probs(games: dict[str, list[dict]]) -> dict[str, dict[str
     return result
 
 
+def _compute_market_consistency(enriched_markets: dict) -> Optional[dict]:
+    """Score cross-market consistency for a single sportsbook/game record.
+
+    Each market type implies a win probability for the home team.  When those
+    probabilities diverge within the *same* sportsbook the book has an internal
+    inconsistency that a bettor can exploit.
+
+    Comparisons performed (all using no-vig / fair probabilities):
+      1. Spread vs Moneyline  — both directly imply a home-win probability
+      2. Spread vs Total      — uses spread + total to derive implied scores;
+         checks whether the score-gap direction agrees with the spread line
+      3. Moneyline vs Total   — same implied-score check against ML probability
+
+    Returns ``None`` when fewer than two markets are available (nothing to
+    compare).
+    """
+
+    spread = enriched_markets.get("spread")
+    ml = enriched_markets.get("moneyline")
+    total = enriched_markets.get("total")
+
+    # We need at least two markets to compare
+    available = sum(1 for m in (spread, ml, total) if m is not None)
+    if available < 2:
+        return None
+
+    pairs: dict[str, dict] = {}
+    diffs: list[float] = []
+    exploitable_details: list[str] = []
+
+    # ---- 1. Spread vs Moneyline (primary comparison) ----------------------
+    if spread and ml:
+        spread_fair = no_vig_probabilities(spread["home_odds"], spread["away_odds"])
+        ml_fair = no_vig_probabilities(ml["home_odds"], ml["away_odds"])
+
+        sp_home = spread_fair["fair_a"]
+        ml_home = ml_fair["fair_a"]
+        diff = abs(sp_home - ml_home)
+
+        pairs["spread_vs_moneyline"] = {
+            "spread_implied_home_prob": round(sp_home, 4),
+            "moneyline_implied_home_prob": round(ml_home, 4),
+            "diff": round(diff, 4),
+            "diff_pct": f"{round(diff * 100, 2)}%",
+            "higher_market": "spread" if sp_home > ml_home else "moneyline",
+        }
+        diffs.append(diff)
+
+        if diff > 0.05:
+            cheaper = "moneyline" if sp_home > ml_home else "spread"
+            exploitable_details.append(
+                f"Spread implies {round(sp_home * 100, 1)}% home win but ML implies "
+                f"{round(ml_home * 100, 1)}% — {round(diff * 100, 1)}pp gap. "
+                f"Home side looks under-priced on the {cheaper} market."
+            )
+
+    # ---- 2. Spread vs Total (implied-score consistency) -------------------
+    if spread and total:
+        spread_line = spread.get("home_line")  # e.g. -5.5 means home favoured by 5.5
+        total_line = total.get("line")          # e.g. 220.5
+
+        if spread_line is not None and total_line is not None:
+            # Implied scores: home = (total - spread_line) / 2
+            #                 away = (total + spread_line) / 2
+            implied_home_score = (total_line - spread_line) / 2
+            implied_away_score = (total_line + spread_line) / 2
+            score_gap = implied_home_score - implied_away_score  # positive = home favoured
+
+            # The spread line already tells us the expected gap; check that
+            # the total doesn't push implied scores into contradiction.
+            # A contradiction arises when the spread says home is favoured but
+            # implied scores say away scores more (or vice-versa).
+            spread_favours_home = spread_line < 0
+            scores_favour_home = score_gap > 0
+
+            direction_match = spread_favours_home == scores_favour_home or score_gap == 0
+            # Use score-gap magnitude vs spread magnitude as a soft diff
+            expected_gap = abs(spread_line)
+            actual_gap = abs(score_gap)
+            gap_diff = abs(actual_gap - expected_gap) / max(expected_gap, 1)
+
+            pairs["spread_vs_total"] = {
+                "spread_line": spread_line,
+                "total_line": total_line,
+                "implied_home_score": round(implied_home_score, 2),
+                "implied_away_score": round(implied_away_score, 2),
+                "score_gap": round(score_gap, 2),
+                "direction_consistent": direction_match,
+                "gap_deviation_pct": f"{round(gap_diff * 100, 1)}%",
+            }
+            # Normalise to a 0-1 scale comparable to probability diffs
+            normalised_diff = min(gap_diff * 0.1, 0.20)  # cap contribution
+            diffs.append(normalised_diff)
+
+            if not direction_match:
+                exploitable_details.append(
+                    f"Spread ({spread_line}) favours {'home' if spread_favours_home else 'away'} "
+                    f"but total-implied scores ({round(implied_home_score, 1)}-"
+                    f"{round(implied_away_score, 1)}) favour the other side."
+                )
+
+    # ---- 3. Moneyline vs Total (implied-score check) ----------------------
+    if ml and total:
+        ml_fair = no_vig_probabilities(ml["home_odds"], ml["away_odds"])
+        ml_home_prob = ml_fair["fair_a"]
+        total_line = total.get("line")
+
+        if total_line is not None and spread:
+            # Re-use implied scores computed above when available
+            spread_line = spread.get("home_line", 0)
+            implied_home_score = (total_line - spread_line) / 2
+            implied_away_score = (total_line + spread_line) / 2
+            ml_favours_home = ml_home_prob > 0.5
+            scores_favour_home = implied_home_score > implied_away_score
+
+            direction_match = ml_favours_home == scores_favour_home or implied_home_score == implied_away_score
+
+            pairs["moneyline_vs_total"] = {
+                "moneyline_home_prob": round(ml_home_prob, 4),
+                "implied_home_score": round(implied_home_score, 2),
+                "implied_away_score": round(implied_away_score, 2),
+                "direction_consistent": direction_match,
+            }
+
+            if not direction_match:
+                normalised_diff = 0.06  # fixed penalty for directional mismatch
+                diffs.append(normalised_diff)
+                exploitable_details.append(
+                    f"ML implies home wins {round(ml_home_prob * 100, 1)}% of the time "
+                    f"but implied scores favour {'away' if ml_favours_home else 'home'}."
+                )
+
+    if not diffs:
+        return None
+
+    # ---- Overall consistency score (0-100, higher = more consistent) ------
+    avg_diff = sum(diffs) / len(diffs)
+    max_diff = max(diffs)
+    # Scale: 0% avg diff → 100 score, ≥10% avg diff → 0 score (linear)
+    consistency_score = round(max(0.0, (1 - avg_diff / 0.10)) * 100, 1)
+
+    exploitable = max_diff > 0.05  # >5 pp gap in any pair
+
+    result: dict = {
+        "consistency_score": consistency_score,
+        "avg_diff": round(avg_diff, 4),
+        "max_diff": round(max_diff, 4),
+        "pairs": pairs,
+        "exploitable": exploitable,
+    }
+    if exploitable_details:
+        result["exploit_details"] = exploitable_details
+
+    return result
+
+
 def _enrich_record(record: dict) -> dict:
     """Enrich a single odds record with implied probabilities, vig, and fair odds."""
     markets = record.get("markets", {})
@@ -266,6 +422,7 @@ def _enrich_record(record: dict) -> dict:
         if market_name == "spread":
             vig_info = calculate_vig(market["home_odds"], market["away_odds"])
             fair = no_vig_probabilities(market["home_odds"], market["away_odds"])
+            shin = shin_probabilities(market["home_odds"], market["away_odds"])
             enriched_markets["spread"] = {
                 **market,
                 "home_implied_prob": vig_info["implied_a"],
@@ -274,10 +431,18 @@ def _enrich_record(record: dict) -> dict:
                 "vig_pct": vig_info["vig_pct"],
                 "home_fair_odds": fair_odds_to_american(fair["fair_a"]),
                 "away_fair_odds": fair_odds_to_american(fair["fair_b"]),
+                "home_shin_prob": shin["shin_a"],
+                "away_shin_prob": shin["shin_b"],
+                "home_shin_fair_odds": fair_odds_to_american(shin["shin_a"]),
+                "away_shin_fair_odds": fair_odds_to_american(shin["shin_b"]),
+                "shin_z": shin["z"],
+                "vig_on_home": shin["vig_on_a"],
+                "vig_on_away": shin["vig_on_b"],
             }
         elif market_name == "moneyline":
             vig_info = calculate_vig(market["home_odds"], market["away_odds"])
             fair = no_vig_probabilities(market["home_odds"], market["away_odds"])
+            shin = shin_probabilities(market["home_odds"], market["away_odds"])
             enriched_markets["moneyline"] = {
                 **market,
                 "home_implied_prob": vig_info["implied_a"],
@@ -286,10 +451,18 @@ def _enrich_record(record: dict) -> dict:
                 "vig_pct": vig_info["vig_pct"],
                 "home_fair_odds": fair_odds_to_american(fair["fair_a"]),
                 "away_fair_odds": fair_odds_to_american(fair["fair_b"]),
+                "home_shin_prob": shin["shin_a"],
+                "away_shin_prob": shin["shin_b"],
+                "home_shin_fair_odds": fair_odds_to_american(shin["shin_a"]),
+                "away_shin_fair_odds": fair_odds_to_american(shin["shin_b"]),
+                "shin_z": shin["z"],
+                "vig_on_home": shin["vig_on_a"],
+                "vig_on_away": shin["vig_on_b"],
             }
         elif market_name == "total":
             vig_info = calculate_vig(market["over_odds"], market["under_odds"])
             fair = no_vig_probabilities(market["over_odds"], market["under_odds"])
+            shin = shin_probabilities(market["over_odds"], market["under_odds"])
             enriched_markets["total"] = {
                 **market,
                 "over_implied_prob": vig_info["implied_a"],
@@ -298,9 +471,25 @@ def _enrich_record(record: dict) -> dict:
                 "vig_pct": vig_info["vig_pct"],
                 "over_fair_odds": fair_odds_to_american(fair["fair_a"]),
                 "under_fair_odds": fair_odds_to_american(fair["fair_b"]),
+                "over_shin_prob": shin["shin_a"],
+                "under_shin_prob": shin["shin_b"],
+                "over_shin_fair_odds": fair_odds_to_american(shin["shin_a"]),
+                "under_shin_fair_odds": fair_odds_to_american(shin["shin_b"]),
+                "shin_z": shin["z"],
+                "vig_on_over": shin["vig_on_a"],
+                "vig_on_under": shin["vig_on_b"],
             }
 
-    return {**{k: v for k, v in record.items() if k != "markets"}, "markets": enriched_markets}
+    # --- 8. Market Consistency Scoring (Spread vs ML vs Total) -------------
+    # Compare the win probability each market implies for the home team.
+    # Large gaps within the same book signal an internal inconsistency that
+    # bettors can exploit (e.g. spread implies 68% but ML implies 62%).
+    market_consistency = _compute_market_consistency(enriched_markets)
+
+    out = {**{k: v for k, v in record.items() if k != "markets"}, "markets": enriched_markets}
+    if market_consistency is not None:
+        out["market_consistency"] = market_consistency
+    return out
 
 
 def _group_by_game(odds: list[dict]) -> dict[str, list[dict]]:
@@ -2631,7 +2820,7 @@ def get_book_rankings(filename: Optional[str] = None) -> str:
 def get_implied_scores(
     game_id: Optional[str] = None, filename: Optional[str] = None
 ) -> str:
-    """Estimate implied final scores for each team by combining the consensus spread and total.
+    """Estimate implied final scores for each team by combining spread and total.
 
     Formula:
         Home implied score = (Total + HomeSpread) / 2
@@ -2640,11 +2829,17 @@ def get_implied_scores(
     e.g., spread -5.5 + total 220 → Home ~107.25, Away ~112.75
     (negative home spread means home is favored)
 
+    Includes a per-book implied score matrix that computes each sportsbook's
+    individual implied scores from their own spread + total lines, then
+    compares across all books to highlight where scores diverge most.
+    Divergence flags games where books disagree on expected final scores.
+
     Args:
         game_id: Filter to a single game. Optional — returns all games if omitted.
         filename: Data file to load. Optional.
 
-    Returns implied scores per game sorted by largest margin of victory.
+    Returns implied scores per game sorted by largest margin of victory,
+    with book_matrix and divergence analysis per game.
     """
     cache_key = f"implied_scores:{game_id or 'all'}"
     cached = _cache.get_analysis(filename, cache_key)
@@ -2688,6 +2883,52 @@ def get_implied_scores(
         else:
             favorite = "Pick'em"
 
+        # --- Per-book implied score matrix ---
+        book_scores = []
+        for r in records:
+            spread_mkt = r.get("markets", {}).get("spread", {})
+            total_mkt = r.get("markets", {}).get("total", {})
+            book_home_line = spread_mkt.get("home_line")
+            book_total = total_mkt.get("line")
+            if book_home_line is None or book_total is None:
+                continue
+            book_home_score = round((book_total + book_home_line) / 2, 2)
+            book_away_score = round((book_total - book_home_line) / 2, 2)
+            book_scores.append({
+                "sportsbook": r["sportsbook"],
+                "spread": book_home_line,
+                "total": book_total,
+                "home_implied": book_home_score,
+                "away_implied": book_away_score,
+                "home_diff_from_consensus": round(book_home_score - home_implied, 2),
+                "away_diff_from_consensus": round(book_away_score - away_implied, 2),
+            })
+
+        # Divergence stats across books
+        if len(book_scores) >= 2:
+            home_scores_list = [b["home_implied"] for b in book_scores]
+            away_scores_list = [b["away_implied"] for b in book_scores]
+            home_max = max(home_scores_list)
+            home_min = min(home_scores_list)
+            away_max = max(away_scores_list)
+            away_min = min(away_scores_list)
+            home_range = round(home_max - home_min, 2)
+            away_range = round(away_max - away_min, 2)
+            max_divergence = max(home_range, away_range)
+            # Find which books are most divergent
+            most_bullish_home = max(book_scores, key=lambda b: b["home_implied"])
+            most_bearish_home = min(book_scores, key=lambda b: b["home_implied"])
+            divergence_info = {
+                "home_score_range": home_range,
+                "away_score_range": away_range,
+                "home_high": {"sportsbook": most_bullish_home["sportsbook"], "score": home_max},
+                "home_low": {"sportsbook": most_bearish_home["sportsbook"], "score": home_min},
+                "max_divergence": max_divergence,
+            }
+        else:
+            divergence_info = None
+            max_divergence = 0
+
         results.append(
             {
                 "game_id": gid,
@@ -2702,24 +2943,41 @@ def get_implied_scores(
                 "favorite": favorite,
                 "spread_books": spread_c.get("book_count", 0),
                 "total_books": total_c.get("book_count", 0),
+                "book_matrix": book_scores,
+                "divergence": divergence_info,
                 "context": (
                     f"{home_team} {home_implied} - {away_team} {away_implied} "
                     f"(spread {avg_home_line}, total {avg_total}). "
                     f"{favorite} by {margin}."
+                    + (
+                        f" Max book divergence: {max_divergence} pts "
+                        f"({most_bullish_home['sportsbook']} highest at {home_max}, "
+                        f"{most_bearish_home['sportsbook']} lowest at {home_min} for {home_team})."
+                        if divergence_info
+                        else ""
+                    )
                 ),
             }
         )
 
     results.sort(key=lambda r: r["margin_of_victory"], reverse=True)
 
+    # Find game with most divergent implied scores across books
+    most_divergent = max(results, key=lambda r: (r.get("divergence") or {}).get("max_divergence", 0)) if results else None
+
     result = {
         "implied_scores": results,
         "count": len(results),
         "closest_game": results[-1] if results else None,
         "biggest_blowout": results[0] if results else None,
+        "most_divergent_game": {
+            "game": f"{most_divergent['home_team']} vs {most_divergent['away_team']}",
+            "max_divergence": most_divergent.get("divergence", {}).get("max_divergence", 0) if most_divergent else 0,
+            "divergence": most_divergent.get("divergence"),
+        } if most_divergent and most_divergent.get("divergence") else None,
         "context": (
             f"Implied final scores for {len(results)} games based on consensus "
-            f"spread + total. "
+            f"spread + total, with per-book score matrix showing divergence. "
             + (
                 f"Closest: {results[-1]['home_team']} vs "
                 f"{results[-1]['away_team']} "
@@ -2728,6 +2986,13 @@ def get_implied_scores(
                 f"{results[0]['away_team']} "
                 f"(margin {results[0]['margin_of_victory']})."
                 if len(results) >= 2
+                else ""
+            )
+            + (
+                f" Most divergent: {most_divergent['home_team']} vs "
+                f"{most_divergent['away_team']} "
+                f"({most_divergent.get('divergence', {}).get('max_divergence', 0)} pts spread across books)."
+                if most_divergent and most_divergent.get("divergence")
                 else ""
             )
         ),
@@ -3988,6 +4253,270 @@ def get_sportsbook_clusters(filename: Optional[str] = None) -> str:
     return json.dumps(result, indent=2)
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# SPORTSBOOK CORRELATION NETWORK — Pairwise Pearson Correlation Matrix
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+@mcp.tool()
+def get_sportsbook_correlation_network(
+    market_type: Optional[str] = None,
+    filename: Optional[str] = None,
+) -> str:
+    """Build a Pearson correlation matrix showing how closely each pair of sportsbooks tracks each other.
+
+    For every pair of sportsbooks, computes the Pearson correlation of their
+    implied-probability vectors across all shared (game, market, side) data points.
+    High correlation (>0.95) suggests a shared odds feed; low correlation indicates
+    independent pricing and potential value-source books.
+
+    The output includes:
+    - Full NxN correlation matrix
+    - Ranked list of most- and least-correlated pairs
+    - Network-style "edges" with strength labels (shared feed / closely aligned /
+      moderately aligned / independently priced)
+    - Per-book summary: average correlation with all other books, identifying
+      which books are the most "connected" vs. the most "independent"
+
+    Args:
+        market_type: Optional filter — "spread", "moneyline", or "total".
+                     If omitted, all market types are combined.
+        filename: Data file to load.  Defaults to the first available file.
+
+    Returns JSON with correlation_matrix, edges, book_summaries, and insights.
+    """
+    cache_key = f"sportsbook_corr_network:{market_type or 'all'}"
+    cached = _cache.get_analysis(filename, cache_key)
+    if cached is not None:
+        return json.dumps(cached, indent=2)
+
+    enriched = _cache.load_enriched(filename)
+    if not enriched:
+        return json.dumps({"error": "No data available"})
+
+    by_game = _cache.load_by_game(filename)
+
+    # ------------------------------------------------------------------
+    # Step 1: Build per-sportsbook implied-probability vectors
+    # Key = (game_id, market, side) -> value = implied probability
+    # ------------------------------------------------------------------
+    book_vectors: dict[str, dict[tuple, float]] = {}
+
+    allowed_markets = (
+        {market_type} if market_type in ("spread", "moneyline", "total") else None
+    )
+
+    for game_id, records in by_game.items():
+        for record in records:
+            book = record["sportsbook"]
+            markets = record.get("markets", {})
+
+            for mtype, mdata in markets.items():
+                if allowed_markets and mtype not in allowed_markets:
+                    continue
+
+                if mtype == "spread":
+                    sides = [
+                        ("home_spread", mdata.get("home_odds")),
+                        ("away_spread", mdata.get("away_odds")),
+                    ]
+                elif mtype == "moneyline":
+                    sides = [
+                        ("home_ml", mdata.get("home_odds")),
+                        ("away_ml", mdata.get("away_odds")),
+                    ]
+                elif mtype == "total":
+                    sides = [
+                        ("over", mdata.get("over_odds")),
+                        ("under", mdata.get("under_odds")),
+                    ]
+                else:
+                    continue
+
+                for side_label, odds_val in sides:
+                    if odds_val is None:
+                        continue
+                    prob = implied_probability(odds_val)
+                    if prob and prob > 0:
+                        key = (game_id, mtype, side_label)
+                        book_vectors.setdefault(book, {})[key] = prob
+
+    books = sorted(book_vectors.keys())
+    n = len(books)
+
+    if n < 2:
+        return json.dumps({"error": "Need at least 2 sportsbooks for correlation network"})
+
+    # ------------------------------------------------------------------
+    # Step 2: Pairwise Pearson correlation on shared implied-prob vectors
+    # ------------------------------------------------------------------
+    def _pearson_from_vecs(va: dict[tuple, float], vb: dict[tuple, float]):
+        shared = set(va.keys()) & set(vb.keys())
+        if len(shared) < 3:
+            return None, len(shared)
+        xs = [va[k] for k in shared]
+        ys = [vb[k] for k in shared]
+        n_pts = len(xs)
+        mx = sum(xs) / n_pts
+        my = sum(ys) / n_pts
+        cov = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / n_pts
+        sx = sqrt(sum((x - mx) ** 2 for x in xs) / n_pts)
+        sy = sqrt(sum((y - my) ** 2 for y in ys) / n_pts)
+        if sx == 0 or sy == 0:
+            return None, n_pts
+        return round(cov / (sx * sy), 6), n_pts
+
+    corr_matrix: dict[str, dict[str, float | None]] = {b: {} for b in books}
+    edges: list[dict] = []
+
+    for i in range(n):
+        corr_matrix[books[i]][books[i]] = 1.0
+        for j in range(i + 1, n):
+            ba, bb = books[i], books[j]
+            r, shared_n = _pearson_from_vecs(book_vectors[ba], book_vectors[bb])
+            corr_matrix[ba][bb] = r
+            corr_matrix[bb][ba] = r
+
+            # Classify the relationship
+            if r is None:
+                strength = "insufficient_data"
+            elif r >= 0.98:
+                strength = "shared_feed"
+            elif r >= 0.95:
+                strength = "closely_aligned"
+            elif r >= 0.85:
+                strength = "moderately_aligned"
+            else:
+                strength = "independently_priced"
+
+            edges.append({
+                "book_a": ba,
+                "book_b": bb,
+                "pearson_r": r,
+                "shared_data_points": shared_n,
+                "strength": strength,
+            })
+
+    # Sort edges by correlation descending
+    edges.sort(key=lambda e: e["pearson_r"] if e["pearson_r"] is not None else -2, reverse=True)
+
+    # ------------------------------------------------------------------
+    # Step 3: Per-book summary — average correlation with all others
+    # ------------------------------------------------------------------
+    book_summaries: list[dict] = []
+    for book in books:
+        peer_corrs = [
+            corr_matrix[book][other]
+            for other in books
+            if other != book and corr_matrix[book][other] is not None
+        ]
+        avg_corr = round(mean(peer_corrs), 4) if peer_corrs else None
+
+        # Most and least correlated peer
+        peer_pairs = [
+            (other, corr_matrix[book][other])
+            for other in books
+            if other != book and corr_matrix[book][other] is not None
+        ]
+        peer_pairs.sort(key=lambda p: p[1], reverse=True)
+
+        most_correlated = peer_pairs[0] if peer_pairs else (None, None)
+        least_correlated = peer_pairs[-1] if peer_pairs else (None, None)
+
+        # Classification
+        if avg_corr is None:
+            role = "unknown"
+        elif avg_corr >= 0.97:
+            role = "feed_follower"
+        elif avg_corr >= 0.92:
+            role = "mainstream"
+        else:
+            role = "independent_pricer"
+
+        book_summaries.append({
+            "sportsbook": book,
+            "avg_correlation": avg_corr,
+            "role": role,
+            "most_correlated_with": most_correlated[0],
+            "most_correlated_r": most_correlated[1],
+            "least_correlated_with": least_correlated[0],
+            "least_correlated_r": least_correlated[1],
+            "data_points": len(book_vectors.get(book, {})),
+        })
+
+    book_summaries.sort(key=lambda b: b["avg_correlation"] or 0, reverse=True)
+
+    # ------------------------------------------------------------------
+    # Step 4: Identify shared-feed groups and independent value sources
+    # ------------------------------------------------------------------
+    shared_feed_pairs = [e for e in edges if e["strength"] == "shared_feed"]
+    independent_books = [b for b in book_summaries if b["role"] == "independent_pricer"]
+
+    # ------------------------------------------------------------------
+    # Step 5: Insights
+    # ------------------------------------------------------------------
+    insights = []
+
+    if shared_feed_pairs:
+        names = set()
+        for p in shared_feed_pairs:
+            names.add(p["book_a"])
+            names.add(p["book_b"])
+        insights.append(
+            f"Likely shared odds feeds detected among: {', '.join(sorted(names))} "
+            f"({len(shared_feed_pairs)} pair(s) with r >= 0.98). "
+            f"Shopping between these books adds minimal value."
+        )
+
+    if independent_books:
+        indie_names = [b["sportsbook"] for b in independent_books]
+        insights.append(
+            f"Independent pricers: {', '.join(indie_names)} — "
+            f"these books set lines independently and are valuable for line shopping."
+        )
+
+    if edges:
+        top = edges[0]
+        bot = edges[-1]
+        insights.append(
+            f"Most correlated pair: {top['book_a']} & {top['book_b']} (r={top['pearson_r']})"
+        )
+        insights.append(
+            f"Least correlated pair: {bot['book_a']} & {bot['book_b']} (r={bot['pearson_r']})"
+        )
+
+    market_label = market_type if market_type else "all markets"
+
+    result = {
+        "correlation_matrix": {b: {b2: corr_matrix[b][b2] for b2 in books} for b in books},
+        "edges": edges,
+        "most_correlated_pairs": edges[:5],
+        "least_correlated_pairs": edges[-5:][::-1] if len(edges) >= 5 else list(reversed(edges)),
+        "book_summaries": book_summaries,
+        "shared_feed_pairs": shared_feed_pairs,
+        "independent_value_sources": independent_books,
+        "insights": insights,
+        "methodology": (
+            f"Built implied-probability vectors for each sportsbook across {market_label}. "
+            "For each pair, computed Pearson correlation on all shared data points. "
+            "r >= 0.98 = likely shared feed, r >= 0.95 = closely aligned, "
+            "r >= 0.85 = moderately aligned, r < 0.85 = independently priced. "
+            "Per-book avg correlation classifies books as feed-followers (>=0.97), "
+            "mainstream (>=0.92), or independent pricers (<0.92)."
+        ),
+        "market_filter": market_type or "all",
+        "total_sportsbooks": n,
+        "total_pairs": len(edges),
+        "context": (
+            f"Sportsbook correlation network for {n} books across {market_label}. "
+            f"{len(shared_feed_pairs)} shared-feed pair(s), "
+            f"{len(independent_books)} independent pricer(s). "
+            + (insights[0] if insights else "")
+        ),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _cache.set_analysis(filename, cache_key, result)
+    return json.dumps(result, indent=2)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -4433,6 +4962,413 @@ def get_odds_shape_analysis(game_id: Optional[str] = None,
     return json.dumps(result, indent=2)
 
 
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# GAMLSS Statistical Modeling — Location, Scale, and Shape
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _gamlss_fit(values: list[float]) -> dict:
+    """Fit a GAMLSS-style model to a 1-D sample of odds/implied-probability values.
+
+    Models three distributional parameters:
+      - mu    (location): central tendency -- trimmed mean (robust to outliers)
+      - sigma (scale):    dispersion -- MAD-based robust standard deviation
+      - nu    (shape):    asymmetry -- adjusted Fisher-Pearson skewness
+
+    The trimmed mean removes the top and bottom 10% of values to resist outlier
+    pull.  MAD (median absolute deviation) x 1.4826 is a robust scale estimator
+    that equals sigma for Gaussian data but resists heavy tails.  The skewness
+    captures directional bias in the distribution (e.g., most books low but one
+    book extremely high).
+
+    Returns dict with mu, sigma, nu, n, plus derived diagnostics.
+    """
+    n = len(values)
+    if n < 3:
+        return {"mu": mean(values) if values else 0, "sigma": 0, "nu": 0, "n": n,
+                "kurtosis_excess": 0, "sigma_method": "insufficient_data"}
+
+    sorted_vals = sorted(values)
+
+    # --- Location (mu): trimmed mean (10% each tail) ---
+    trim = max(1, int(n * 0.1))
+    trimmed = sorted_vals[trim: n - trim] if n > 4 else sorted_vals
+    mu = sum(trimmed) / len(trimmed)
+
+    # --- Scale (sigma): MAD-based robust estimator ---
+    median_val = sorted_vals[n // 2] if n % 2 else (sorted_vals[n // 2 - 1] + sorted_vals[n // 2]) / 2
+    abs_devs = sorted(abs(v - median_val) for v in values)
+    mad = abs_devs[len(abs_devs) // 2] if abs_devs else 0
+    sigma = mad * 1.4826  # consistency constant for Gaussian equivalence
+
+    # Fallback: if MAD is 0 (all values identical or near-identical), use pstdev
+    if sigma < 1e-9:
+        sigma = pstdev(values)
+
+    # --- Shape (nu): adjusted Fisher-Pearson skewness ---
+    if sigma > 1e-9:
+        m3 = sum((v - mu) ** 3 for v in values) / n
+        nu = m3 / (sigma ** 3)
+        # Apply small-sample adjustment (N/(N-1)(N-2)) if n >= 3
+        if n >= 3:
+            nu = nu * (n * n) / ((n - 1) * (n - 2)) if (n - 1) * (n - 2) > 0 else nu
+    else:
+        nu = 0.0
+
+    # --- Excess kurtosis (bonus shape parameter, "tau" in full GAMLSS) ---
+    if sigma > 1e-9 and n >= 4:
+        m4 = sum((v - mu) ** 4 for v in values) / n
+        kurtosis_excess = (m4 / (sigma ** 4)) - 3.0
+    else:
+        kurtosis_excess = 0.0
+
+    return {
+        "mu": round(mu, 6),
+        "sigma": round(sigma, 6),
+        "nu": round(nu, 4),
+        "kurtosis_excess": round(kurtosis_excess, 4),
+        "median": round(median_val, 6),
+        "mad": round(mad, 6),
+        "n": n,
+        "sigma_method": "MAD" if mad * 1.4826 >= 1e-9 else "pstdev_fallback",
+    }
+
+
+def _gamlss_zscore(value: float, fit: dict) -> float:
+    """Compute a GAMLSS-aware z-score that accounts for skewness.
+
+    For symmetric distributions this reduces to the standard z-score.
+    For skewed distributions, the Azzalini skew-normal approximation adjusts
+    the effective sigma based on which tail the value falls in:
+      - If nu > 0 (right-skewed), values above mu get a *wider* effective sigma
+        (making moderate highs less anomalous) while values below mu get a
+        *narrower* effective sigma (making lows more anomalous).
+      - Vice versa for nu < 0.
+
+    This is the key insight: in GAMLSS you don't just ask "how far from the mean?"
+    -- you ask "how far from the mean *given the shape of the distribution*?"
+    """
+    sigma = fit["sigma"]
+    if sigma < 1e-9:
+        return 0.0
+    nu = fit["nu"]
+    mu = fit["mu"]
+    diff = value - mu
+
+    # Skew-adjusted sigma: widen sigma on the heavy-tail side, narrow on the thin side
+    # This uses a simplified Azzalini skew-normal approximation
+    skew_adjustment = 1.0
+    if abs(nu) > 0.05:
+        # Positive nu = right-skewed: right tail is heavier
+        # If diff > 0 (value above mean), increase effective sigma (less anomalous)
+        # If diff < 0 (value below mean), decrease effective sigma (more anomalous)
+        direction = 1.0 if diff > 0 else -1.0
+        # Clamp adjustment factor to [0.5, 2.0] for stability
+        raw_adj = 1.0 + direction * nu * 0.15
+        skew_adjustment = max(0.5, min(2.0, raw_adj))
+
+    effective_sigma = sigma * skew_adjustment
+    return diff / effective_sigma if effective_sigma > 1e-9 else 0.0
+
+
+def _gamlss_analyze_game_market(records: list[dict], market_type: str) -> dict | None:
+    """Run GAMLSS modeling on a single game-market combination.
+
+    For a given market (spread/moneyline/total), collects the implied
+    probabilities from each sportsbook, fits GAMLSS parameters, then
+    scores each book using the skew-aware z-score.
+
+    Returns a dict with the fit parameters, per-book scores, and flagged anomalies.
+    """
+    if market_type in ("spread", "moneyline"):
+        odds_keys = [("home_odds", "home"), ("away_odds", "away")]
+    else:
+        odds_keys = [("over_odds", "over"), ("under_odds", "under")]
+
+    # Collect implied probs per side
+    sides_data: dict[str, list[tuple[str, float]]] = {label: [] for _, label in odds_keys}
+    line_data: list[tuple[str, float]] = []
+
+    for rec in records:
+        market = rec.get("markets", {}).get(market_type)
+        if not market:
+            continue
+        book = rec.get("sportsbook", "unknown")
+        for key, label in odds_keys:
+            if key in market:
+                prob = implied_probability(market[key])
+                sides_data[label].append((book, prob))
+        # Collect lines too
+        if market_type == "spread" and "home_line" in market:
+            line_data.append((book, market["home_line"]))
+        elif market_type == "total" and "line" in market:
+            line_data.append((book, market["line"]))
+
+    # Need at least 3 books for meaningful distributional analysis
+    min_books = min(len(v) for v in sides_data.values()) if sides_data else 0
+    if min_books < 3:
+        return None
+
+    # Fit GAMLSS for each side
+    fits: dict[str, dict] = {}
+    for label, book_vals in sides_data.items():
+        vals = [v for _, v in book_vals]
+        fits[label] = _gamlss_fit(vals)
+
+    # Fit GAMLSS for line if available
+    if len(line_data) >= 3:
+        fits["line"] = _gamlss_fit([v for _, v in line_data])
+
+    # Score each book using skew-aware z-scores
+    book_scores: list[dict] = []
+    # Build a book -> values map across all dimensions
+    book_map: dict[str, dict[str, float]] = {}
+    for label, book_vals in sides_data.items():
+        for book, val in book_vals:
+            book_map.setdefault(book, {})[label] = val
+    for book, val in line_data:
+        book_map.setdefault(book, {})["line"] = val
+
+    anomalies = []
+    for book, dims in book_map.items():
+        z_scores = {}
+        for dim_name, val in dims.items():
+            if dim_name in fits:
+                z = _gamlss_zscore(val, fits[dim_name])
+                z_scores[dim_name] = round(z, 3)
+
+        # Composite: RMS of skew-adjusted z-scores
+        if z_scores:
+            rms_z = round(sqrt(sum(z * z for z in z_scores.values()) / len(z_scores)), 3)
+        else:
+            rms_z = 0.0
+
+        max_abs_z = max((abs(z) for z in z_scores.values()), default=0.0)
+
+        entry = {
+            "sportsbook": book,
+            "z_scores": z_scores,
+            "rms_z_score": rms_z,
+            "max_abs_z": round(max_abs_z, 3),
+            "raw_values": {k: round(v, 6) for k, v in dims.items()},
+        }
+        book_scores.append(entry)
+
+        # Flag anomalies: RMS >= 1.8 or any single dimension >= 2.5
+        if rms_z >= 1.8 or max_abs_z >= 2.5:
+            anomaly_type = "distributional_outlier"
+            if max_abs_z >= 2.5 and rms_z < 1.8:
+                anomaly_type = "tail_outlier"
+                tail_dim = max(z_scores, key=lambda k: abs(z_scores[k]))
+                nu_val = fits.get(tail_dim, {}).get("nu", 0)
+                desc = (
+                    f"Extreme value on {tail_dim} (skew-adjusted z={z_scores[tail_dim]}) -- "
+                    f"distribution skewness nu={round(nu_val, 3)} means this "
+                    f"{'is even more anomalous (against the skew)' if (z_scores[tail_dim] * nu_val) < 0 else 'is partially explained by heavy tail'}"
+                )
+            elif any(abs(fits.get(d, {}).get("nu", 0)) > 1.0 for d in z_scores):
+                anomaly_type = "skew_anomaly"
+                skewed_dims = [d for d in z_scores if abs(fits.get(d, {}).get("nu", 0)) > 1.0]
+                desc = (
+                    f"Anomalous under skewed distribution (RMS z={rms_z}) -- "
+                    f"high-skew dimensions: {', '.join(skewed_dims)} -- "
+                    f"GAMLSS shape modeling reveals this book deviates from the "
+                    f"non-Gaussian pattern the market exhibits"
+                )
+            else:
+                desc = (
+                    f"Multi-dimensional distributional outlier (RMS z={rms_z}) -- "
+                    f"deviates from consensus location, scale, AND shape"
+                )
+
+            anomalies.append({
+                **entry,
+                "anomaly_type": anomaly_type,
+                "description": desc,
+                "severity": "high" if rms_z >= 2.5 or max_abs_z >= 3.0 else "medium",
+            })
+
+    book_scores.sort(key=lambda b: -b["rms_z_score"])
+    anomalies.sort(key=lambda a: -a["rms_z_score"])
+
+    # Distribution characterization
+    dist_summary = {}
+    for dim_name, fit in fits.items():
+        shape_desc = "symmetric"
+        if fit["nu"] > 0.5:
+            shape_desc = "right-skewed (heavy upper tail)"
+        elif fit["nu"] < -0.5:
+            shape_desc = "left-skewed (heavy lower tail)"
+        tail_desc = "normal tails"
+        if fit["kurtosis_excess"] > 1.0:
+            tail_desc = "heavy-tailed (leptokurtic)"
+        elif fit["kurtosis_excess"] < -0.5:
+            tail_desc = "thin-tailed (platykurtic)"
+
+        dist_summary[dim_name] = {
+            "mu_location": fit["mu"],
+            "sigma_scale": fit["sigma"],
+            "nu_shape_skewness": fit["nu"],
+            "kurtosis_excess": fit["kurtosis_excess"],
+            "shape_description": shape_desc,
+            "tail_description": tail_desc,
+            "book_count": fit["n"],
+        }
+
+    return {
+        "market": market_type,
+        "distribution_parameters": dist_summary,
+        "book_scores": book_scores,
+        "anomalies": anomalies,
+        "anomaly_count": len(anomalies),
+    }
+
+
+@mcp.tool()
+def get_gamlss_analysis(
+    game_id: Optional[str] = None,
+    filename: Optional[str] = None,
+) -> str:
+    """Apply GAMLSS (Generalized Additive Model for Location, Scale, Shape) to odds distributions.
+
+    Standard anomaly detection assumes odds are normally distributed across
+    sportsbooks -- but real odds distributions are often *skewed* (a few books
+    price aggressively on one side) or *heavy-tailed* (one outlier pulls
+    everything).  GAMLSS models three parameters of the distribution:
+
+      mu (location) -- WHERE is the center of the odds distribution?
+                       Uses a robust trimmed mean to resist outlier pull.
+      sigma (scale) -- HOW SPREAD OUT are the odds?
+                       Uses MAD x 1.4826 (robust to heavy tails).
+      nu (shape)    -- IS THE DISTRIBUTION SKEWED?
+                       Positive = right-skewed (some books pricing high),
+                       Negative = left-skewed (some books pricing low).
+
+    WHY THIS MATTERS: A book offering +150 when the consensus is +130 might
+    look like a 2-sigma outlier under Gaussian assumptions -- but if the
+    distribution is right-skewed (nu > 0), that +150 is actually within the
+    heavy tail and less anomalous than it appears.  Conversely, a book at +115
+    in that same right-skewed distribution is suspiciously low and MORE
+    anomalous than a standard z-score would suggest.
+
+    The tool:
+    1. Collects implied probabilities for each market across all sportsbooks
+    2. Fits mu, sigma, nu (and excess kurtosis) per market dimension
+    3. Computes skew-adjusted z-scores using Azzalini skew-normal approximation
+    4. Flags books whose adjusted z-scores exceed thresholds (RMS >= 1.8 or single >= 2.5)
+    5. Classifies anomalies: distributional_outlier, tail_outlier, skew_anomaly
+
+    Args:
+        game_id:  Analyze a specific game. If omitted, analyzes all games.
+        filename: Data file to load. Optional -- defaults to first available.
+
+    Returns JSON with:
+        games[].markets[].distribution_parameters -- mu, sigma, nu per dimension
+        games[].markets[].book_scores            -- per-book skew-adjusted z-scores
+        games[].markets[].anomalies              -- flagged distributional outliers
+        summary -- aggregate anomaly counts and skew statistics
+    """
+    cache_key = f"gamlss:{game_id or 'all'}"
+    cached = _cache.get_analysis(filename, cache_key)
+    if cached is not None:
+        return json.dumps(cached, indent=2)
+
+    enriched = _cache.load_enriched(filename)
+    if not enriched:
+        return json.dumps({"error": "No odds data found"})
+
+    if game_id:
+        enriched = [r for r in enriched if r.get("game_id") == game_id]
+    games = _group_by_game(enriched)
+
+    if not games:
+        return json.dumps({"error": f"No games found{' for ' + game_id if game_id else ''}"})
+
+    game_results = []
+    total_anomalies = 0
+    skewed_markets = 0
+    heavy_tail_markets = 0
+    all_skew_values = []
+
+    for gid, records in games.items():
+        first = records[0]
+        game_entry = {
+            "game_id": gid,
+            "sport": first.get("sport"),
+            "home_team": first.get("home_team"),
+            "away_team": first.get("away_team"),
+            "sportsbook_count": len(records),
+            "markets": [],
+        }
+
+        game_anomaly_count = 0
+        for market_type in ("spread", "moneyline", "total"):
+            market_result = _gamlss_analyze_game_market(records, market_type)
+            if market_result is None:
+                continue
+            game_entry["markets"].append(market_result)
+            game_anomaly_count += market_result["anomaly_count"]
+
+            # Track distribution shape stats
+            for dim_name, params in market_result["distribution_parameters"].items():
+                nu = params["nu_shape_skewness"]
+                all_skew_values.append(nu)
+                if abs(nu) > 0.5:
+                    skewed_markets += 1
+                if params["kurtosis_excess"] > 1.0:
+                    heavy_tail_markets += 1
+
+        game_entry["total_anomalies"] = game_anomaly_count
+        total_anomalies += game_anomaly_count
+        game_results.append(game_entry)
+
+    # Sort: most anomalous games first
+    game_results.sort(key=lambda g: -g["total_anomalies"])
+
+    avg_abs_skew = round(mean([abs(s) for s in all_skew_values]), 3) if all_skew_values else 0
+
+    result = {
+        "games": game_results,
+        "summary": {
+            "games_analyzed": len(game_results),
+            "total_anomalies": total_anomalies,
+            "skewed_market_dimensions": skewed_markets,
+            "heavy_tail_market_dimensions": heavy_tail_markets,
+            "average_absolute_skewness": avg_abs_skew,
+            "distribution_insight": (
+                f"{'Most' if skewed_markets > len(all_skew_values) / 2 else 'Some'} "
+                f"market dimensions show non-Gaussian skew (avg |nu|={avg_abs_skew}). "
+                f"{'Standard z-score methods would miss tail-aware anomalies in these markets.' if avg_abs_skew > 0.3 else 'Distributions are roughly symmetric -- standard methods are adequate here.'}"
+            ) if all_skew_values else "No market data available.",
+        },
+        "methodology": (
+            "GAMLSS (Generalized Additive Model for Location, Scale, and Shape) -- "
+            "instead of assuming Gaussian odds distributions across sportsbooks, this "
+            "models three parameters:\n"
+            "  mu (location): Trimmed mean -- robust central tendency (10% winsorized)\n"
+            "  sigma (scale): MAD x 1.4826 -- robust dispersion resistant to heavy tails\n"
+            "  nu (shape): Adjusted Fisher-Pearson skewness -- directional asymmetry\n\n"
+            "Anomaly scoring uses the Azzalini skew-normal approximation: the effective "
+            "sigma expands on the heavy-tail side and contracts on the thin-tail side. "
+            "This means a book deviating *against* the distribution's skew is flagged as "
+            "MORE anomalous (it's fighting the market's natural shape), while a book "
+            "deviating *with* the skew is treated as LESS anomalous (it's in the expected "
+            "heavy tail).\n\n"
+            "Excess kurtosis (tau) provides a fourth parameter detecting heavy-tailed or "
+            "thin-tailed distributions -- useful for spotting markets where one or two "
+            "books are extreme outliers (leptokurtic) vs. markets where all books agree "
+            "tightly (platykurtic)."
+        ),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    _cache.set_analysis(filename, cache_key, result)
+    return json.dumps(result, indent=2)
+
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # RESOURCES — Context Data
 # ═══════════════════════════════════════════════════════════════════════════
@@ -4853,7 +5789,7 @@ def find_cross_market_arbitrage(filename: Optional[str] = None, min_edge_pct: fl
                 ml_probs_home_list.append(implied_probability(ml_data["home_odds"]))
             if "home_odds" in sp_data and "away_odds" in sp_data:
                 nv = no_vig_probabilities(sp_data["home_odds"], sp_data["away_odds"])
-                sp_probs_home_list.append(nv[0])
+                sp_probs_home_list.append(nv["fair_a"])
 
         if ml_probs_home_list and sp_probs_home_list:
             # Remove vig from ML too for fair comparison
@@ -4862,7 +5798,7 @@ def find_cross_market_arbitrage(filename: Optional[str] = None, min_edge_pct: fl
                 ml_data = r.get("markets", {}).get("moneyline", {})
                 if "home_odds" in ml_data and "away_odds" in ml_data:
                     nv = no_vig_probabilities(ml_data["home_odds"], ml_data["away_odds"])
-                    ml_fair_probs.append(nv[0])
+                    ml_fair_probs.append(nv["fair_a"])
             if ml_fair_probs:
                 avg_ml_fair = sum(ml_fair_probs) / len(ml_fair_probs)
                 avg_sp_fair = sum(sp_probs_home_list) / len(sp_probs_home_list)
@@ -4917,6 +5853,1840 @@ def find_cross_market_arbitrage(filename: Optional[str] = None, min_edge_pct: fl
             f"{gap_count} cross-market probability gaps."
             + (f" Best: {opportunities[0]['context']}" if opportunities else " Markets are well-aligned across types.")
         ),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _cache.set_analysis(filename, cache_key, result)
+    return json.dumps(result, indent=2)
+
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TOOLS — Unsupervised Clustering / KNN Anomaly Detection
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _parse_ts_safe(ts_str) -> Optional[datetime]:
+    """Parse an ISO timestamp string, returning None on failure."""
+    if not ts_str:
+        return None
+    try:
+        return datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+
+
+def _extract_anomaly_features(records: list[dict], consensus: dict, by_game: dict) -> list[dict]:
+    """Extract a 10-dimensional feature vector from each odds record for anomaly detection.
+
+    Features per record:
+      1. spread_odds_dev    — abs deviation of spread home_odds from consensus avg
+      2. ml_odds_dev        — abs deviation of moneyline home_odds from consensus avg
+      3. total_odds_dev     — abs deviation of total over_odds from consensus avg
+      4. spread_line_dev    — abs deviation of spread home_line from consensus avg
+      5. total_line_dev     — abs deviation of total line from consensus avg
+      6. vig_spread         — spread market vig (higher = more anomalous)
+      7. vig_ml             — moneyline market vig
+      8. vig_total          — total market vig
+      9. staleness_minutes  — how stale this record is vs the freshest in its game
+     10. line_move_direction — directional signal: +1 (toward underdog),
+                              -1 (toward favorite), 0 (no movement detected)
+    """
+    features = []
+
+    # Pre-compute newest timestamp per game for staleness
+    newest_per_game: dict[str, datetime] = {}
+    for r in records:
+        gid = r.get("game_id", "unknown")
+        ts = _parse_ts_safe(r.get("last_updated"))
+        if ts and (gid not in newest_per_game or ts > newest_per_game[gid]):
+            newest_per_game[gid] = ts
+
+    for r in records:
+        gid = r.get("game_id", "unknown")
+        markets = r.get("markets", {})
+        game_consensus = consensus.get(gid, {})
+
+        # --- Odds deviation features ---
+        spread = markets.get("spread", {})
+        ml = markets.get("moneyline", {})
+        total = markets.get("total", {})
+
+        sc = game_consensus.get("spread", {})
+        mc = game_consensus.get("moneyline", {})
+        tc = game_consensus.get("total", {})
+
+        spread_odds_dev = abs(spread.get("home_odds", 0) - sc.get("avg_home_odds", 0)) if sc.get("avg_home_odds") is not None and "home_odds" in spread else 0.0
+        ml_odds_dev = abs(ml.get("home_odds", 0) - mc.get("avg_home_odds", 0)) if mc.get("avg_home_odds") is not None and "home_odds" in ml else 0.0
+        total_odds_dev = abs(total.get("over_odds", 0) - tc.get("avg_over_odds", 0)) if tc.get("avg_over_odds") is not None and "over_odds" in total else 0.0
+
+        # --- Line deviation features ---
+        spread_line_dev = abs(spread.get("home_line", 0) - sc.get("avg_home_line", 0)) if sc.get("avg_home_line") is not None and "home_line" in spread else 0.0
+        total_line_dev = abs(total.get("line", 0) - tc.get("avg_line", 0)) if tc.get("avg_line") is not None and "line" in total else 0.0
+
+        # --- Vig features (higher vig = more unusual pricing) ---
+        vig_spread = spread.get("vig", 0.0) if "vig" in spread else 0.0
+        vig_ml = ml.get("vig", 0.0) if "vig" in ml else 0.0
+        vig_total = total.get("vig", 0.0) if "vig" in total else 0.0
+
+        # --- Staleness feature ---
+        ts = _parse_ts_safe(r.get("last_updated"))
+        newest = newest_per_game.get(gid)
+        staleness_minutes = 0.0
+        if ts and newest:
+            staleness_minutes = max(0.0, (newest - ts).total_seconds() / 60.0)
+
+        # --- Line movement direction ---
+        # Compare this record's spread line to the consensus avg.
+        # Positive = line moved toward underdog, Negative = toward favorite.
+        line_move_direction = 0.0
+        if sc.get("avg_home_line") is not None and "home_line" in spread:
+            diff = spread["home_line"] - sc["avg_home_line"]
+            if abs(diff) >= 0.5:
+                line_move_direction = -1.0 if diff < 0 else 1.0
+
+        feature_vec = [
+            spread_odds_dev,
+            ml_odds_dev,
+            total_odds_dev,
+            spread_line_dev,
+            total_line_dev,
+            vig_spread,
+            vig_ml,
+            vig_total,
+            staleness_minutes,
+            line_move_direction,
+        ]
+
+        features.append({
+            "record": r,
+            "vector": feature_vec,
+            "feature_names": [
+                "spread_odds_dev", "ml_odds_dev", "total_odds_dev",
+                "spread_line_dev", "total_line_dev",
+                "vig_spread", "vig_ml", "vig_total",
+                "staleness_minutes", "line_move_direction",
+            ],
+            "feature_details": {
+                "spread_odds_dev": round(spread_odds_dev, 2),
+                "ml_odds_dev": round(ml_odds_dev, 2),
+                "total_odds_dev": round(total_odds_dev, 2),
+                "spread_line_dev": round(spread_line_dev, 2),
+                "total_line_dev": round(total_line_dev, 2),
+                "vig_spread": round(vig_spread, 4),
+                "vig_ml": round(vig_ml, 4),
+                "vig_total": round(vig_total, 4),
+                "staleness_minutes": round(staleness_minutes, 1),
+                "line_move_direction": line_move_direction,
+            },
+        })
+
+    return features
+
+
+def _normalize_features(features: list[dict]) -> list[list[float]]:
+    """Min-max normalize feature vectors to [0, 1] range."""
+    if not features:
+        return []
+
+    vectors = [f["vector"] for f in features]
+    n_features = len(vectors[0])
+
+    mins = [min(v[i] for v in vectors) for i in range(n_features)]
+    maxs = [max(v[i] for v in vectors) for i in range(n_features)]
+
+    normalized = []
+    for v in vectors:
+        norm = []
+        for i in range(n_features):
+            rng = maxs[i] - mins[i]
+            norm.append((v[i] - mins[i]) / rng if rng > 0 else 0.0)
+        normalized.append(norm)
+
+    return normalized
+
+
+def _euclidean_distance(a: list[float], b: list[float]) -> float:
+    """Euclidean distance between two vectors."""
+    return sqrt(sum((ai - bi) ** 2 for ai, bi in zip(a, b)))
+
+
+def _knn_anomaly_scores(normalized: list[list[float]], k: int = 5) -> list[float]:
+    """KNN anomaly score: average Euclidean distance to K nearest neighbors.
+
+    Higher score = more anomalous (the record lives in a sparse region of
+    the feature space, far from its nearest neighbors).
+    """
+    n = len(normalized)
+    k = min(k, n - 1)
+    if k <= 0:
+        return [0.0] * n
+
+    scores = []
+    for i in range(n):
+        dists = []
+        for j in range(n):
+            if i != j:
+                dists.append(_euclidean_distance(normalized[i], normalized[j]))
+        dists.sort()
+        avg_knn_dist = sum(dists[:k]) / k
+        scores.append(avg_knn_dist)
+
+    return scores
+
+
+def _isolation_forest_scores(
+    vectors: list[list[float]], n_trees: int = 100, sample_size: int = 32, seed: int = 42
+) -> list[float]:
+    """Pure-Python Isolation Forest anomaly scoring.
+
+    Builds an ensemble of random isolation trees. Each tree recursively
+    partitions data by picking a random feature and a random split value.
+    Anomalies are isolated (reach a leaf) in fewer splits on average.
+
+    Returns anomaly scores in [0, 1] where higher = more anomalous.
+    """
+    n = len(vectors)
+    if n < 4:
+        return [0.0] * n
+
+    n_features = len(vectors[0])
+    max_depth = max(2, int(log(max(sample_size, 2)) / log(2)) + 1)
+    rng = random.Random(seed)
+
+    def _build_tree(indices: list[int], depth: int) -> dict:
+        if len(indices) <= 1 or depth >= max_depth:
+            return {"type": "leaf", "size": len(indices), "depth": depth}
+
+        feat = rng.randint(0, n_features - 1)
+        vals = [vectors[idx][feat] for idx in indices]
+        lo, hi = min(vals), max(vals)
+
+        if lo == hi:
+            return {"type": "leaf", "size": len(indices), "depth": depth}
+
+        split = rng.uniform(lo, hi)
+        left_idx = [idx for idx in indices if vectors[idx][feat] < split]
+        right_idx = [idx for idx in indices if vectors[idx][feat] >= split]
+
+        if not left_idx or not right_idx:
+            return {"type": "leaf", "size": len(indices), "depth": depth}
+
+        return {
+            "type": "split",
+            "feature": feat,
+            "split_value": split,
+            "left": _build_tree(left_idx, depth + 1),
+            "right": _build_tree(right_idx, depth + 1),
+        }
+
+    def _path_length(node: dict, vec: list[float]) -> float:
+        if node["type"] == "leaf":
+            size = node["size"]
+            if size <= 1:
+                return node["depth"]
+            # Average path length of unsuccessful BST search (Euler-Mascheroni)
+            c = 2.0 * (log(size - 1) + 0.5772156649) - 2.0 * (size - 1) / size
+            return node["depth"] + c
+        if vec[node["feature"]] < node["split_value"]:
+            return _path_length(node["left"], vec)
+        else:
+            return _path_length(node["right"], vec)
+
+    # Build forest
+    trees = []
+    all_indices = list(range(n))
+    actual_sample = min(sample_size, n)
+    for _ in range(n_trees):
+        sample_idx = rng.sample(all_indices, actual_sample) if actual_sample < n else list(all_indices)
+        trees.append(_build_tree(sample_idx, 0))
+
+    # Score each record
+    c_n = 2.0 * (log(max(actual_sample - 1, 1)) + 0.5772156649) - 2.0 * (actual_sample - 1) / max(actual_sample, 1)
+    if c_n == 0:
+        c_n = 1.0
+
+    scores = []
+    for i in range(n):
+        avg_path = sum(_path_length(tree, vectors[i]) for tree in trees) / n_trees
+        # Anomaly score: 2^(-avg_path / c(n))  — closer to 1 = more anomalous
+        score = 2.0 ** (-avg_path / c_n)
+        scores.append(score)
+
+    return scores
+
+
+@mcp.tool()
+def detect_knn_anomalies(
+    game_id: Optional[str] = None,
+    filename: Optional[str] = None,
+    k: int = 5,
+    n_trees: int = 100,
+    top_n: int = 15,
+    anomaly_percentile: float = 80.0,
+) -> str:
+    """Unsupervised anomaly detection using KNN distance + Isolation Forest on odds records.
+
+    Extracts a 10-dimensional feature vector from each odds record and applies
+    two complementary ML methods (no labeled training data needed):
+
+    1. **K-Nearest Neighbor (KNN) distance** — records far from their K nearest
+       neighbors in feature space are anomalous (they sit in sparse regions).
+    2. **Isolation Forest** — an ensemble of random decision trees that isolate
+       anomalies with fewer splits (anomalies have shorter average path lengths).
+
+    The composite anomaly score (0-100) combines both signals. Records above the
+    specified percentile are flagged.
+
+    Features analyzed per record (10 dimensions):
+      - Odds deviation from consensus mean (spread, moneyline, total)
+      - Line deviation from consensus (spread line, total line)
+      - Vig per market (spread, moneyline, total)
+      - Timestamp staleness (minutes behind freshest update for same game)
+      - Line movement direction (+1 toward underdog, -1 toward favorite)
+
+    Args:
+        game_id: Optional — limit analysis to a specific game.
+        filename: Data file to load. Optional.
+        k: Number of nearest neighbors for KNN scoring. Default 5.
+        n_trees: Number of isolation trees. Default 100.
+        top_n: Max anomalies to return. Default 15.
+        anomaly_percentile: Score percentile above which records are flagged (0-100). Default 80.
+
+    Returns flagged anomalies with composite scores, feature breakdowns,
+    contributing factors, and methodology explanation.
+    """
+    cache_key = f"knn_anomalies:{game_id or 'all'}:{k}:{n_trees}:{top_n}:{anomaly_percentile}"
+    cached = _cache.get_analysis(filename, cache_key)
+    if cached is not None:
+        return json.dumps(cached, indent=2)
+
+    enriched = _cache.load_enriched(filename)
+    if not enriched:
+        return json.dumps({"error": "No data available"})
+
+    by_game = _cache.load_by_game(filename)
+    consensus = _cache.load_consensus(filename)
+
+    # Filter to target game if specified
+    if game_id:
+        enriched = [r for r in enriched if r.get("game_id") == game_id]
+        if not enriched:
+            return json.dumps({"error": f"No records found for game_id={game_id}"})
+
+    # --- Step 1: Feature extraction ---
+    features = _extract_anomaly_features(enriched, consensus, by_game)
+
+    if len(features) < 4:
+        return json.dumps({
+            "error": "Need at least 4 records for meaningful clustering analysis",
+            "record_count": len(features),
+        })
+
+    # --- Step 2: Normalize features to [0,1] ---
+    normalized = _normalize_features(features)
+
+    # --- Step 3: KNN anomaly scores ---
+    knn_scores = _knn_anomaly_scores(normalized, k=k)
+
+    # --- Step 4: Isolation Forest scores ---
+    raw_vectors = [f["vector"] for f in features]
+    iso_scores = _isolation_forest_scores(raw_vectors, n_trees=n_trees)
+
+    # --- Step 5: Normalize both score sets to [0, 1] ---
+    def _min_max_norm(vals):
+        lo, hi = min(vals), max(vals)
+        rng = hi - lo
+        return [(v - lo) / rng if rng > 0 else 0.0 for v in vals]
+
+    knn_norm = _min_max_norm(knn_scores)
+    iso_norm = _min_max_norm(iso_scores)
+
+    # --- Step 6: Composite score (50% KNN + 50% iForest, scaled to 0-100) ---
+    composite = [
+        round((kn * 0.5 + iso * 0.5) * 100, 1)
+        for kn, iso in zip(knn_norm, iso_norm)
+    ]
+
+    # --- Step 7: Determine threshold from percentile ---
+    sorted_scores = sorted(composite)
+    pct_idx = min(int(len(sorted_scores) * anomaly_percentile / 100.0), len(sorted_scores) - 1)
+    threshold = sorted_scores[pct_idx]
+
+    # --- Step 8: Build anomaly results ---
+    anomalies = []
+    for i, feat in enumerate(features):
+        if composite[i] < threshold:
+            continue
+
+        r = feat["record"]
+        details = feat["feature_details"]
+
+        # Identify top contributing factors
+        contributing = []
+        if details["staleness_minutes"] > 10:
+            contributing.append(f"Stale by {details['staleness_minutes']} min")
+        if details["spread_odds_dev"] > 10:
+            contributing.append(f"Spread odds {details['spread_odds_dev']} pts from consensus")
+        if details["ml_odds_dev"] > 10:
+            contributing.append(f"ML odds {details['ml_odds_dev']} pts from consensus")
+        if details["total_odds_dev"] > 10:
+            contributing.append(f"Total odds {details['total_odds_dev']} pts from consensus")
+        if details["spread_line_dev"] > 0.5:
+            contributing.append(f"Spread line {details['spread_line_dev']} pts from consensus")
+        if details["total_line_dev"] > 0.5:
+            contributing.append(f"Total line {details['total_line_dev']} pts from consensus")
+        if details["vig_spread"] > 0.06:
+            contributing.append(f"High spread vig ({round(details['vig_spread'] * 100, 1)}%)")
+        if details["vig_ml"] > 0.06:
+            contributing.append(f"High ML vig ({round(details['vig_ml'] * 100, 1)}%)")
+        if details["vig_total"] > 0.06:
+            contributing.append(f"High total vig ({round(details['vig_total'] * 100, 1)}%)")
+        if details["line_move_direction"] != 0:
+            direction_label = "toward underdog" if details["line_move_direction"] > 0 else "toward favorite"
+            contributing.append(f"Line moved {direction_label}")
+
+        if not contributing:
+            contributing.append("Multi-dimensional deviation (no single dominant factor)")
+
+        anomalies.append({
+            "game_id": r.get("game_id"),
+            "sport": r.get("sport"),
+            "home_team": r.get("home_team"),
+            "away_team": r.get("away_team"),
+            "sportsbook": r.get("sportsbook"),
+            "last_updated": r.get("last_updated"),
+            "composite_anomaly_score": composite[i],
+            "knn_score": round(knn_norm[i] * 100, 1),
+            "isolation_forest_score": round(iso_norm[i] * 100, 1),
+            "feature_breakdown": details,
+            "contributing_factors": contributing,
+            "context": (
+                f"ANOMALY: {r.get('sportsbook')} on {r.get('home_team')} vs {r.get('away_team')} — "
+                f"score {composite[i]}/100 (KNN={round(knn_norm[i]*100,1)}, "
+                f"iForest={round(iso_norm[i]*100,1)}). "
+                f"Factors: {'; '.join(contributing[:3])}"
+            ),
+        })
+
+    anomalies.sort(key=lambda a: a["composite_anomaly_score"], reverse=True)
+    anomalies = anomalies[:top_n]
+
+    # --- Summary statistics ---
+    all_scores = sorted(composite, reverse=True)
+    score_distribution = {
+        "mean": round(sum(composite) / len(composite), 1),
+        "median": round(sorted_scores[len(sorted_scores) // 2], 1),
+        "p90": round(sorted_scores[min(int(len(sorted_scores) * 0.9), len(sorted_scores) - 1)], 1),
+        "p95": round(sorted_scores[min(int(len(sorted_scores) * 0.95), len(sorted_scores) - 1)], 1),
+        "max": round(all_scores[0], 1),
+        "threshold_used": round(threshold, 1),
+    }
+
+    # Per-sportsbook anomaly summary
+    book_anomaly_counts: dict[str, list[float]] = {}
+    for i, feat in enumerate(features):
+        book = feat["record"].get("sportsbook", "unknown")
+        book_anomaly_counts.setdefault(book, []).append(composite[i])
+
+    book_summary = []
+    for book, scores_list in book_anomaly_counts.items():
+        avg_score = sum(scores_list) / len(scores_list)
+        flagged = sum(1 for s in scores_list if s >= threshold)
+        book_summary.append({
+            "sportsbook": book,
+            "avg_anomaly_score": round(avg_score, 1),
+            "flagged_count": flagged,
+            "total_records": len(scores_list),
+            "flagged_pct": round(flagged / len(scores_list) * 100, 1) if scores_list else 0,
+        })
+    book_summary.sort(key=lambda b: b["avg_anomaly_score"], reverse=True)
+
+    result = {
+        "anomalies": anomalies,
+        "count": len(anomalies),
+        "total_records_analyzed": len(features),
+        "anomaly_percentile": anomaly_percentile,
+        "score_distribution": score_distribution,
+        "sportsbook_anomaly_summary": book_summary,
+        "parameters": {
+            "k_neighbors": k,
+            "n_trees": n_trees,
+            "top_n": top_n,
+            "anomaly_percentile": anomaly_percentile,
+            "features_used": 10,
+        },
+        "methodology": (
+            "Unsupervised anomaly detection combining two complementary ML methods "
+            "(no labeled training data needed):\n"
+            "1. K-Nearest Neighbor (KNN) Distance: Each record is scored by its average "
+            "Euclidean distance to its K nearest neighbors in 10-D feature space. "
+            "Records in sparse regions (far from neighbors) score higher.\n"
+            "2. Isolation Forest: An ensemble of random decision trees attempts to "
+            "isolate each record. Anomalies are isolated with fewer random splits "
+            "(shorter average path length = higher anomaly score).\n"
+            "Composite score = 50% KNN + 50% Isolation Forest, scaled to 0-100.\n\n"
+            "Features: odds deviation from consensus (spread/ML/total), line deviation "
+            "(spread/total), vig per market, timestamp staleness, line movement direction."
+        ),
+        "context": (
+            f"Analyzed {len(features)} records with unsupervised KNN+iForest clustering. "
+            f"Flagged {len(anomalies)} anomalies above {anomaly_percentile}th percentile "
+            f"(threshold={round(threshold, 1)}). "
+            + (f"Most anomalous: {anomalies[0]['context']}" if anomalies else "No anomalies detected.")
+        ),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _cache.set_analysis(filename, cache_key, result)
+    return json.dumps(result, indent=2)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TOOL — Bayesian Updating of True Probabilities
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _get_bayesian_fair_probs(
+    games: dict[str, list[dict]],
+    prior_kappa: float = 20.0,
+    evidence_kappa: float = 5.0,
+) -> dict[str, dict[str, dict]]:
+    """Compute Bayesian posterior probabilities for every game & market.
+
+    Uses Pinnacle's no-vig line as the Beta prior, then sequentially updates
+    with each additional sportsbook's no-vig probability as evidence.
+
+    Falls back to a uniform Beta(1,1) prior (uninformative) when Pinnacle is
+    unavailable, then updates with all available books.
+
+    Returns
+    -------
+    {game_id: {market_type: {bayesian_update result dict + metadata}}}
+    """
+    result: dict[str, dict[str, dict]] = {}
+
+    for game_id, records in games.items():
+        result[game_id] = {}
+
+        for market_type in ("spread", "moneyline", "total"):
+            if market_type in ("spread", "moneyline"):
+                odds_key_a, odds_key_b = "home_odds", "away_odds"
+                side_a_label, side_b_label = "home", "away"
+            else:
+                odds_key_a, odds_key_b = "over_odds", "under_odds"
+                side_a_label, side_b_label = "over", "under"
+
+            # Separate Pinnacle from the rest
+            pinnacle_fair_a, pinnacle_fair_b = None, None
+            evidence_a, evidence_b = [], []
+            evidence_books = []
+
+            for r in records:
+                market = r.get("markets", {}).get(market_type, {})
+                if odds_key_a not in market or odds_key_b not in market:
+                    continue
+
+                fair = no_vig_probabilities(market[odds_key_a], market[odds_key_b])
+                book = r.get("sportsbook", "Unknown")
+
+                if book.lower() == SHARP_BOOK.lower():
+                    pinnacle_fair_a = fair["fair_a"]
+                    pinnacle_fair_b = fair["fair_b"]
+                else:
+                    evidence_a.append(fair["fair_a"])
+                    evidence_b.append(fair["fair_b"])
+                    evidence_books.append(book)
+
+            if not evidence_a and pinnacle_fair_a is None:
+                continue  # no data at all
+
+            # Set the prior
+            if pinnacle_fair_a is not None:
+                prior_a = pinnacle_fair_a
+                prior_b = pinnacle_fair_b
+                prior_source = SHARP_BOOK
+            else:
+                # Uninformative prior (equivalent to Beta(1,1) mapped through kappa)
+                prior_a = 0.5
+                prior_b = 0.5
+                prior_source = "uninformative (no Pinnacle data)"
+                # Use all books as evidence since there's no sharp prior
+                evidence_a, evidence_b, evidence_books = [], [], []
+                for r in records:
+                    market = r.get("markets", {}).get(market_type, {})
+                    if odds_key_a not in market or odds_key_b not in market:
+                        continue
+                    fair = no_vig_probabilities(market[odds_key_a], market[odds_key_b])
+                    evidence_a.append(fair["fair_a"])
+                    evidence_b.append(fair["fair_b"])
+                    evidence_books.append(r.get("sportsbook", "Unknown"))
+
+            # Run Bayesian updates for both sides
+            update_a = bayesian_update(prior_a, evidence_a, prior_kappa, evidence_kappa)
+            update_b = bayesian_update(prior_b, evidence_b, prior_kappa, evidence_kappa)
+
+            # Normalize posteriors so they sum to 1.0
+            raw_a = update_a["posterior_prob"]
+            raw_b = update_b["posterior_prob"]
+            total = raw_a + raw_b
+            norm_a = raw_a / total if total else 0.5
+            norm_b = raw_b / total if total else 0.5
+
+            result[game_id][market_type] = {
+                f"{side_a_label}_posterior_prob": round(norm_a, 6),
+                f"{side_b_label}_posterior_prob": round(norm_b, 6),
+                f"{side_a_label}_posterior_prob_pct": f"{round(norm_a * 100, 2)}%",
+                f"{side_b_label}_posterior_prob_pct": f"{round(norm_b * 100, 2)}%",
+                f"{side_a_label}_posterior_odds": fair_odds_to_american(max(0.01, min(0.99, norm_a))),
+                f"{side_b_label}_posterior_odds": fair_odds_to_american(max(0.01, min(0.99, norm_b))),
+                f"{side_a_label}_raw_posterior": round(raw_a, 6),
+                f"{side_b_label}_raw_posterior": round(raw_b, 6),
+                f"{side_a_label}_credible_interval_90": update_a["credible_interval_90"],
+                f"{side_b_label}_credible_interval_90": update_b["credible_interval_90"],
+                f"{side_a_label}_std_dev": update_a["std_dev"],
+                f"{side_b_label}_std_dev": update_b["std_dev"],
+                f"{side_a_label}_shift_from_prior": update_a["shift_from_prior_pct"],
+                f"{side_b_label}_shift_from_prior": update_b["shift_from_prior_pct"],
+                "prior_source": prior_source,
+                f"{side_a_label}_prior": round(prior_a, 6),
+                f"{side_b_label}_prior": round(prior_b, 6),
+                "evidence_books": evidence_books,
+                "evidence_count": len(evidence_a),
+                "prior_kappa": prior_kappa,
+                "evidence_kappa": evidence_kappa,
+                "total_kappa": update_a["total_kappa"],
+                f"{side_a_label}_update_trace": update_a["update_trace"],
+                f"{side_b_label}_update_trace": update_b["update_trace"],
+            }
+
+    return result
+
+
+@mcp.tool()
+def get_bayesian_probabilities(
+    game_id: Optional[str] = None,
+    prior_kappa: float = 20.0,
+    evidence_kappa: float = 5.0,
+    filename: Optional[str] = None,
+) -> str:
+    """Bayesian updating of true probabilities — starts with Pinnacle's no-vig
+    line as a Beta prior and sequentially updates with each sportsbook's odds.
+
+    Unlike simple averaging, this approach:
+    - Weights the sharp prior (Pinnacle) more heavily than any single rec book
+    - Produces a posterior distribution, not just a point estimate
+    - Provides 90% credible intervals showing uncertainty
+    - Shows a step-by-step trace of how each book shifted the estimate
+
+    The prior_kappa controls how strongly to trust the Pinnacle prior (higher =
+    more trust), while evidence_kappa controls how much each additional book
+    shifts the posterior (higher = more influence per book).
+
+    Args:
+        game_id: Filter to a specific game. Optional (shows all games).
+        prior_kappa: Concentration for the Pinnacle prior (default 20). Higher
+                     means more trust in Pinnacle. Range 5-50 recommended.
+        evidence_kappa: Concentration per evidence sportsbook (default 5).
+                        Higher means each book has more influence. Range 2-15.
+        filename: Data file to load. Optional.
+
+    Returns Bayesian posterior probabilities, credible intervals, fair American
+    odds, and step-by-step update traces per game per market.
+    """
+    cache_key = f"bayesian_probs:{game_id or 'all'}:{prior_kappa}:{evidence_kappa}"
+    cached = _cache.get_analysis(filename, cache_key)
+    if cached is not None:
+        return json.dumps(cached, indent=2)
+
+    enriched = _cache.load_enriched(filename)
+    if game_id:
+        enriched = [r for r in enriched if r.get("game_id") == game_id]
+    games = _group_by_game(enriched)
+
+    bayesian_probs = _get_bayesian_fair_probs(games, prior_kappa, evidence_kappa)
+
+    # Also get Pinnacle probs for comparison
+    pinnacle_probs = _get_pinnacle_fair_probs(games)
+
+    games_list = []
+    significant_shifts = []
+
+    for gid, records in games.items():
+        first = records[0]
+        game_entry = {
+            "game_id": gid,
+            "sport": first.get("sport"),
+            "home_team": first.get("home_team"),
+            "away_team": first.get("away_team"),
+            "markets": {},
+        }
+
+        for market_type in ("spread", "moneyline", "total"):
+            bayes = bayesian_probs.get(gid, {}).get(market_type)
+            if not bayes:
+                continue
+
+            pinnacle = pinnacle_probs.get(gid, {}).get(market_type, {})
+
+            if market_type in ("spread", "moneyline"):
+                side_a, side_b = "home", "away"
+            else:
+                side_a, side_b = "over", "under"
+
+            # Build comparison vs simple methods
+            comparison = {}
+            if pinnacle:
+                comparison["pinnacle_no_vig"] = {
+                    f"{side_a}_prob": pinnacle.get("side_a_prob"),
+                    f"{side_b}_prob": pinnacle.get("side_b_prob"),
+                    "source": pinnacle.get("source"),
+                }
+
+            bayesian_a = bayes[f"{side_a}_posterior_prob"]
+            pinnacle_a = pinnacle.get("side_a_prob", bayesian_a)
+            diff = abs(bayesian_a - pinnacle_a)
+
+            comparison["bayesian_vs_pinnacle_diff_pp"] = round(diff * 100, 2)
+
+            market_entry = {**bayes, "comparison": comparison}
+
+            # Add spread/total line context
+            if market_type == "spread":
+                lines = [
+                    r["markets"]["spread"].get("home_line", 0)
+                    for r in records
+                    if "spread" in r.get("markets", {})
+                ]
+                if lines:
+                    market_entry["consensus_line"] = round(sum(lines) / len(lines), 1)
+            elif market_type == "total":
+                lines = [
+                    r["markets"]["total"].get("line", 0)
+                    for r in records
+                    if "total" in r.get("markets", {})
+                ]
+                if lines:
+                    market_entry["consensus_line"] = round(sum(lines) / len(lines), 1)
+
+            game_entry["markets"][market_type] = market_entry
+
+            # Flag significant shifts (>= 1pp Bayesian vs Pinnacle)
+            if diff >= 0.01:
+                significant_shifts.append({
+                    "game_id": gid,
+                    "home_team": first.get("home_team"),
+                    "away_team": first.get("away_team"),
+                    "market": market_type,
+                    f"{side_a}_shift_pp": round((bayesian_a - pinnacle_a) * 100, 2),
+                    "bayesian_prob": round(bayesian_a, 4),
+                    "pinnacle_prob": round(pinnacle_a, 4),
+                    "evidence_count": bayes["evidence_count"],
+                })
+
+        games_list.append(game_entry)
+
+    significant_shifts.sort(key=lambda x: abs(list(x.values())[4]), reverse=True)
+
+    result = {
+        "games": games_list,
+        "count": len(games_list),
+        "significant_shifts": significant_shifts,
+        "significant_shift_count": len(significant_shifts),
+        "parameters": {
+            "prior_kappa": prior_kappa,
+            "evidence_kappa": evidence_kappa,
+            "prior_source": f"{SHARP_BOOK} no-vig (fallback: uninformative Beta(1,1))",
+        },
+        "methodology": (
+            "Bayesian updating with Beta-conjugate priors. "
+            f"Pinnacle no-vig probability is encoded as a Beta prior with kappa={prior_kappa} "
+            f"(equivalent sample size). Each additional sportsbook's no-vig probability "
+            f"contributes {evidence_kappa} pseudo-counts of evidence, proportionally split "
+            "by their fair probability. The posterior mean is the Bayesian estimate of "
+            "the true probability. 90% credible intervals quantify remaining uncertainty. "
+            "Posteriors for both sides are normalized to sum to 1.0."
+        ),
+        "context": (
+            f"Bayesian posterior probabilities for {len(games_list)} games. "
+            f"{len(significant_shifts)} market(s) show >= 1pp shift from Pinnacle after "
+            f"incorporating evidence from recreational books — these represent cases where "
+            f"the broader market meaningfully disagrees with the sharp line."
+        ),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _cache.set_analysis(filename, cache_key, result)
+    return json.dumps(result, indent=2)
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TOOLS — Closing Line Value (CLV) Simulation
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+@mcp.tool()
+def get_closing_line_value(
+    game_id: Optional[str] = None,
+    filename: Optional[str] = None,
+    closing_window_minutes: int = 15,
+) -> str:
+    """Simulate Closing Line Value (CLV) analysis using last_updated timestamps.
+
+    Consistently beating the closing line is the #1 indicator of a sharp bettor.
+
+    CLV measures whether a bet placed at earlier odds offered better value than the
+    "closing line" (the latest-updated odds before game time). This tool uses
+    last_updated timestamps to identify which sportsbook line is the closing line
+    (most recently updated) for each game/market/side, then measures how much value
+    earlier lines offered relative to that close.
+
+    For each game, market, and side:
+      1. The "closing line" is the latest-updated odds across all sportsbooks.
+      2. Every earlier line is compared: did it offer better implied probability?
+      3. CLV is expressed as the probability edge (early implied prob vs closing implied prob).
+         Positive CLV = the early line beat the close (sharp signal).
+
+    Also produces per-sportsbook CLV profiles showing which books are consistently
+    slow to update (exploitable) and which are the sharpest closers.
+
+    Args:
+        game_id: Optional — filter to a specific game.
+        filename: Data file to load. Optional.
+        closing_window_minutes: Lines updated within this many minutes of the newest
+            are considered "closing group" — the latest single update is the closing
+            line, but lines within this window are near-close. Default 15 min.
+
+    Returns:
+        JSON with per-game CLV analysis, per-book CLV profiles, and a summary of
+        which sportsbooks consistently offer beatable lines.
+    """
+    cache_key = f"clv:{game_id or 'all'}:{closing_window_minutes}"
+    cached = _cache.get_analysis(filename, cache_key)
+    if cached is not None:
+        return json.dumps(cached, indent=2)
+
+    games = _cache.load_by_game(filename)
+    if not games:
+        return json.dumps({"error": "No data available"})
+
+    if game_id:
+        if game_id not in games:
+            return json.dumps({"error": f"No records found for game_id={game_id}"})
+        games = {game_id: games[game_id]}
+
+    clv_opportunities = []
+    game_summaries = []
+    book_clv_stats: dict[str, list[float]] = {}
+
+    for gid, records in games.items():
+        first = records[0]
+        game_label = f"{first.get('away_team', '?')} @ {first.get('home_team', '?')}"
+
+        for market_type in ("spread", "moneyline", "total"):
+            if market_type in ("spread", "moneyline"):
+                sides = [
+                    ("home", "home_odds", "home_line" if market_type == "spread" else None),
+                    ("away", "away_odds", "away_line" if market_type == "spread" else None),
+                ]
+            else:
+                sides = [
+                    ("over", "over_odds", "line"),
+                    ("under", "under_odds", "line"),
+                ]
+
+            for side, odds_key, line_key in sides:
+                entries = []
+                for r in records:
+                    market = r.get("markets", {}).get(market_type, {})
+                    if odds_key not in market:
+                        continue
+                    ts = _parse_ts_safe(r.get("last_updated"))
+                    if ts is None:
+                        continue
+                    entries.append({
+                        "sportsbook": r["sportsbook"],
+                        "odds": market[odds_key],
+                        "line": market.get(line_key) if line_key else None,
+                        "ts": ts,
+                        "last_updated": r.get("last_updated"),
+                    })
+
+                if len(entries) < 2:
+                    continue
+
+                # Sort by timestamp - latest is the closing line
+                entries.sort(key=lambda e: e["ts"])
+                closing_entry = entries[-1]
+                closing_odds = closing_entry["odds"]
+                closing_prob = implied_probability(closing_odds)
+                closing_ts = closing_entry["ts"]
+
+                for entry in entries[:-1]:
+                    early_odds = entry["odds"]
+                    early_prob = implied_probability(early_odds)
+                    staleness = (closing_ts - entry["ts"]).total_seconds() / 60.0
+
+                    # CLV: positive means the early line was better (lower implied
+                    # prob = better odds for the bettor on that side)
+                    clv_edge = closing_prob - early_prob
+                    clv_pct = round(clv_edge * 100, 3)
+
+                    near_close = staleness <= closing_window_minutes
+
+                    book = entry["sportsbook"]
+                    book_clv_stats.setdefault(book, []).append(clv_pct)
+
+                    line_desc = ""
+                    if entry["line"] is not None and closing_entry["line"] is not None:
+                        if entry["line"] != closing_entry["line"]:
+                            line_desc = f" (line moved {entry['line']} -> {closing_entry['line']})"
+
+                    if clv_pct > 0:
+                        clv_opportunities.append({
+                            "game_id": gid,
+                            "sport": first.get("sport"),
+                            "game": game_label,
+                            "market_type": market_type,
+                            "side": side,
+                            "sportsbook": book,
+                            "early_odds": early_odds,
+                            "closing_odds": closing_odds,
+                            "closing_sportsbook": closing_entry["sportsbook"],
+                            "early_implied_prob": round(early_prob, 6),
+                            "closing_implied_prob": round(closing_prob, 6),
+                            "clv_edge_pct": clv_pct,
+                            "staleness_minutes": round(staleness, 1),
+                            "near_close": near_close,
+                            "line_movement": line_desc.strip() if line_desc else None,
+                            "early_updated": entry["last_updated"],
+                            "closing_updated": closing_entry["last_updated"],
+                            "context": (
+                                f"CLV +{clv_pct}%: {side} {market_type} at {book} "
+                                f"({early_odds}) beat the close ({closing_odds} at "
+                                f"{closing_entry['sportsbook']}). "
+                                f"{round(staleness)} min before close.{line_desc}"
+                            ),
+                        })
+
+        # Game-level summary
+        game_clvs = [o["clv_edge_pct"] for o in clv_opportunities if o["game_id"] == gid]
+        if game_clvs:
+            game_summaries.append({
+                "game_id": gid,
+                "game": game_label,
+                "sport": first.get("sport"),
+                "avg_clv_pct": round(mean(game_clvs), 3),
+                "max_clv_pct": round(max(game_clvs), 3),
+                "positive_clv_count": len([c for c in game_clvs if c > 0]),
+                "total_comparisons": len(game_clvs),
+            })
+
+    clv_opportunities.sort(key=lambda o: o["clv_edge_pct"], reverse=True)
+    game_summaries.sort(key=lambda g: g["avg_clv_pct"], reverse=True)
+
+    # -- Per-sportsbook CLV profile --
+    book_profiles = []
+    for book, edges in sorted(book_clv_stats.items()):
+        positive = [e for e in edges if e > 0]
+        avg_edge = mean(edges) if edges else 0
+        beat_rate = len(positive) / len(edges) * 100 if edges else 0
+
+        if beat_rate >= 60 and avg_edge > 0.5:
+            classification = "EXPLOITABLE - consistently beatable closing lines"
+        elif beat_rate >= 50 and avg_edge > 0:
+            classification = "SOFT - mild CLV advantage available"
+        elif beat_rate <= 30:
+            classification = "SHARP - lines close near or better than peers"
+        else:
+            classification = "NEUTRAL - average market efficiency"
+
+        book_profiles.append({
+            "sportsbook": book,
+            "total_lines": len(edges),
+            "beat_close_count": len(positive),
+            "beat_close_pct": round(beat_rate, 1),
+            "avg_clv_pct": round(avg_edge, 3),
+            "max_clv_pct": round(max(edges), 3) if edges else 0,
+            "min_clv_pct": round(min(edges), 3) if edges else 0,
+            "stddev_clv": round(pstdev(edges), 3) if len(edges) > 1 else 0,
+            "classification": classification,
+            "context": (
+                f"{book}: beats close {round(beat_rate)}% of the time, "
+                f"avg CLV {'+' if avg_edge > 0 else ''}{round(avg_edge, 2)}%. "
+                f"{classification}"
+            ),
+        })
+
+    book_profiles.sort(key=lambda b: b["avg_clv_pct"], reverse=True)
+
+    all_edges = [o["clv_edge_pct"] for o in clv_opportunities]
+    total_comparisons = sum(len(e) for e in book_clv_stats.values())
+
+    result = {
+        "clv_opportunities": clv_opportunities[:50],
+        "clv_opportunity_count": len(clv_opportunities),
+        "game_summaries": game_summaries,
+        "sportsbook_profiles": book_profiles,
+        "summary": {
+            "total_games_analyzed": len(games),
+            "total_comparisons": total_comparisons,
+            "total_clv_positive": len(clv_opportunities),
+            "avg_clv_edge_pct": round(mean(all_edges), 3) if all_edges else 0,
+            "max_clv_edge_pct": round(max(all_edges), 3) if all_edges else 0,
+            "closing_window_minutes": closing_window_minutes,
+            "most_exploitable_book": book_profiles[0]["sportsbook"] if book_profiles else None,
+            "sharpest_closer": book_profiles[-1]["sportsbook"] if book_profiles else None,
+        },
+        "methodology": (
+            "Closing Line Value (CLV) simulation using last_updated timestamps. "
+            "For each game/market/side, the most recently updated sportsbook line is "
+            "treated as the 'closing line' (proxy for the final pre-game odds). Every "
+            "earlier line is compared: if its implied probability was lower than the "
+            "closing line's, it offered positive CLV - the bettor got a better price "
+            "than the market settled on.\n\n"
+            "Why CLV matters: Consistently beating the closing line is the single best "
+            "predictor of long-term betting profitability. Even if individual bets lose, "
+            "a bettor who regularly gets +CLV will profit over large sample sizes. "
+            "Sharp sportsbooks (like Pinnacle) set efficient closing lines, so beating "
+            "them is especially meaningful.\n\n"
+            "Per-sportsbook profiles reveal which books are slow to update (exploitable) "
+            "vs. which are sharp closers. Books classified as 'EXPLOITABLE' consistently "
+            "have stale lines that get beaten by the eventual close - ideal targets for "
+            "line-shopping bettors."
+        ),
+        "context": (
+            f"CLV simulation across {len(games)} games: "
+            f"{len(clv_opportunities)} positive-CLV opportunities found "
+            f"(avg +{round(mean(all_edges), 2) if all_edges else 0}% edge). "
+            + (f"Most exploitable book: {book_profiles[0]['sportsbook']} "
+               f"(beats close {book_profiles[0]['beat_close_pct']}%). "
+               if book_profiles else "")
+            + (f"Best CLV: {clv_opportunities[0]['context']}"
+               if clv_opportunities else "No CLV opportunities found.")
+        ),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    _cache.set_analysis(filename, cache_key, result)
+    return json.dumps(result, indent=2)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TOOL — Bookmaker Margin Decomposition (Shin Model)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+@mcp.tool()
+def get_shin_fair_odds(
+    game_id: str = "",
+    market_type: str = "",
+    sportsbook: str = "",
+    filename: str = "",
+) -> str:
+    """Decompose bookmaker margins using the Shin model (asymmetric vig allocation).
+
+    Instead of splitting vig equally across both sides (naive proportional method),
+    the Shin model allocates MORE vig to the longshot side — which is how sportsbooks
+    actually operate.  This produces more accurate "true" probabilities, especially
+    for lopsided moneyline markets.
+
+    **Why it matters:**
+    - Naive vig removal assumes symmetric overround — it treats -300/+240 the same
+      as -110/-110, just scaled.  This under-estimates favourite probability and
+      over-estimates longshot probability.
+    - The Shin model fixes this by modelling insider-trading risk: bookmakers inflate
+      longshot odds more because an insider betting a longshot risks less for a bigger
+      payoff.
+    - The output includes the Shin parameter *z* (fraction of "informed" money),
+      per-side vig allocation, and the delta vs naive method so you can see exactly
+      where the naive approach goes wrong.
+
+    Use cases:
+    - Compare Shin vs naive fair odds to find where naive vig removal misprices.
+    - Identify which side of a market is bearing more vig (longshot bias).
+    - Use Shin-adjusted probabilities as a better "true" baseline for +EV detection.
+    - Rank sportsbooks by how much insider-trading risk (z) their margins imply.
+
+    Parameters
+    ----------
+    game_id    : Filter to a specific game (optional).
+    market_type: Filter to 'spread', 'moneyline', or 'total' (optional, default all).
+    sportsbook : Filter to a specific sportsbook (optional).
+    filename   : Data file to use (optional, default latest).
+    """
+    enriched = _load_enriched(filename)
+    if not enriched:
+        return json.dumps({"error": "No data found"})
+
+    if game_id:
+        enriched = [r for r in enriched if r.get("game_id") == game_id]
+    if sportsbook:
+        enriched = [r for r in enriched if r.get("sportsbook", "").lower() == sportsbook.lower()]
+    if not enriched:
+        return json.dumps({"error": "No matching records found"})
+
+    market_types = [market_type] if market_type else ["spread", "moneyline", "total"]
+
+    results = []
+    for r in enriched:
+        for mt in market_types:
+            m = r.get("markets", {}).get(mt)
+            if not m:
+                continue
+
+            # Determine side keys based on market type
+            if mt in ("spread", "moneyline"):
+                odds_a_key, odds_b_key = "home_odds", "away_odds"
+                side_a_label, side_b_label = "home", "away"
+            else:
+                odds_a_key, odds_b_key = "over_odds", "under_odds"
+                side_a_label, side_b_label = "over", "under"
+
+            odds_a = m.get(odds_a_key)
+            odds_b = m.get(odds_b_key)
+            if odds_a is None or odds_b is None:
+                continue
+
+            shin = shin_probabilities(odds_a, odds_b)
+            naive = no_vig_probabilities(odds_a, odds_b)
+
+            # Determine which side is the longshot
+            longshot_side = side_b_label if shin["shin_a"] > shin["shin_b"] else side_a_label
+            longshot_vig_share = max(shin["vig_on_a"], shin["vig_on_b"])
+            fav_vig_share = min(shin["vig_on_a"], shin["vig_on_b"])
+            total_vig = shin["vig_on_a"] + shin["vig_on_b"]
+            longshot_vig_pct_of_total = round(longshot_vig_share / total_vig * 100, 1) if total_vig > 0 else 50.0
+
+            entry = {
+                "game_id": r.get("game_id"),
+                "sport": r.get("sport"),
+                "home_team": r.get("home_team"),
+                "away_team": r.get("away_team"),
+                "sportsbook": r.get("sportsbook"),
+                "market_type": mt,
+                f"{side_a_label}_odds": odds_a,
+                f"{side_b_label}_odds": odds_b,
+                "shin_model": {
+                    f"{side_a_label}_true_prob": shin["shin_a"],
+                    f"{side_b_label}_true_prob": shin["shin_b"],
+                    f"{side_a_label}_true_prob_pct": shin["shin_a_pct"],
+                    f"{side_b_label}_true_prob_pct": shin["shin_b_pct"],
+                    f"{side_a_label}_fair_odds": fair_odds_to_american(shin["shin_a"]),
+                    f"{side_b_label}_fair_odds": fair_odds_to_american(shin["shin_b"]),
+                    "z_parameter": shin["z"],
+                    "z_pct": shin["z_pct"],
+                    "interpretation": (
+                        f"Shin z={shin['z_pct']} — the book prices as if {shin['z_pct']} of "
+                        f"handle is from informed bettors."
+                    ),
+                },
+                "naive_model": {
+                    f"{side_a_label}_true_prob": naive["fair_a"],
+                    f"{side_b_label}_true_prob": naive["fair_b"],
+                    f"{side_a_label}_true_prob_pct": naive["fair_a_pct"],
+                    f"{side_b_label}_true_prob_pct": naive["fair_b_pct"],
+                    f"{side_a_label}_fair_odds": fair_odds_to_american(naive["fair_a"]),
+                    f"{side_b_label}_fair_odds": fair_odds_to_american(naive["fair_b"]),
+                },
+                "comparison": {
+                    f"{side_a_label}_delta": shin["delta_a"],
+                    f"{side_b_label}_delta": shin["delta_b"],
+                    f"{side_a_label}_delta_pct": f"{round(shin['delta_a'] * 100, 2)}pp",
+                    f"{side_b_label}_delta_pct": f"{round(shin['delta_b'] * 100, 2)}pp",
+                    "interpretation": (
+                        f"Shin gives {side_a_label} {'+' if shin['delta_a'] >= 0 else ''}"
+                        f"{round(shin['delta_a'] * 100, 2)}pp vs naive. "
+                        f"Naive OVER-estimates {longshot_side} (longshot) probability."
+                    ),
+                },
+                "vig_decomposition": {
+                    "total_vig": shin["vig_pct"],
+                    f"vig_on_{side_a_label}": shin["vig_on_a"],
+                    f"vig_on_{side_b_label}": shin["vig_on_b"],
+                    f"vig_on_{side_a_label}_pct": shin["vig_on_a_pct"],
+                    f"vig_on_{side_b_label}_pct": shin["vig_on_b_pct"],
+                    "longshot_side": longshot_side,
+                    "longshot_vig_share_of_total": f"{longshot_vig_pct_of_total}%",
+                    "interpretation": (
+                        f"The {longshot_side} (longshot) bears {longshot_vig_pct_of_total}% of "
+                        f"total vig vs the naive assumption of 50/50."
+                    ),
+                },
+            }
+
+            # Add line info for spread/total
+            if mt == "spread" and "home_line" in m:
+                entry["line"] = m["home_line"]
+            elif mt == "total" and "line" in m:
+                entry["line"] = m["line"]
+
+            results.append(entry)
+
+    # Aggregate: per-sportsbook z rankings (how much insider risk each book prices in)
+    book_z_scores: dict[str, list[float]] = {}
+    for r in results:
+        book = r.get("sportsbook", "unknown")
+        z = r["shin_model"]["z_parameter"]
+        book_z_scores.setdefault(book, []).append(z)
+
+    book_rankings = []
+    for book, zs in book_z_scores.items():
+        avg_z = sum(zs) / len(zs)
+        book_rankings.append({
+            "sportsbook": book,
+            "avg_shin_z": round(avg_z, 6),
+            "avg_shin_z_pct": f"{round(avg_z * 100, 4)}%",
+            "markets_analyzed": len(zs),
+            "interpretation": (
+                f"{'High' if avg_z > 0.03 else 'Moderate' if avg_z > 0.015 else 'Low'} "
+                f"insider-risk pricing — "
+                f"{'heavy longshot bias (recreational book)' if avg_z > 0.03 else 'moderate longshot bias' if avg_z > 0.015 else 'relatively symmetric (sharp book)'}"
+            ),
+        })
+    book_rankings.sort(key=lambda b: b["avg_shin_z"], reverse=True)
+
+    result = {
+        "markets": results,
+        "count": len(results),
+        "sportsbook_z_rankings": book_rankings,
+        "methodology": (
+            "The Shin model (Shin 1991, 1993) decomposes bookmaker margins asymmetrically "
+            "by modelling a fraction z of bettors as 'insiders' (informed traders). "
+            "Books protect against insiders by inflating odds, but longshots get inflated "
+            "MORE because an insider betting a longshot risks less capital for a larger "
+            "payout. The parameter z is solved numerically (bisection) so that the "
+            "Shin-adjusted true probabilities sum to exactly 1.\n\n"
+            "Formula: q_i = (sqrt(z² + 4(1-z)(p_i/S)²) - z) / (2(1-z))\n"
+            "where p_i = implied prob, S = sum of implied probs, z = insider fraction.\n\n"
+            "Key insight: naive proportional vig removal splits the overround 50/50 between "
+            "both sides. Shin allocates more vig to the longshot, giving more accurate true "
+            "probabilities — especially important for lopsided moneyline markets.\n\n"
+            "The z parameter also serves as a sportsbook 'sharpness' indicator: higher z "
+            "means the book prices in more insider risk (typical of recreational books "
+            "with wider margins on longshots)."
+        ),
+        "context": (
+            f"Shin margin decomposition for {len(results)} markets across "
+            f"{len(book_rankings)} sportsbooks. "
+            + (f"Highest insider-risk book: {book_rankings[0]['sportsbook']} "
+               f"(avg z={book_rankings[0]['avg_shin_z_pct']}). "
+               if book_rankings else "")
+            + (f"Sharpest book: {book_rankings[-1]['sportsbook']} "
+               f"(avg z={book_rankings[-1]['avg_shin_z_pct']})."
+               if book_rankings else "")
+        ),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+def get_odds_elasticity(
+    game_id: Optional[str] = None,
+    market_type: Optional[str] = None,
+    filename: Optional[str] = None,
+) -> str:
+    """Odds Elasticity / Sensitivity Analysis — how much a 0.5-point line
+    change impacts odds across sportsbooks.
+
+    For spread and total markets, compares sportsbooks that post different
+    lines for the same game and measures how dramatically their odds shift
+    per half-point of line movement.  Books with *higher* elasticity (big
+    odds swings for small line changes) may be less confident in their
+    pricing, while low-elasticity books price through the line change.
+
+    Args:
+        game_id:     Filter to a single game. Optional (analyzes all games).
+        market_type: "spread" or "total". Optional (analyzes both).
+        filename:    Data file to load. Optional.
+
+    Returns per-game elasticity pairs, per-sportsbook average elasticity,
+    and a confidence ranking (lower elasticity = more confident pricing).
+    """
+    cache_key = f"odds_elasticity|{game_id or 'all'}|{market_type or 'all'}"
+    cached = _cache.get_analysis(filename, cache_key)
+    if cached is not None:
+        return json.dumps(cached, indent=2)
+
+    enriched = _cache.load_enriched(filename)
+    if not enriched:
+        return json.dumps({"error": "No data available"})
+
+    by_game = _cache.load_by_game(filename)
+
+    target_markets = []
+    if market_type:
+        if market_type.lower() not in ("spread", "total"):
+            return json.dumps({
+                "error": "market_type must be 'spread' or 'total' (moneyline has no line to shift)"
+            })
+        target_markets = [market_type.lower()]
+    else:
+        target_markets = ["spread", "total"]
+
+    game_ids = [game_id] if game_id else list(by_game.keys())
+
+    elasticity_pairs: list[dict] = []
+    book_elasticities: dict[str, list[float]] = {}
+
+    for gid in game_ids:
+        records = by_game.get(gid, [])
+        if len(records) < 2:
+            continue
+
+        game_meta = {
+            "game_id": gid,
+            "sport": records[0].get("sport"),
+            "home_team": records[0].get("home_team"),
+            "away_team": records[0].get("away_team"),
+        }
+
+        for mkt in target_markets:
+            # Collect (sportsbook, line, home/over odds, away/under odds) tuples
+            book_lines: list[dict] = []
+            for r in records:
+                m = r.get("markets", {}).get(mkt)
+                if not m:
+                    continue
+                if mkt == "spread":
+                    line = m.get("home_line")
+                    odds_a = m.get("home_odds")
+                    odds_b = m.get("away_odds")
+                    side_a_label = "home"
+                    side_b_label = "away"
+                else:  # total
+                    line = m.get("line")
+                    odds_a = m.get("over_odds")
+                    odds_b = m.get("under_odds")
+                    side_a_label = "over"
+                    side_b_label = "under"
+
+                if line is None or odds_a is None or odds_b is None:
+                    continue
+                book_lines.append({
+                    "sportsbook": r.get("sportsbook"),
+                    "line": line,
+                    "odds_a": odds_a,
+                    "odds_b": odds_b,
+                    "side_a_label": side_a_label,
+                    "side_b_label": side_b_label,
+                })
+
+            if len(book_lines) < 2:
+                continue
+
+            # Group by line value
+            lines_map: dict[float, list[dict]] = {}
+            for bl in book_lines:
+                lines_map.setdefault(bl["line"], []).append(bl)
+
+            distinct_lines = sorted(lines_map.keys())
+            if len(distinct_lines) < 2:
+                continue
+
+            # Compare every pair of distinct lines
+            for i in range(len(distinct_lines)):
+                for j in range(i + 1, len(distinct_lines)):
+                    line_lo = distinct_lines[i]
+                    line_hi = distinct_lines[j]
+                    line_diff = abs(line_hi - line_lo)
+                    if line_diff < 0.25 or line_diff > 3.0:
+                        continue  # skip trivially close or too-far lines
+
+                    for bl_lo in lines_map[line_lo]:
+                        for bl_hi in lines_map[line_hi]:
+                            # Calculate odds movement per 0.5 points
+                            odds_a_diff = abs(bl_hi["odds_a"] - bl_lo["odds_a"])
+                            odds_b_diff = abs(bl_hi["odds_b"] - bl_lo["odds_b"])
+                            avg_odds_diff = (odds_a_diff + odds_b_diff) / 2.0
+                            elasticity = round(avg_odds_diff / (line_diff / 0.5), 1)
+
+                            # Implied probability shift
+                            prob_a_lo = implied_probability(bl_lo["odds_a"])
+                            prob_a_hi = implied_probability(bl_hi["odds_a"])
+                            prob_shift = round(abs(prob_a_hi - prob_a_lo) * 100, 2)
+
+                            pair = {
+                                **game_meta,
+                                "market": mkt,
+                                "book_a": bl_lo["sportsbook"],
+                                "book_a_line": line_lo,
+                                "book_a_odds": f"{bl_lo['odds_a']}/{bl_lo['odds_b']}",
+                                "book_b": bl_hi["sportsbook"],
+                                "book_b_line": line_hi,
+                                "book_b_odds": f"{bl_hi['odds_a']}/{bl_hi['odds_b']}",
+                                "line_difference": line_diff,
+                                "avg_odds_shift_per_half_point": elasticity,
+                                "implied_prob_shift_pct": prob_shift,
+                            }
+                            elasticity_pairs.append(pair)
+
+                            # Track per-book elasticity
+                            book_elasticities.setdefault(bl_lo["sportsbook"], []).append(elasticity)
+                            book_elasticities.setdefault(bl_hi["sportsbook"], []).append(elasticity)
+
+    # --- Per-sportsbook summary ---
+    book_summary = []
+    for book, vals in book_elasticities.items():
+        avg_e = round(sum(vals) / len(vals), 1)
+        max_e = round(max(vals), 1)
+        min_e = round(min(vals), 1)
+        std_e = round(pstdev(vals), 1) if len(vals) > 1 else 0.0
+        book_summary.append({
+            "sportsbook": book,
+            "avg_elasticity": avg_e,
+            "max_elasticity": max_e,
+            "min_elasticity": min_e,
+            "std_elasticity": std_e,
+            "comparisons": len(vals),
+            "confidence_rating": (
+                "high" if avg_e < 15 else
+                "medium" if avg_e < 30 else
+                "low"
+            ),
+        })
+    book_summary.sort(key=lambda b: b["avg_elasticity"])
+
+    # Top pairs by elasticity
+    elasticity_pairs.sort(key=lambda p: p["avg_odds_shift_per_half_point"], reverse=True)
+
+    # Overall statistics
+    all_elasticities = [p["avg_odds_shift_per_half_point"] for p in elasticity_pairs]
+    overall_stats = {}
+    if all_elasticities:
+        overall_stats = {
+            "mean_elasticity": round(mean(all_elasticities), 1),
+            "median_elasticity": round(sorted(all_elasticities)[len(all_elasticities) // 2], 1),
+            "max_elasticity": round(max(all_elasticities), 1),
+            "min_elasticity": round(min(all_elasticities), 1),
+            "std_elasticity": round(pstdev(all_elasticities), 1),
+        }
+
+    result = {
+        "elasticity_pairs": elasticity_pairs[:50],  # top 50 most elastic
+        "pair_count": len(elasticity_pairs),
+        "sportsbook_elasticity_rankings": book_summary,
+        "overall_statistics": overall_stats,
+        "parameters": {
+            "game_id": game_id or "all",
+            "market_type": market_type or "all (spread + total)",
+        },
+        "methodology": (
+            "Odds elasticity measures how much the odds change per 0.5-point "
+            "line movement. For each game and market (spread/total), we compare "
+            "sportsbooks posting different lines and calculate:\n"
+            "  elasticity = avg_odds_change / (line_difference / 0.5)\n\n"
+            "High elasticity (big odds swings for small line shifts) suggests a "
+            "book is less confident in its pricing — they compensate for moving "
+            "off the key number with dramatic odds adjustments. Low elasticity "
+            "books price through the line change smoothly, indicating stronger "
+            "underlying models.\n\n"
+            "Confidence ratings: high (<15), medium (15-30), low (>30)."
+        ),
+        "context": (
+            f"Analyzed {len(elasticity_pairs)} cross-book line comparisons. "
+            + (f"Most elastic: {elasticity_pairs[0]['book_a']} vs {elasticity_pairs[0]['book_b']} "
+               f"on {elasticity_pairs[0]['game_id']} {elasticity_pairs[0]['market']} "
+               f"(elasticity={elasticity_pairs[0]['avg_odds_shift_per_half_point']}). "
+               if elasticity_pairs else "No line differences found across books. ")
+            + (f"Most confident book: {book_summary[0]['sportsbook']} "
+               f"(avg elasticity={book_summary[0]['avg_elasticity']}). "
+               f"Least confident: {book_summary[-1]['sportsbook']} "
+               f"(avg elasticity={book_summary[-1]['avg_elasticity']})."
+               if book_summary else "")
+        ),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _cache.set_analysis(filename, cache_key, result)
+    return json.dumps(result, indent=2)
+
+
+
+
+# ---------------------------------------------------------------------------
+# Poisson helpers
+# ---------------------------------------------------------------------------
+
+def _poisson_pmf(k: int, lam: float) -> float:
+    """Poisson probability mass function computed in log-space for numerical stability."""
+    if lam <= 0:
+        return 1.0 if k == 0 else 0.0
+    return exp(k * log(lam) - lam - lgamma(k + 1))
+
+
+def _build_score_matrix(home_lambda: float, away_lambda: float, max_score: int):
+    """Build a 2D probability matrix P[home_score][away_score].
+
+    Returns:
+        matrix: list[list[float]]  -- matrix[h][a] = P(home=h AND away=a)
+        home_pmf: list[float]      -- marginal P(home=h)
+        away_pmf: list[float]      -- marginal P(away=a)
+    """
+    home_pmf = [_poisson_pmf(k, home_lambda) for k in range(max_score + 1)]
+    away_pmf = [_poisson_pmf(k, away_lambda) for k in range(max_score + 1)]
+    matrix = [
+        [home_pmf[h] * away_pmf[a] for a in range(max_score + 1)]
+        for h in range(max_score + 1)
+    ]
+    return matrix, home_pmf, away_pmf
+
+
+@mcp.tool()
+def get_poisson_score_predictions(
+    game_id: Optional[str] = None,
+    max_score: Optional[int] = None,
+    top_n_scores: int = 15,
+    alt_spreads: Optional[str] = None,
+    alt_totals: Optional[str] = None,
+    filename: Optional[str] = None,
+) -> str:
+    """Poisson model for score prediction -- derive every possible final-score probability
+    from the consensus spread and total, then price alternative lines, props, and key numbers.
+
+    Uses the implied total and spread to compute expected points per team (lambda),
+    then applies a Poisson distribution to build a full score-probability matrix.
+
+    This lets you:
+    - See the most likely exact final scores
+    - Price alternative spreads (e.g., what is the fair price on -3.5 vs -7.5?)
+    - Price alternative totals (e.g., over/under 215.5, 225.5, etc.)
+    - Get win/loss/draw probabilities
+    - Identify key numbers (margins and totals with outsized probability mass)
+    - Estimate half-time and quarter score distributions
+
+    Args:
+        game_id: Filter to a single game. Optional -- returns all games if omitted.
+        max_score: Maximum score to model per team. Auto-detected per sport if omitted
+                   (NBA: 160, NFL: 60, NHL/Soccer: 10, default: 80).
+        top_n_scores: How many top exact scores to return per game (default 15).
+        alt_spreads: Comma-separated alternative spreads to price, e.g. "-3.5,-7.5,-10.5,1.5".
+                     Defaults to a sport-appropriate set if omitted.
+        alt_totals: Comma-separated alternative totals to price, e.g. "210.5,215.5,220.5,225.5".
+                    Auto-generated around the consensus total if omitted.
+        filename: Data file to load. Optional.
+
+    Returns Poisson-modeled score predictions per game with exact scores, alt lines, and key numbers.
+    """
+    cache_key = (
+        f"poisson:{game_id or 'all'}:{max_score}:{top_n_scores}:"
+        f"{alt_spreads or ''}:{alt_totals or ''}"
+    )
+    cached = _cache.get_analysis(filename, cache_key)
+    if cached is not None:
+        return json.dumps(cached, indent=2)
+
+    games = _cache.load_by_game(filename)
+    consensus = _cache.load_consensus(filename)
+
+    # Parse user-supplied alternative lines -----------------------------------
+    user_alt_spreads = None
+    if alt_spreads:
+        try:
+            user_alt_spreads = [float(x.strip()) for x in alt_spreads.split(",")]
+        except ValueError:
+            pass
+
+    user_alt_totals = None
+    if alt_totals:
+        try:
+            user_alt_totals = [float(x.strip()) for x in alt_totals.split(",")]
+        except ValueError:
+            pass
+
+    results = []
+
+    for gid, records in games.items():
+        if game_id and gid != game_id:
+            continue
+
+        game_consensus = consensus.get(gid, {})
+        spread_c = game_consensus.get("spread", {})
+        total_c = game_consensus.get("total", {})
+
+        avg_home_line = spread_c.get("avg_home_line")
+        avg_total = total_c.get("avg_line")
+
+        if avg_home_line is None or avg_total is None:
+            continue
+
+        first = records[0]
+        home_team = first.get("home_team", "Home")
+        away_team = first.get("away_team", "Away")
+        sport = (first.get("sport") or "").upper()
+
+        # Expected points (lambda) per team
+        home_lambda = (avg_total + avg_home_line) / 2
+        away_lambda = (avg_total - avg_home_line) / 2
+
+        if home_lambda <= 0 or away_lambda <= 0:
+            continue
+
+        # Sport-adaptive max score
+        if max_score is not None:
+            ms = max_score
+        elif sport in ("NBA", "WNBA", "CBB", "NCAAB"):
+            ms = 160
+        elif sport in ("NFL", "NCAAF", "CFB"):
+            ms = 70
+        elif sport in ("NHL",):
+            ms = 12
+        elif sport in ("SOCCER", "MLS", "EPL", "UEFA", "FIFA"):
+            ms = 10
+        elif sport in ("MLB",):
+            ms = 20
+        else:
+            ms = max(int(max(home_lambda, away_lambda) * 2.5), 30)
+
+        # Build Poisson matrix -------------------------------------------------
+        matrix, home_pmf, away_pmf = _build_score_matrix(home_lambda, away_lambda, ms)
+
+        # Win / loss / draw probabilities
+        home_win_prob = 0.0
+        away_win_prob = 0.0
+        draw_prob = 0.0
+        for h in range(ms + 1):
+            for a in range(ms + 1):
+                p = matrix[h][a]
+                if h > a:
+                    home_win_prob += p
+                elif a > h:
+                    away_win_prob += p
+                else:
+                    draw_prob += p
+
+        # Top exact scores -----------------------------------------------------
+        score_probs = []
+        for h in range(ms + 1):
+            for a in range(ms + 1):
+                p = matrix[h][a]
+                if p > 1e-6:
+                    score_probs.append({"home": h, "away": a, "prob": p})
+        score_probs.sort(key=lambda s: s["prob"], reverse=True)
+        top_scores = score_probs[:top_n_scores]
+        for s in top_scores:
+            s["prob_pct"] = f"{s['prob'] * 100:.2f}%"
+            s["score"] = f"{home_team} {s['home']} - {away_team} {s['away']}"
+
+        # Alternative spread pricing -------------------------------------------
+        if user_alt_spreads is not None:
+            spreads_to_price = user_alt_spreads
+        elif sport in ("NBA", "WNBA", "CBB", "NCAAB"):
+            base = round(avg_home_line)
+            spreads_to_price = [base + d for d in [-6, -4, -2, -0.5, 0.5, 2, 4, 6]]
+        elif sport in ("NFL", "NCAAF", "CFB"):
+            spreads_to_price = [-14.5, -10.5, -7.5, -6.5, -3.5, -2.5, -1.5,
+                                1.5, 2.5, 3.5, 6.5, 7.5, 10.5, 14.5]
+        elif sport in ("NHL", "SOCCER", "MLS", "EPL", "UEFA", "FIFA"):
+            spreads_to_price = [-2.5, -1.5, -0.5, 0.5, 1.5, 2.5]
+        else:
+            base = round(avg_home_line)
+            spreads_to_price = [base + d for d in [-4, -2, -0.5, 0.5, 2, 4]]
+
+        alt_spread_results = []
+        for sp in sorted(spreads_to_price):
+            # Home covers when home_score + spread > away_score
+            cover_prob = 0.0
+            push_prob = 0.0
+            for h in range(ms + 1):
+                for a in range(ms + 1):
+                    margin = h - a
+                    p = matrix[h][a]
+                    if margin + sp > 0:
+                        cover_prob += p
+                    elif margin + sp == 0:
+                        push_prob += p
+
+            no_push = 1 - push_prob if push_prob < 1 else 1
+            home_cover_adj = cover_prob / no_push if no_push > 0 else 0.5
+            away_cover_adj = 1 - home_cover_adj
+
+            alt_spread_results.append({
+                "spread": sp,
+                "home_cover_prob": round(cover_prob, 4),
+                "home_cover_prob_pct": f"{cover_prob * 100:.1f}%",
+                "away_cover_prob": round(1 - cover_prob - push_prob, 4),
+                "push_prob": round(push_prob, 4),
+                "home_fair_odds": fair_odds_to_american(home_cover_adj) if 0.01 < home_cover_adj < 0.99 else None,
+                "away_fair_odds": fair_odds_to_american(away_cover_adj) if 0.01 < away_cover_adj < 0.99 else None,
+                "is_consensus": abs(sp - avg_home_line) < 0.25,
+            })
+
+        # Alternative total pricing --------------------------------------------
+        if user_alt_totals is not None:
+            totals_to_price = user_alt_totals
+        else:
+            base_total = round(avg_total)
+            if sport in ("NBA", "WNBA", "CBB", "NCAAB"):
+                offsets = [-15, -10, -7, -5, -3, -0.5, 0.5, 3, 5, 7, 10, 15]
+            elif sport in ("NFL", "NCAAF", "CFB"):
+                offsets = [-10, -7, -3.5, -3, -0.5, 0.5, 3, 3.5, 7, 10]
+            elif sport in ("NHL", "SOCCER", "MLS", "EPL", "MLB"):
+                offsets = [-2.5, -1.5, -0.5, 0.5, 1.5, 2.5]
+            else:
+                offsets = [-8, -5, -3, -0.5, 0.5, 3, 5, 8]
+            totals_to_price = [base_total + o for o in offsets]
+
+        alt_total_results = []
+        for t in sorted(totals_to_price):
+            over_prob = 0.0
+            push_prob = 0.0
+            for h in range(ms + 1):
+                for a in range(ms + 1):
+                    total_score = h + a
+                    p = matrix[h][a]
+                    if total_score > t:
+                        over_prob += p
+                    elif total_score == t:
+                        push_prob += p
+
+            under_prob = 1 - over_prob - push_prob
+            no_push = 1 - push_prob if push_prob < 1 else 1
+            over_adj = over_prob / no_push if no_push > 0 else 0.5
+            under_adj = 1 - over_adj
+
+            alt_total_results.append({
+                "total_line": t,
+                "over_prob": round(over_prob, 4),
+                "over_prob_pct": f"{over_prob * 100:.1f}%",
+                "under_prob": round(under_prob, 4),
+                "push_prob": round(push_prob, 4),
+                "over_fair_odds": fair_odds_to_american(over_adj) if 0.01 < over_adj < 0.99 else None,
+                "under_fair_odds": fair_odds_to_american(under_adj) if 0.01 < under_adj < 0.99 else None,
+                "is_consensus": abs(t - avg_total) < 0.25,
+            })
+
+        # Key numbers -- margins and totals with outsized probability mass -----
+        margin_probs: dict[int, float] = {}
+        total_probs: dict[int, float] = {}
+        for h in range(ms + 1):
+            for a in range(ms + 1):
+                p = matrix[h][a]
+                if p < 1e-9:
+                    continue
+                m = h - a
+                margin_probs[m] = margin_probs.get(m, 0) + p
+                t = h + a
+                total_probs[t] = total_probs.get(t, 0) + p
+
+        key_margins = sorted(margin_probs.items(), key=lambda x: x[1], reverse=True)[:10]
+        key_totals = sorted(total_probs.items(), key=lambda x: x[1], reverse=True)[:10]
+
+        # Half / quarter estimates (simple Poisson scaling) --------------------
+        half_home = home_lambda / 2
+        half_away = away_lambda / 2
+        quarter_home = home_lambda / 4
+        quarter_away = away_lambda / 4
+
+        half_matrix, _, _ = _build_score_matrix(half_home, half_away, ms // 2)
+        half_scores = []
+        for h in range(ms // 2 + 1):
+            for a in range(ms // 2 + 1):
+                p = half_matrix[h][a]
+                if p > 1e-5:
+                    half_scores.append({"home": h, "away": a, "prob": p})
+        half_scores.sort(key=lambda s: s["prob"], reverse=True)
+        top_half_scores = half_scores[:5]
+        for s in top_half_scores:
+            s["prob_pct"] = f"{s['prob'] * 100:.2f}%"
+            s["score"] = f"{home_team} {s['home']} - {away_team} {s['away']}"
+
+        context_str = (
+            f"Poisson model for {home_team} vs {away_team}: "
+            f"lambda_home={round(home_lambda, 1)}, lambda_away={round(away_lambda, 1)} "
+            f"(spread {avg_home_line}, total {avg_total}). "
+            f"Home win {home_win_prob * 100:.1f}%, Away win {away_win_prob * 100:.1f}%, "
+            f"Draw {draw_prob * 100:.1f}%."
+        )
+        if top_scores:
+            context_str += f" Most likely score: {top_scores[0]['score']} ({top_scores[0]['prob_pct']})."
+
+        results.append({
+            "game_id": gid,
+            "sport": sport,
+            "home_team": home_team,
+            "away_team": away_team,
+            "consensus_spread": avg_home_line,
+            "consensus_total": avg_total,
+            "model_params": {
+                "home_lambda": round(home_lambda, 2),
+                "away_lambda": round(away_lambda, 2),
+                "max_score_modeled": ms,
+            },
+            "win_probabilities": {
+                "home_win": round(home_win_prob, 4),
+                "home_win_pct": f"{home_win_prob * 100:.1f}%",
+                "away_win": round(away_win_prob, 4),
+                "away_win_pct": f"{away_win_prob * 100:.1f}%",
+                "draw": round(draw_prob, 4),
+                "draw_pct": f"{draw_prob * 100:.1f}%",
+                "home_ml_fair_odds": fair_odds_to_american(home_win_prob) if 0.01 < home_win_prob < 0.99 else None,
+                "away_ml_fair_odds": fair_odds_to_american(away_win_prob) if 0.01 < away_win_prob < 0.99 else None,
+            },
+            "top_exact_scores": top_scores,
+            "alternative_spreads": alt_spread_results,
+            "alternative_totals": alt_total_results,
+            "key_numbers": {
+                "margins": [
+                    {"margin": m, "prob": round(p, 4), "prob_pct": f"{p * 100:.2f}%",
+                     "label": f"{home_team} by {abs(m)}" if m > 0 else (f"{away_team} by {abs(m)}" if m < 0 else "Tie")}
+                    for m, p in key_margins
+                ],
+                "totals": [
+                    {"total": t, "prob": round(p, 4), "prob_pct": f"{p * 100:.2f}%"}
+                    for t, p in key_totals
+                ],
+            },
+            "half_time_estimates": {
+                "home_expected_half": round(half_home, 2),
+                "away_expected_half": round(half_away, 2),
+                "expected_half_total": round(half_home + half_away, 2),
+                "top_half_scores": top_half_scores,
+                "note": "Assumes scoring is uniformly distributed across halves (simple 50/50 split of full-game lambda).",
+            },
+            "quarter_estimates": {
+                "home_expected_quarter": round(quarter_home, 2),
+                "away_expected_quarter": round(quarter_away, 2),
+                "expected_quarter_total": round(quarter_home + quarter_away, 2),
+                "note": "Assumes scoring is uniformly distributed across quarters (25% split of full-game lambda).",
+            },
+            "context": context_str,
+        })
+
+    results.sort(key=lambda r: r["consensus_total"], reverse=True)
+
+    overall_context = f"Poisson score predictions for {len(results)} game(s)."
+    if results:
+        overall_context += (
+            f" Highest-scoring game expected: "
+            f"{results[0]['home_team']} vs {results[0]['away_team']} "
+            f"(total {results[0]['consensus_total']})."
+        )
+
+    result = {
+        "poisson_predictions": results,
+        "count": len(results),
+        "methodology": (
+            "Poisson Score Prediction Model\n"
+            "================================\n"
+            "1. Derive expected points per team from consensus spread & total:\n"
+            "   home_lambda = (total + home_spread) / 2\n"
+            "   away_lambda = (total - home_spread) / 2\n"
+            "2. Apply independent Poisson distributions: P(score=k) = (lambda^k * e^-lambda) / k!\n"
+            "3. Build joint score matrix: P(H=h, A=a) = P_home(h) * P_away(a)\n"
+            "4. From the matrix derive:\n"
+            "   - Exact score probabilities (most likely final scores)\n"
+            "   - Win/loss/draw probabilities\n"
+            "   - Alternative spread pricing (fair odds for any spread)\n"
+            "   - Alternative total pricing (fair over/under for any total)\n"
+            "   - Key numbers (margins & totals with outsized probability mass)\n"
+            "   - Half/quarter estimates (lambda scaled proportionally)\n\n"
+            "Assumptions: Team scores are independent Poisson random variables. "
+            "This works best for lower-scoring sports (soccer, hockey, baseball). "
+            "For high-scoring sports (NBA, NFL), the model still provides useful "
+            "relative pricing but the normal approximation is more accurate for "
+            "tail probabilities."
+        ),
+        "context": overall_context,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
     _cache.set_analysis(filename, cache_key, result)
