@@ -29,28 +29,35 @@ function renderMarkdown(text) {
   };
 
   const processInline = (line) => {
-    // Bold: **text**
+    // Bold: **text** and Italic: *text* (single asterisk, not double)
     const parts = [];
     let remaining = line;
     let idx = 0;
     while (remaining.length > 0) {
-      const boldStart = remaining.indexOf("**");
-      if (boldStart === -1) {
+      // Find the first * (could be ** for bold or * for italic)
+      const starPos = remaining.indexOf("*");
+      if (starPos === -1) {
         parts.push(remaining);
         break;
       }
-      const boldEnd = remaining.indexOf("**", boldStart + 2);
-      if (boldEnd === -1) {
+      const isBold = remaining[starPos + 1] === "*";
+      const marker = isBold ? "**" : "*";
+      const markerLen = marker.length;
+      const endPos = remaining.indexOf(marker, starPos + markerLen);
+      if (endPos === -1) {
         parts.push(remaining);
         break;
       }
-      if (boldStart > 0) {
-        parts.push(remaining.substring(0, boldStart));
+      if (starPos > 0) {
+        parts.push(remaining.substring(0, starPos));
       }
-      parts.push(
-        <strong key={`b-${idx}`}>{remaining.substring(boldStart + 2, boldEnd)}</strong>
-      );
-      remaining = remaining.substring(boldEnd + 2);
+      const inner = remaining.substring(starPos + markerLen, endPos);
+      if (isBold) {
+        parts.push(<strong key={`b-${idx}`}>{inner}</strong>);
+      } else {
+        parts.push(<em key={`i-${idx}`}>{inner}</em>);
+      }
+      remaining = remaining.substring(endPos + markerLen);
       idx++;
     }
     return parts.length === 1 ? parts[0] : parts;
@@ -123,7 +130,7 @@ function TypingIndicator() {
   );
 }
 
-function ChatPanel({ pipelineResults }) {
+function ChatPanel({ pipelineResults, debugMode }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [conversationId, setConversationId] = useState(null);
@@ -212,6 +219,7 @@ function ChatPanel({ pipelineResults }) {
         role: "assistant",
         content: typeof responseText === "string" ? responseText : JSON.stringify(responseText),
         timestamp: new Date(),
+        run_id: data.run_id || null,
       };
       setMessages((prev) => [...prev, assistantMsg]);
     } catch (err) {
@@ -281,7 +289,19 @@ function ChatPanel({ pipelineResults }) {
                   ? renderMarkdown(msg.content)
                   : msg.content}
               </div>
-              <span className="chat-msg-time">{formatTime(msg.timestamp)}</span>
+              <div className="chat-msg-meta">
+                <span className="chat-msg-time">{formatTime(msg.timestamp)}</span>
+                {debugMode && msg.run_id && (
+                  <a
+                    href={`${API_BASE}/logs/${msg.run_id}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="debug-log-link debug-log-link--chat"
+                  >
+                    log:{msg.run_id}
+                  </a>
+                )}
+              </div>
             </div>
           );
         })}

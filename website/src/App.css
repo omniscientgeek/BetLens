@@ -81,6 +81,59 @@
   border-color: #e94560;
 }
 
+/* Debug Toggle & Log Link */
+.debug-toggle {
+  background: transparent;
+  color: #888;
+  border: 1px solid #ccc;
+  padding: 6px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.75rem;
+  font-family: monospace;
+  transition: all 0.2s;
+  margin-left: auto;
+}
+
+.debug-toggle:hover {
+  border-color: #e94560;
+  color: #e94560;
+}
+
+.debug-toggle--on {
+  background: #1a1a2e;
+  color: #4ade80;
+  border-color: #4ade80;
+}
+
+.debug-log-link {
+  font-family: monospace;
+  font-size: 0.75rem;
+  color: #4ade80;
+  text-decoration: none;
+  padding: 4px 8px;
+  border: 1px solid #4ade8055;
+  border-radius: 4px;
+  transition: all 0.2s;
+}
+
+.debug-log-link:hover {
+  background: #4ade8022;
+  border-color: #4ade80;
+}
+
+.debug-log-link--chat {
+  font-size: 0.65rem;
+  padding: 2px 6px;
+  margin-left: 8px;
+}
+
+.chat-msg-meta {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
 /* Shared States */
 .error {
   background: #ffe0e0;

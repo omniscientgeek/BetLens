@@ -17,9 +17,16 @@ import time
 import asyncio
 import logging
 import shutil
+import contextvars
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+# Context variable for per-run logger — set by call_ai/call_ai_stream/call_ai_chat
+# so that low-level provider functions (_call_claude_sdk etc.) can log to the run file
+_current_run_logger: contextvars.ContextVar[Optional[logging.Logger]] = contextvars.ContextVar(
+    "_current_run_logger", default=None
+)
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "ai_config.json")
 
@@ -71,6 +78,17 @@ async def _call_anthropic(provider: dict, system_prompt: str, user_prompt: str, 
     if not api_key:
         raise RuntimeError(f"No API key found for {provider['id']} (env: {provider.get('api_key_env')})")
 
+    # Log request to per-run log
+    rl = _current_run_logger.get(None)
+    if rl:
+        rl.info("=" * 60)
+        rl.info("ANTHROPIC API REQUEST (model=%s)", provider.get("model"))
+        rl.info("-" * 40 + " SYSTEM PROMPT " + "-" * 40)
+        rl.info("%s", system_prompt)
+        rl.info("-" * 40 + " USER PROMPT " + "-" * 40)
+        rl.info("%s", user_prompt)
+        rl.info("=" * 60)
+
     client = anthropic.AsyncAnthropic(
         api_key=api_key,
         timeout=config.get("timeout_seconds", 60),
@@ -87,6 +105,13 @@ async def _call_anthropic(provider: dict, system_prompt: str, user_prompt: str, 
     elapsed = round(time.time() - start, 2)
 
     text = response.content[0].text if response.content else ""
+
+    # Log response to per-run log
+    if rl:
+        rl.info("-" * 40 + " ASSISTANT RESPONSE " + "-" * 40)
+        rl.info("%s", text)
+        rl.info("-" * 40 + " END RESPONSE " + "-" * 40)
+
     return {
         "text": text,
         "provider_id": provider["id"],
@@ -194,6 +219,17 @@ async def _call_claude_sdk(provider: dict, system_prompt: str, user_prompt: str,
     timeout_seconds = config.get("timeout_seconds", 120)
     service_dir = os.path.dirname(__file__)
 
+    # Log the full request to the per-run log
+    rl = _current_run_logger.get(None)
+    if rl:
+        rl.info("=" * 60)
+        rl.info("CLAUDE SDK REQUEST (use_mcp=%s, max_turns=%d)", use_mcp, max_turns)
+        rl.info("-" * 40 + " SYSTEM PROMPT " + "-" * 40)
+        rl.info("%s", system_prompt)
+        rl.info("-" * 40 + " USER PROMPT " + "-" * 40)
+        rl.info("%s", user_prompt)
+        rl.info("=" * 60)
+
     # Build the command payload for the wrapper
     command_payload = {
         "system_prompt": system_prompt,
@@ -244,6 +280,15 @@ async def _call_claude_sdk(provider: dict, system_prompt: str, user_prompt: str,
     stdout_text = stdout_bytes.decode("utf-8")
     stderr_text = stderr_bytes.decode("utf-8", errors="replace")
 
+    # Log all SDK stderr output (contains MCP loading info, query lifecycle)
+    if stderr_text.strip():
+        sdk_logger = logging.getLogger("claude_sdk")
+        rl = _current_run_logger.get(None)
+        for _line in stderr_text.strip().splitlines():
+            sdk_logger.info(_line.rstrip())
+            if rl:
+                rl.info("[claude-sdk-stderr] %s", _line.rstrip())
+
     if proc.returncode != 0 and not stdout_text.strip():
         stderr_excerpt = (stderr_text or "")[:500]
         raise RuntimeError(
@@ -270,6 +315,13 @@ async def _call_claude_sdk(provider: dict, system_prompt: str, user_prompt: str,
 
     text = result.get("text", "")
     usage = result.get("usage", {})
+
+    # Log the full response to the per-run log
+    rl = _current_run_logger.get(None)
+    if rl:
+        rl.info("-" * 40 + " ASSISTANT RESPONSE " + "-" * 40)
+        rl.info("%s", text)
+        rl.info("-" * 40 + " END RESPONSE " + "-" * 40)
 
     return {
         "text": text,
@@ -305,6 +357,17 @@ async def _call_claude_sdk_stream(provider: dict, system_prompt: str, user_promp
     node_bin = _find_node()
     timeout_seconds = config.get("timeout_seconds", 120)
     service_dir = os.path.dirname(__file__)
+
+    # Log the full request to the per-run log
+    rl = _current_run_logger.get(None)
+    if rl:
+        rl.info("=" * 60)
+        rl.info("CLAUDE SDK STREAM REQUEST")
+        rl.info("-" * 40 + " SYSTEM PROMPT " + "-" * 40)
+        rl.info("%s", system_prompt)
+        rl.info("-" * 40 + " USER PROMPT " + "-" * 40)
+        rl.info("%s", user_prompt)
+        rl.info("=" * 60)
 
     command_payload = {
         "system_prompt": system_prompt,
@@ -377,11 +440,27 @@ async def _call_claude_sdk_stream(provider: dict, system_prompt: str, user_promp
     await proc.wait()
     elapsed = round(time.time() - start, 2)
 
+    # Drain and log SDK stderr (MCP loading info, query lifecycle)
+    remaining_stderr = (await proc.stderr.read()).decode("utf-8", errors="replace")
+    if remaining_stderr.strip():
+        sdk_logger = logging.getLogger("claude_sdk")
+        rl = _current_run_logger.get(None)
+        for _line in remaining_stderr.strip().splitlines():
+            sdk_logger.info(_line.rstrip())
+            if rl:
+                rl.info("[claude-sdk-stderr] %s", _line.rstrip())
+
     if not full_text and not result_data:
-        stderr_text = (await proc.stderr.read()).decode("utf-8", errors="replace")[:500]
-        raise RuntimeError(f"No output from Claude SDK wrapper. stderr: {stderr_text}")
+        raise RuntimeError(f"No output from Claude SDK wrapper. stderr: {(remaining_stderr or '')[:500]}")
 
     usage = (result_data or {}).get("usage", {})
+
+    # Log the full response to the per-run log
+    rl = _current_run_logger.get(None)
+    if rl:
+        rl.info("-" * 40 + " ASSISTANT RESPONSE " + "-" * 40)
+        rl.info("%s", full_text)
+        rl.info("-" * 40 + " END RESPONSE " + "-" * 40)
 
     return {
         "text": full_text,
@@ -500,13 +579,15 @@ _STREAM_CALL_MAP = {
 }
 
 
-async def call_ai_stream(system_prompt: str, user_prompt: str, on_chunk=None, provider_id: Optional[str] = None) -> dict:
+async def call_ai_stream(system_prompt: str, user_prompt: str, on_chunk=None, provider_id: Optional[str] = None, run_logger=None) -> dict:
     """
     Send a prompt with streaming support.
 
     ``on_chunk(text_delta)`` is called for each text fragment as it arrives.
     Returns the full result dict when complete.
     """
+    if run_logger:
+        _current_run_logger.set(run_logger)
     config = load_config()
     failover = config.get("failover_enabled", True)
     retries = config.get("retry_attempts", 2)
@@ -531,15 +612,27 @@ async def call_ai_stream(system_prompt: str, user_prompt: str, on_chunk=None, pr
 
         for attempt in range(1, retries + 1):
             try:
-                logger.info(
-                    "AI stream call: provider=%s model=%s attempt=%d/%d",
-                    provider["id"], provider.get("model"), attempt, retries,
-                )
+                log_msg = "AI stream call: provider=%s model=%s attempt=%d/%d"
+                log_args = (provider["id"], provider.get("model"), attempt, retries)
+                logger.info(log_msg, *log_args)
+                if run_logger:
+                    run_logger.info(log_msg, *log_args)
                 result = await call_fn(provider, system_prompt, user_prompt, config, on_chunk=on_chunk)
+                success_msg = "AI stream SUCCESS: provider=%s model=%s elapsed=%.2fs tokens_in=%d tokens_out=%d"
+                success_args = (
+                    result.get("provider_id"), result.get("model"), result.get("elapsed_seconds", 0),
+                    result.get("usage", {}).get("input_tokens", 0),
+                    result.get("usage", {}).get("output_tokens", 0),
+                )
+                logger.info(success_msg, *success_args)
+                if run_logger:
+                    run_logger.info(success_msg, *success_args)
                 return result
             except Exception as exc:
                 msg = f"{provider['id']} attempt {attempt}: {exc}"
                 logger.warning(msg)
+                if run_logger:
+                    run_logger.warning(msg)
                 errors.append(msg)
 
         if not failover:
@@ -565,6 +658,18 @@ async def _call_anthropic_chat(provider: dict, system_prompt: str, messages: lis
     if not api_key:
         raise RuntimeError(f"No API key found for {provider['id']} (env: {provider.get('api_key_env')})")
 
+    # Log request to per-run log
+    rl = _current_run_logger.get(None)
+    if rl:
+        rl.info("=" * 60)
+        rl.info("ANTHROPIC CHAT REQUEST (model=%s, messages=%d)", provider.get("model"), len(messages))
+        rl.info("-" * 40 + " SYSTEM PROMPT " + "-" * 40)
+        rl.info("%s", system_prompt)
+        rl.info("-" * 40 + " MESSAGES " + "-" * 40)
+        for m in messages:
+            rl.info("[%s]: %s", m["role"].upper(), m["content"][:1000])
+        rl.info("=" * 60)
+
     client = anthropic.AsyncAnthropic(
         api_key=api_key,
         timeout=config.get("timeout_seconds", 60),
@@ -573,7 +678,7 @@ async def _call_anthropic_chat(provider: dict, system_prompt: str, messages: lis
     start = time.time()
     response = await client.messages.create(
         model=provider.get("model", "claude-sonnet-4-20250514"),
-        max_tokens=provider.get("max_tokens", 4096),
+        max_tokens=provider.get("max_tokens", 64000),
         temperature=provider.get("temperature", 0.3),
         system=system_prompt,
         messages=messages,
@@ -581,6 +686,18 @@ async def _call_anthropic_chat(provider: dict, system_prompt: str, messages: lis
     elapsed = round(time.time() - start, 2)
 
     text = response.content[0].text if response.content else ""
+
+    # Detect truncation due to max_tokens limit
+    if response.stop_reason == "max_tokens":
+        text += "\n\n*(Response was truncated due to length. Ask a follow-up to continue.)*"
+        if rl:
+            rl.warning("Response truncated: stop_reason=max_tokens")
+
+    if rl:
+        rl.info("-" * 40 + " ASSISTANT RESPONSE " + "-" * 40)
+        rl.info("%s", text)
+        rl.info("-" * 40 + " END RESPONSE " + "-" * 40)
+
     return {
         "text": text,
         "provider_id": provider["id"],
@@ -615,16 +732,27 @@ async def _call_openai_chat(provider: dict, system_prompt: str, messages: list[d
     api_messages = [{"role": "system", "content": system_prompt}] + messages
 
     start = time.time()
-    response = await client.chat.completions.create(
-        model=provider.get("model", "gpt-4o"),
-        max_tokens=provider.get("max_tokens", 4096),
-        temperature=provider.get("temperature", 0.3),
-        messages=api_messages,
-    )
+    create_kwargs = {
+        "model": provider.get("model", "gpt-4o"),
+        "temperature": provider.get("temperature", 0.3),
+        "messages": api_messages,
+    }
+    # Only set max_tokens if explicitly configured; otherwise let the model use its default max
+    if provider.get("max_tokens"):
+        create_kwargs["max_tokens"] = provider["max_tokens"]
+    response = await client.chat.completions.create(**create_kwargs)
     elapsed = round(time.time() - start, 2)
 
     choice = response.choices[0] if response.choices else None
     text = choice.message.content if choice else ""
+
+    # Detect truncation due to max_tokens limit
+    if choice and choice.finish_reason == "length":
+        text += "\n\n*(Response was truncated due to length. Ask a follow-up to continue.)*"
+        rl = _current_run_logger.get(None)
+        if rl:
+            rl.warning("Response truncated: finish_reason=length")
+
     usage = {}
     if response.usage:
         usage = {
@@ -648,6 +776,13 @@ async def _call_claude_sdk_chat(provider: dict, system_prompt: str, messages: li
     Chat calls enable MCP tool use so Claude can query the betstamp-intelligence
     server on demand instead of relying on pre-baked pipeline context.
     """
+    # Log individual messages to run logger before concatenation
+    rl = _current_run_logger.get(None)
+    if rl:
+        rl.info("CLAUDE SDK CHAT: %d messages, MCP=True, max_turns=10", len(messages))
+        for i, msg in enumerate(messages):
+            rl.info("  Message[%d] %s: %s", i, msg["role"].upper(), msg["content"][:500])
+
     # Concatenate all messages into a single user prompt for the request-response SDK
     parts = []
     for msg in messages:
@@ -671,7 +806,7 @@ _CHAT_CALL_MAP = {
 # Main entry point — async call with failover
 # ---------------------------------------------------------------------------
 
-async def call_ai(system_prompt: str, user_prompt: str, provider_id: Optional[str] = None) -> dict:
+async def call_ai(system_prompt: str, user_prompt: str, provider_id: Optional[str] = None, run_logger=None) -> dict:
     """
     Send a prompt to an AI provider and return the response.
 
@@ -681,6 +816,8 @@ async def call_ai(system_prompt: str, user_prompt: str, provider_id: Optional[st
     Returns a dict with keys: text, provider_id, provider_name, model, usage, elapsed_seconds.
     On total failure raises RuntimeError.
     """
+    if run_logger:
+        _current_run_logger.set(run_logger)
     config = load_config()
     failover = config.get("failover_enabled", True)
     retries = config.get("retry_attempts", 2)
@@ -706,15 +843,27 @@ async def call_ai(system_prompt: str, user_prompt: str, provider_id: Optional[st
 
         for attempt in range(1, retries + 1):
             try:
-                logger.info(
-                    "AI call: provider=%s model=%s attempt=%d/%d",
-                    provider["id"], provider.get("model"), attempt, retries,
-                )
+                log_msg = "AI call: provider=%s model=%s attempt=%d/%d"
+                log_args = (provider["id"], provider.get("model"), attempt, retries)
+                logger.info(log_msg, *log_args)
+                if run_logger:
+                    run_logger.info(log_msg, *log_args)
                 result = await call_fn(provider, system_prompt, user_prompt, config)
+                success_msg = "AI call SUCCESS: provider=%s model=%s elapsed=%.2fs tokens_in=%d tokens_out=%d"
+                success_args = (
+                    result.get("provider_id"), result.get("model"), result.get("elapsed_seconds", 0),
+                    result.get("usage", {}).get("input_tokens", 0),
+                    result.get("usage", {}).get("output_tokens", 0),
+                )
+                logger.info(success_msg, *success_args)
+                if run_logger:
+                    run_logger.info(success_msg, *success_args)
                 return result
             except Exception as exc:
                 msg = f"{provider['id']} attempt {attempt}: {exc}"
                 logger.warning(msg)
+                if run_logger:
+                    run_logger.warning(msg)
                 errors.append(msg)
 
         if not failover:
@@ -725,7 +874,7 @@ async def call_ai(system_prompt: str, user_prompt: str, provider_id: Optional[st
     )
 
 
-async def call_ai_chat(messages: list[dict], system_prompt: str, provider_id: Optional[str] = None) -> dict:
+async def call_ai_chat(messages: list[dict], system_prompt: str, provider_id: Optional[str] = None, run_logger=None) -> dict:
     """
     Send a multi-turn conversation to an AI provider and return the response.
 
@@ -736,6 +885,8 @@ async def call_ai_chat(messages: list[dict], system_prompt: str, provider_id: Op
     Returns a dict with keys: text, provider_id, provider_name, model, usage, elapsed_seconds.
     On total failure raises RuntimeError.
     """
+    if run_logger:
+        _current_run_logger.set(run_logger)
     config = load_config()
     failover = config.get("failover_enabled", True)
     retries = config.get("retry_attempts", 2)
@@ -760,15 +911,27 @@ async def call_ai_chat(messages: list[dict], system_prompt: str, provider_id: Op
 
         for attempt in range(1, retries + 1):
             try:
-                logger.info(
-                    "AI chat call: provider=%s model=%s attempt=%d/%d messages=%d",
-                    provider["id"], provider.get("model"), attempt, retries, len(messages),
-                )
+                log_msg = "AI chat call: provider=%s model=%s attempt=%d/%d messages=%d"
+                log_args = (provider["id"], provider.get("model"), attempt, retries, len(messages))
+                logger.info(log_msg, *log_args)
+                if run_logger:
+                    run_logger.info(log_msg, *log_args)
                 result = await call_fn(provider, system_prompt, messages, config)
+                success_msg = "AI chat SUCCESS: provider=%s model=%s elapsed=%.2fs tokens_in=%d tokens_out=%d"
+                success_args = (
+                    result.get("provider_id"), result.get("model"), result.get("elapsed_seconds", 0),
+                    result.get("usage", {}).get("input_tokens", 0),
+                    result.get("usage", {}).get("output_tokens", 0),
+                )
+                logger.info(success_msg, *success_args)
+                if run_logger:
+                    run_logger.info(success_msg, *success_args)
                 return result
             except Exception as exc:
                 msg = f"{provider['id']} attempt {attempt}: {exc}"
                 logger.warning(msg)
+                if run_logger:
+                    run_logger.warning(msg)
                 errors.append(msg)
 
         if not failover:
@@ -876,54 +1039,473 @@ Guidelines:
 """
 
 
-async def run_analyze_phase(detection_data: dict) -> dict:
+async def run_analyze_phase(detection_data: dict, run_logger=None) -> dict:
     """Phase 2: Local cross-sportsbook analysis (no AI call).
 
-    Extracts structured insights from the enriched detection data so the
-    brief phase has clean inputs for the AI-powered briefing.
+    Performs comprehensive cross-sportsbook calculations:
+    1. No-Vig / Fair Odds (already in enriched data from detect phase)
+    2. Vig / Efficiency Ranking per sportsbook
+    3. Best Line Shopping — best odds for each game+market+side
+    4. Arbitrage Detection — combined implied prob < 100%
+    5. Middles Detection — spread/total line gaps allowing both-side wins
+    6. Outlier / Anomaly Detection — lines deviating from consensus
+    7. Stale Lines Detection — outdated last_updated timestamps
     """
+    from odds_math import implied_probability
+    from datetime import datetime, timezone as tz
+
     start = time.time()
 
     # Pull the enriched odds and vig summary from detection
-    odds = detection_data.get("odds", [])
+    odds = detection_data.get("enriched_odds", detection_data.get("odds", []))
     vig_summary = detection_data.get("vig_summary", {})
 
-    # --- Best lines per game+market+side ---
-    best_lines = []
-    # Group odds by game
-    games = {}
+    # ── Group odds by game ──────────────────────────────────────────────
+    games: dict[str, dict] = {}
+    all_books: set[str] = set()
     for row in odds:
         gid = row.get("game_id", "")
+        book = row.get("sportsbook", "")
+        all_books.add(book)
         if gid not in games:
-            games[gid] = {"home": row.get("home_team", ""), "away": row.get("away_team", ""), "rows": []}
+            games[gid] = {
+                "home": row.get("home_team", ""),
+                "away": row.get("away_team", ""),
+                "rows": [],
+            }
         games[gid]["rows"].append(row)
 
-    # --- Vig / efficiency ranking ---
-    efficiency = []
-    for book, data in vig_summary.items():
-        avg_vig = data.get("avg_vig") or data.get("average_vig")
-        if avg_vig is not None:
-            efficiency.append({"book": book, "avg_vig_pct": round(avg_vig, 2)})
-    efficiency.sort(key=lambda x: x["avg_vig_pct"])
+    # ── 1. Vig / Efficiency Ranking (per sportsbook) ───────────────────
+    book_vigs: dict[str, list[float]] = {}
+    for row in odds:
+        book = row.get("sportsbook", "")
+        markets = row.get("markets", {})
+        for mkt in markets.values():
+            v = mkt.get("vig")
+            if v is not None:
+                book_vigs.setdefault(book, []).append(v)
 
-    # --- Simple outlier / stale detection ---
+    efficiency = []
+    for book, vigs in book_vigs.items():
+        avg = sum(vigs) / len(vigs) if vigs else 0
+        efficiency.append({
+            "book": book,
+            "avg_vig": round(avg, 6),
+            "avg_vig_pct": f"{round(avg * 100, 2)}%",
+            "markets_counted": len(vigs),
+        })
+    efficiency.sort(key=lambda x: x["avg_vig"])
+
+    # ── 2. Best Line Shopping ──────────────────────────────────────────
+    best_lines = []
+    for gid, gdata in games.items():
+        rows = gdata["rows"]
+        # Spread: home side & away side
+        spread_rows = [(r["sportsbook"], r["markets"]["spread"]) for r in rows if "spread" in r.get("markets", {})]
+        if spread_rows:
+            best_home = max(spread_rows, key=lambda x: x[1]["home_odds"])
+            best_away = max(spread_rows, key=lambda x: x[1]["away_odds"])
+            best_lines.append({
+                "game_id": gid, "market": "spread", "side": "home",
+                "line": best_home[1].get("home_line"),
+                "best_odds": best_home[1]["home_odds"],
+                "best_book": best_home[0],
+                "home_team": gdata["home"],
+            })
+            best_lines.append({
+                "game_id": gid, "market": "spread", "side": "away",
+                "line": best_away[1].get("away_line"),
+                "best_odds": best_away[1]["away_odds"],
+                "best_book": best_away[0],
+                "away_team": gdata["away"],
+            })
+
+        # Moneyline: home & away
+        ml_rows = [(r["sportsbook"], r["markets"]["moneyline"]) for r in rows if "moneyline" in r.get("markets", {})]
+        if ml_rows:
+            best_home = max(ml_rows, key=lambda x: x[1]["home_odds"])
+            best_away = max(ml_rows, key=lambda x: x[1]["away_odds"])
+            best_lines.append({
+                "game_id": gid, "market": "moneyline", "side": "home",
+                "best_odds": best_home[1]["home_odds"],
+                "best_book": best_home[0],
+                "home_team": gdata["home"],
+            })
+            best_lines.append({
+                "game_id": gid, "market": "moneyline", "side": "away",
+                "best_odds": best_away[1]["away_odds"],
+                "best_book": best_away[0],
+                "away_team": gdata["away"],
+            })
+
+        # Totals: over & under
+        total_rows = [(r["sportsbook"], r["markets"]["total"]) for r in rows if "total" in r.get("markets", {})]
+        if total_rows:
+            best_over = max(total_rows, key=lambda x: x[1]["over_odds"])
+            best_under = max(total_rows, key=lambda x: x[1]["under_odds"])
+            best_lines.append({
+                "game_id": gid, "market": "total", "side": "over",
+                "line": best_over[1].get("line"),
+                "best_odds": best_over[1]["over_odds"],
+                "best_book": best_over[0],
+            })
+            best_lines.append({
+                "game_id": gid, "market": "total", "side": "under",
+                "line": best_under[1].get("line"),
+                "best_odds": best_under[1]["under_odds"],
+                "best_book": best_under[0],
+            })
+
+    # ── 3. Arbitrage Detection ─────────────────────────────────────────
+    arbitrage = []
+    for gid, gdata in games.items():
+        rows = gdata["rows"]
+
+        # Check spread arb
+        spread_rows = [(r["sportsbook"], r["markets"]["spread"]) for r in rows if "spread" in r.get("markets", {})]
+        if len(spread_rows) >= 2:
+            best_home = max(spread_rows, key=lambda x: x[1]["home_odds"])
+            best_away = max(spread_rows, key=lambda x: x[1]["away_odds"])
+            # Only valid arb if lines are the same (or both sides at same spread number)
+            prob_home = implied_probability(best_home[1]["home_odds"])
+            prob_away = implied_probability(best_away[1]["away_odds"])
+            combined = prob_home + prob_away
+            if combined < 1.0:
+                profit_pct = round((1.0 - combined) * 100, 3)
+                arbitrage.append({
+                    "game_id": gid, "market": "spread",
+                    "home_team": gdata["home"], "away_team": gdata["away"],
+                    "leg_1": {"side": "home", "line": best_home[1].get("home_line"),
+                              "odds": best_home[1]["home_odds"], "book": best_home[0],
+                              "implied_prob": round(prob_home, 4)},
+                    "leg_2": {"side": "away", "line": best_away[1].get("away_line"),
+                              "odds": best_away[1]["away_odds"], "book": best_away[0],
+                              "implied_prob": round(prob_away, 4)},
+                    "combined_implied": round(combined, 4),
+                    "profit_pct": profit_pct,
+                })
+
+        # Check moneyline arb
+        ml_rows = [(r["sportsbook"], r["markets"]["moneyline"]) for r in rows if "moneyline" in r.get("markets", {})]
+        if len(ml_rows) >= 2:
+            best_home = max(ml_rows, key=lambda x: x[1]["home_odds"])
+            best_away = max(ml_rows, key=lambda x: x[1]["away_odds"])
+            prob_home = implied_probability(best_home[1]["home_odds"])
+            prob_away = implied_probability(best_away[1]["away_odds"])
+            combined = prob_home + prob_away
+            if combined < 1.0:
+                profit_pct = round((1.0 - combined) * 100, 3)
+                arbitrage.append({
+                    "game_id": gid, "market": "moneyline",
+                    "home_team": gdata["home"], "away_team": gdata["away"],
+                    "leg_1": {"side": "home", "odds": best_home[1]["home_odds"],
+                              "book": best_home[0], "implied_prob": round(prob_home, 4)},
+                    "leg_2": {"side": "away", "odds": best_away[1]["away_odds"],
+                              "book": best_away[0], "implied_prob": round(prob_away, 4)},
+                    "combined_implied": round(combined, 4),
+                    "profit_pct": profit_pct,
+                })
+
+        # Check total arb
+        total_rows = [(r["sportsbook"], r["markets"]["total"]) for r in rows if "total" in r.get("markets", {})]
+        if len(total_rows) >= 2:
+            best_over = max(total_rows, key=lambda x: x[1]["over_odds"])
+            best_under = max(total_rows, key=lambda x: x[1]["under_odds"])
+            prob_over = implied_probability(best_over[1]["over_odds"])
+            prob_under = implied_probability(best_under[1]["under_odds"])
+            combined = prob_over + prob_under
+            if combined < 1.0:
+                profit_pct = round((1.0 - combined) * 100, 3)
+                arbitrage.append({
+                    "game_id": gid, "market": "total",
+                    "home_team": gdata["home"], "away_team": gdata["away"],
+                    "leg_1": {"side": "over", "line": best_over[1].get("line"),
+                              "odds": best_over[1]["over_odds"], "book": best_over[0],
+                              "implied_prob": round(prob_over, 4)},
+                    "leg_2": {"side": "under", "line": best_under[1].get("line"),
+                              "odds": best_under[1]["under_odds"], "book": best_under[0],
+                              "implied_prob": round(prob_under, 4)},
+                    "combined_implied": round(combined, 4),
+                    "profit_pct": profit_pct,
+                })
+
+    arbitrage.sort(key=lambda x: x["profit_pct"], reverse=True)
+
+    # ── 4. Middles Detection ───────────────────────────────────────────
+    middles = []
+    for gid, gdata in games.items():
+        rows = gdata["rows"]
+
+        # Spread middles: find pairs where one book's home_line differs enough
+        spread_rows = [(r["sportsbook"], r["markets"]["spread"]) for r in rows if "spread" in r.get("markets", {})]
+        if len(spread_rows) >= 2:
+            for i in range(len(spread_rows)):
+                for j in range(i + 1, len(spread_rows)):
+                    book_a, mkt_a = spread_rows[i]
+                    book_b, mkt_b = spread_rows[j]
+                    # Middle exists when: book_a home_line < book_b away_line
+                    # i.e., line gap allows winning both
+                    home_line_a = mkt_a.get("home_line", 0)
+                    away_line_b = mkt_b.get("away_line", 0)
+                    home_line_b = mkt_b.get("home_line", 0)
+                    away_line_a = mkt_a.get("away_line", 0)
+
+                    # Check: bet home at book_a (line = home_line_a) and away at book_b (line = away_line_b)
+                    # Middle if |home_line_a| < away_line_b (gap exists)
+                    gap = away_line_b - abs(home_line_a) if home_line_a < 0 else away_line_b + home_line_a
+                    # Simpler: middle exists when the absolute spread differs
+                    if abs(home_line_a) != abs(home_line_b):
+                        spread_gap = abs(home_line_a) - abs(home_line_b)
+                        if abs(spread_gap) >= 1.0:
+                            # Determine direction: bet the smaller spread side
+                            if abs(home_line_a) < abs(home_line_b):
+                                middles.append({
+                                    "game_id": gid, "market": "spread",
+                                    "home_team": gdata["home"], "away_team": gdata["away"],
+                                    "leg_1": {"side": "home", "line": home_line_a,
+                                              "odds": mkt_a["home_odds"], "book": book_a},
+                                    "leg_2": {"side": "away", "line": away_line_b,
+                                              "odds": mkt_b["away_odds"], "book": book_b},
+                                    "middle_gap": abs(spread_gap),
+                                    "middle_range": f"Result lands between {home_line_a} and {home_line_b}",
+                                })
+                            else:
+                                middles.append({
+                                    "game_id": gid, "market": "spread",
+                                    "home_team": gdata["home"], "away_team": gdata["away"],
+                                    "leg_1": {"side": "home", "line": home_line_b,
+                                              "odds": mkt_b["home_odds"], "book": book_b},
+                                    "leg_2": {"side": "away", "line": away_line_a,
+                                              "odds": mkt_a["away_odds"], "book": book_a},
+                                    "middle_gap": abs(spread_gap),
+                                    "middle_range": f"Result lands between {home_line_b} and {home_line_a}",
+                                })
+
+        # Total middles: different O/U lines across books
+        total_rows = [(r["sportsbook"], r["markets"]["total"]) for r in rows if "total" in r.get("markets", {})]
+        if len(total_rows) >= 2:
+            for i in range(len(total_rows)):
+                for j in range(i + 1, len(total_rows)):
+                    book_a, mkt_a = total_rows[i]
+                    book_b, mkt_b = total_rows[j]
+                    line_a = mkt_a.get("line", 0)
+                    line_b = mkt_b.get("line", 0)
+                    if line_a != line_b:
+                        gap = abs(line_a - line_b)
+                        if gap >= 1.0:
+                            # Bet over on lower line, under on higher line
+                            if line_a < line_b:
+                                middles.append({
+                                    "game_id": gid, "market": "total",
+                                    "home_team": gdata["home"], "away_team": gdata["away"],
+                                    "leg_1": {"side": "over", "line": line_a,
+                                              "odds": mkt_a["over_odds"], "book": book_a},
+                                    "leg_2": {"side": "under", "line": line_b,
+                                              "odds": mkt_b["under_odds"], "book": book_b},
+                                    "middle_gap": gap,
+                                    "middle_range": f"Total lands between {line_a} and {line_b}",
+                                })
+                            else:
+                                middles.append({
+                                    "game_id": gid, "market": "total",
+                                    "home_team": gdata["home"], "away_team": gdata["away"],
+                                    "leg_1": {"side": "over", "line": line_b,
+                                              "odds": mkt_b["over_odds"], "book": book_b},
+                                    "leg_2": {"side": "under", "line": line_a,
+                                              "odds": mkt_a["under_odds"], "book": book_a},
+                                    "middle_gap": gap,
+                                    "middle_range": f"Total lands between {line_b} and {line_a}",
+                                })
+
+    # Deduplicate middles (same game+market pairs appear twice in nested loop)
+    seen_middles = set()
+    unique_middles = []
+    for m in middles:
+        key = (m["game_id"], m["market"], m["leg_1"]["book"], m["leg_2"]["book"])
+        rev_key = (m["game_id"], m["market"], m["leg_2"]["book"], m["leg_1"]["book"])
+        if key not in seen_middles and rev_key not in seen_middles:
+            seen_middles.add(key)
+            unique_middles.append(m)
+    middles = sorted(unique_middles, key=lambda x: x["middle_gap"], reverse=True)
+
+    # ── 5. Outlier / Anomaly Detection ─────────────────────────────────
     outliers = []
+    OUTLIER_THRESHOLD = 15  # American odds points deviation from consensus
+
+    for gid, gdata in games.items():
+        rows = gdata["rows"]
+        # Compute consensus (average) for each market's odds
+        for market_name in ("spread", "moneyline", "total"):
+            market_rows = [(r["sportsbook"], r["markets"][market_name])
+                           for r in rows if market_name in r.get("markets", {})]
+            if len(market_rows) < 3:
+                continue
+
+            if market_name in ("spread", "moneyline"):
+                odds_keys = [("home_odds", "home"), ("away_odds", "away")]
+            else:
+                odds_keys = [("over_odds", "over"), ("under_odds", "under")]
+
+            for odds_key, side_label in odds_keys:
+                values = [m[1][odds_key] for m in market_rows]
+                avg_odds = sum(values) / len(values)
+
+                for book, mkt in market_rows:
+                    deviation = abs(mkt[odds_key] - avg_odds)
+                    if deviation >= OUTLIER_THRESHOLD:
+                        outliers.append({
+                            "game_id": gid,
+                            "home_team": gdata["home"],
+                            "away_team": gdata["away"],
+                            "market": market_name,
+                            "side": side_label,
+                            "sportsbook": book,
+                            "odds": mkt[odds_key],
+                            "consensus_avg": round(avg_odds, 1),
+                            "deviation": round(deviation, 1),
+                            "type": "odds_outlier",
+                        })
+
+            # Line outliers for spread and total
+            if market_name == "spread":
+                lines = [m[1].get("home_line", 0) for m in market_rows]
+                avg_line = sum(lines) / len(lines)
+                for book, mkt in market_rows:
+                    line_dev = abs(mkt.get("home_line", 0) - avg_line)
+                    if line_dev >= 1.0:
+                        outliers.append({
+                            "game_id": gid,
+                            "home_team": gdata["home"],
+                            "away_team": gdata["away"],
+                            "market": "spread",
+                            "sportsbook": book,
+                            "line": mkt.get("home_line"),
+                            "consensus_line": round(avg_line, 1),
+                            "deviation": round(line_dev, 1),
+                            "type": "line_outlier",
+                        })
+            elif market_name == "total":
+                lines = [m[1].get("line", 0) for m in market_rows]
+                avg_line = sum(lines) / len(lines)
+                for book, mkt in market_rows:
+                    line_dev = abs(mkt.get("line", 0) - avg_line)
+                    if line_dev >= 1.0:
+                        outliers.append({
+                            "game_id": gid,
+                            "home_team": gdata["home"],
+                            "away_team": gdata["away"],
+                            "market": "total",
+                            "sportsbook": book,
+                            "line": mkt.get("line"),
+                            "consensus_line": round(avg_line, 1),
+                            "deviation": round(line_dev, 1),
+                            "type": "line_outlier",
+                        })
+
+    outliers.sort(key=lambda x: x["deviation"], reverse=True)
+
+    # ── 6. Stale Lines Detection ───────────────────────────────────────
     stale_lines = []
+    STALE_THRESHOLD_MINUTES = 30
+
+    for gid, gdata in games.items():
+        rows = gdata["rows"]
+        timestamps = []
+        for r in rows:
+            ts_str = r.get("last_updated", "")
+            if ts_str:
+                try:
+                    ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                    timestamps.append((r["sportsbook"], ts, r))
+                except (ValueError, TypeError):
+                    pass
+
+        if not timestamps:
+            continue
+
+        newest = max(ts for _, ts, _ in timestamps)
+        for book, ts, row in timestamps:
+            age_minutes = (newest - ts).total_seconds() / 60
+            if age_minutes >= STALE_THRESHOLD_MINUTES:
+                stale_lines.append({
+                    "game_id": gid,
+                    "home_team": gdata["home"],
+                    "away_team": gdata["away"],
+                    "sportsbook": book,
+                    "last_updated": ts.isoformat(),
+                    "newest_update": newest.isoformat(),
+                    "age_vs_newest_minutes": round(age_minutes, 1),
+                    "concern": (
+                        f"{book} is {round(age_minutes, 0):.0f} min behind the newest "
+                        f"update for this game — lines may be stale"
+                    ),
+                })
+
+    stale_lines.sort(key=lambda x: x["age_vs_newest_minutes"], reverse=True)
+
+    # ── 7. Fair Odds Summary (consensus no-vig lines) ──────────────────
+    fair_odds_summary = []
+    for gid, gdata in games.items():
+        rows = gdata["rows"]
+        game_fair: dict = {"game_id": gid, "home_team": gdata["home"], "away_team": gdata["away"]}
+        for market_name in ("spread", "moneyline", "total"):
+            market_rows = [r["markets"][market_name]
+                           for r in rows if market_name in r.get("markets", {})]
+            if not market_rows:
+                continue
+            if market_name in ("spread", "moneyline"):
+                fair_home = [m.get("home_fair_prob") or m.get("home_fair_odds") for m in market_rows
+                             if m.get("home_fair_prob") is not None or m.get("home_fair_odds") is not None]
+                fair_away = [m.get("away_fair_prob") or m.get("away_fair_odds") for m in market_rows
+                             if m.get("away_fair_prob") is not None or m.get("away_fair_odds") is not None]
+                if fair_home and fair_away:
+                    avg_h = sum(fair_home) / len(fair_home)
+                    avg_a = sum(fair_away) / len(fair_away)
+                    game_fair[f"{market_name}_home_fair_prob"] = round(avg_h, 4)
+                    game_fair[f"{market_name}_away_fair_prob"] = round(avg_a, 4)
+            else:
+                fair_over = [m.get("over_fair_prob") or m.get("over_fair_odds") for m in market_rows
+                             if m.get("over_fair_prob") is not None or m.get("over_fair_odds") is not None]
+                fair_under = [m.get("under_fair_prob") or m.get("under_fair_odds") for m in market_rows
+                              if m.get("under_fair_prob") is not None or m.get("under_fair_odds") is not None]
+                if fair_over and fair_under:
+                    avg_o = sum(fair_over) / len(fair_over)
+                    avg_u = sum(fair_under) / len(fair_under)
+                    game_fair["total_over_fair_prob"] = round(avg_o, 4)
+                    game_fair["total_under_fair_prob"] = round(avg_u, 4)
+        fair_odds_summary.append(game_fair)
+
+    # ── Build final analysis ───────────────────────────────────────────
+    summary_parts = [f"Analyzed {len(games)} games across {len(all_books)} sportsbooks."]
+    if arbitrage:
+        summary_parts.append(f"Found {len(arbitrage)} arbitrage opportunity(ies).")
+    if middles:
+        summary_parts.append(f"Found {len(middles)} middle opportunity(ies).")
+    if outliers:
+        summary_parts.append(f"Detected {len(outliers)} outlier(s).")
+    if stale_lines:
+        summary_parts.append(f"Detected {len(stale_lines)} stale line(s).")
 
     analysis = {
         "games_count": len(games),
-        "books_count": len(vig_summary),
+        "books_count": len(all_books),
         "efficiency_ranking": efficiency,
         "best_lines": best_lines,
+        "arbitrage": arbitrage,
+        "middles": middles,
         "outliers": outliers,
         "stale_lines": stale_lines,
-        "summary": (
-            f"Analyzed {len(games)} games across {len(vig_summary)} sportsbooks. "
-            f"Detection data ready for AI briefing."
-        ),
+        "fair_odds_summary": fair_odds_summary,
+        "summary": " ".join(summary_parts),
     }
 
     elapsed = round(time.time() - start, 2)
+
+    if run_logger:
+        run_logger.info(
+            "Analyze: games=%d books=%d arbs=%d outliers=%d stale=%d elapsed=%.2fs",
+            len(games), len(all_books), len(arbitrage), len(outliers), len(stale_lines), elapsed,
+        )
 
     return {
         "analysis": analysis,
@@ -936,7 +1518,7 @@ async def run_analyze_phase(detection_data: dict) -> dict:
     }
 
 
-async def run_brief_phase(detection_data: dict, analysis_data: dict, on_chunk=None) -> dict:
+async def run_brief_phase(detection_data: dict, analysis_data: dict, on_chunk=None, run_logger=None) -> dict:
     """Phase 3: AI-powered daily market briefing (readable text).
 
     When ``on_chunk`` is provided, text fragments are streamed as they arrive
@@ -952,10 +1534,21 @@ async def run_brief_phase(detection_data: dict, analysis_data: dict, on_chunk=No
         + json.dumps(analysis_data, indent=2)[:15000]
     )
 
+    if run_logger:
+        run_logger.info("Brief: starting AI call (streaming=%s)", bool(on_chunk))
+
     if on_chunk:
-        result = await call_ai_stream(BRIEF_SYSTEM_PROMPT, user_prompt, on_chunk=on_chunk)
+        result = await call_ai_stream(BRIEF_SYSTEM_PROMPT, user_prompt, on_chunk=on_chunk, run_logger=run_logger)
     else:
-        result = await call_ai(BRIEF_SYSTEM_PROMPT, user_prompt)
+        result = await call_ai(BRIEF_SYSTEM_PROMPT, user_prompt, run_logger=run_logger)
+
+    if run_logger:
+        run_logger.info(
+            "Brief: AI complete provider=%s model=%s elapsed=%.2fs tokens_in=%d tokens_out=%d",
+            result["provider_name"], result["model"], result["elapsed_seconds"],
+            result.get("usage", {}).get("input_tokens", 0),
+            result.get("usage", {}).get("output_tokens", 0),
+        )
 
     return {
         "brief_text": result["text"],

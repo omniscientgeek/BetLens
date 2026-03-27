@@ -2,9 +2,16 @@ import os
 import re
 import json
 import uuid
+import time
 import asyncio
+import logging
 import subprocess
 from datetime import datetime
+
+from logging_config import setup_logging, create_run_logger, close_run_logger, RUNS_LOG_DIR
+
+setup_logging()
+logger = logging.getLogger(__name__)
 
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse
@@ -68,7 +75,7 @@ PHASES = [
 ]
 
 
-async def _emit_phase(sid, filename, phase, i, status, result=None):
+async def _emit_phase(sid, filename, phase, i, status, result=None, run_id=None):
     """Helper to emit a phase_update event."""
     payload = {
         "filename": filename,
@@ -80,33 +87,50 @@ async def _emit_phase(sid, filename, phase, i, status, result=None):
     }
     if result is not None:
         payload["result"] = result
+    if run_id is not None:
+        payload["run_id"] = run_id
     await sio.emit("phase_update", payload, to=sid)
 
 
 async def run_processing_pipeline(filename, sid):
     """Execute the 3-phase pipeline, emitting status updates via WebSocket."""
+    run_id = uuid.uuid4().hex[:8]
+    run_logger, run_handler = create_run_logger(run_id)
+    run_logger.info("PIPELINE run_id=%s file=%s sid=%s", run_id, filename, sid)
+    logger.info("PIPELINE Starting pipeline for %s (sid=%s, run_id=%s)", filename, sid, run_id)
     try:
         pipeline_results = {}
 
         for i, phase in enumerate(PHASES):
-            await _emit_phase(sid, filename, phase, i, "in_progress")
+            run_logger.info("Phase %d: %s -> in_progress", i, phase["name"])
+            logger.info("PIPELINE Phase %d: %s -> in_progress", i, phase["name"])
+            phase_start = time.time()
+            await _emit_phase(sid, filename, phase, i, "in_progress", run_id=run_id)
 
             if phase["name"] == "detect":
                 # --- Real detection: compute probabilities, vig, fair odds ---
                 detection = await run_detection(filename)
                 pipeline_results["detect"] = detection
-                await _emit_phase(sid, filename, phase, i, "complete", result=detection)
+                elapsed = time.time() - phase_start
+                run_logger.info("Phase %d: %s completed in %.2fs", i, phase["name"], elapsed)
+                logger.info("PIPELINE Phase %d: %s completed in %.2fs", i, phase["name"], elapsed)
+                await _emit_phase(sid, filename, phase, i, "complete", result=detection, run_id=run_id)
             elif phase["name"] == "analyze":
                 # --- AI-powered cross-sportsbook analysis ---
                 try:
-                    analysis = await run_analyze_phase(pipeline_results.get("detect", {}))
+                    analysis = await run_analyze_phase(pipeline_results.get("detect", {}), run_logger=run_logger)
                     pipeline_results["analyze"] = analysis
-                    await _emit_phase(sid, filename, phase, i, "complete", result=analysis)
+                    elapsed = time.time() - phase_start
+                    run_logger.info("Phase %d: %s completed in %.2fs", i, phase["name"], elapsed)
+                    logger.info("PIPELINE Phase %d: %s completed in %.2fs", i, phase["name"], elapsed)
+                    await _emit_phase(sid, filename, phase, i, "complete", result=analysis, run_id=run_id)
                 except Exception as exc:
                     # Graceful degradation: report the error but continue pipeline
+                    run_logger.error("Analyze phase FAILED: %s", exc)
+                    logger.error("PIPELINE Analyze phase FAILED: %s", exc)
                     err_result = {"error": str(exc), "ai_meta": None}
                     pipeline_results["analyze"] = err_result
-                    await _emit_phase(sid, filename, phase, i, "complete", result=err_result)
+                    await _emit_phase(sid, filename, phase, i, "error", result=err_result, run_id=run_id)
 
             elif phase["name"] == "brief":
                 # --- AI-powered actionable briefing (streamed to client) ---
@@ -118,32 +142,55 @@ async def run_processing_pipeline(filename, sid):
                         pipeline_results.get("detect", {}),
                         pipeline_results.get("analyze", {}),
                         on_chunk=on_brief_chunk,
+                        run_logger=run_logger,
                     )
                     pipeline_results["brief"] = brief
-                    await _emit_phase(sid, filename, phase, i, "complete", result=brief)
+                    elapsed = time.time() - phase_start
+                    run_logger.info("Phase %d: %s completed in %.2fs", i, phase["name"], elapsed)
+                    logger.info("PIPELINE Phase %d: %s completed in %.2fs", i, phase["name"], elapsed)
+                    await _emit_phase(sid, filename, phase, i, "complete", result=brief, run_id=run_id)
                 except Exception as exc:
+                    run_logger.error("Brief phase FAILED: %s", exc)
+                    logger.error("PIPELINE Brief phase FAILED: %s", exc)
                     err_result = {"error": str(exc), "ai_meta": None}
                     pipeline_results["brief"] = err_result
-                    await _emit_phase(sid, filename, phase, i, "complete", result=err_result)
+                    await _emit_phase(sid, filename, phase, i, "error", result=err_result, run_id=run_id)
 
             else:
                 # Unknown phase — placeholder
                 await asyncio.sleep(2)
-                await _emit_phase(sid, filename, phase, i, "complete")
+                await _emit_phase(sid, filename, phase, i, "complete", run_id=run_id)
 
+        run_logger.info("PIPELINE complete for %s", filename)
         await sio.emit("processing_complete", {
             "filename": filename,
             "results": pipeline_results,
+            "run_id": run_id,
         }, to=sid)
     except Exception as e:
+        run_logger.error("PIPELINE error: %s", e)
         await sio.emit("processing_error", {
             "filename": filename,
             "error": str(e),
+            "run_id": run_id,
         }, to=sid)
+    finally:
+        close_run_logger(run_logger, run_handler)
+
+
+@sio.on("connect")
+async def handle_connect(sid, environ):
+    logger.info("SOCKET Client connected: %s", sid)
+
+
+@sio.on("disconnect")
+async def handle_disconnect(sid):
+    logger.info("SOCKET Client disconnected: %s", sid)
 
 
 @sio.on("start_processing")
 async def handle_start_processing(sid, data):
+    logger.info("PIPELINE start_processing received from %s: %s", sid, data)
     filename = data.get("filename", "")
     if not filename.endswith(".json"):
         await sio.emit("processing_error", {"filename": filename, "error": "Only .json files supported"}, to=sid)
@@ -675,18 +722,29 @@ async def chat(request: Request):
     # Append user message
     session["messages"].append({"role": "user", "content": message})
 
+    # Per-conversation run log
+    run_id = uuid.uuid4().hex[:8]
+    run_logger, run_handler = create_run_logger(run_id)
+    run_logger.info("CHAT run_id=%s conversation=%s message_count=%d", run_id, conversation_id, len(session["messages"]))
+    run_logger.info("USER: %s", message[:500])
+
     try:
         result = await call_ai_chat(
             messages=session["messages"],
             system_prompt=system_prompt,
+            run_logger=run_logger,
         )
 
         # Append assistant response
         session["messages"].append({"role": "assistant", "content": result["text"]})
+        run_logger.info("ASSISTANT: %s", result["text"][:500])
+        run_logger.info("CHAT complete: provider=%s model=%s elapsed=%.2fs",
+                        result["provider_name"], result["model"], result["elapsed_seconds"])
 
         # Set session cookie so subsequent requests are tied to this user
         response = JSONResponse({
             "conversation_id": conversation_id,
+            "run_id": run_id,
             "response": {
                 "text": result["text"],
                 "ai_meta": {
@@ -707,12 +765,41 @@ async def chat(request: Request):
         )
         return response
     except Exception as e:
+        run_logger.error("CHAT error: %s", e)
         # Remove the user message we just added since the call failed
         session["messages"].pop()
-        return JSONResponse({"error": str(e)}, status_code=500)
+        return JSONResponse({"error": str(e), "run_id": run_id}, status_code=500)
+    finally:
+        close_run_logger(run_logger, run_handler)
+
+
+# ---------------------------------------------------------------------------
+# Debug Log Endpoint
+# ---------------------------------------------------------------------------
+
+LOG_DIR_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "logs"))
+
+
+@app.get("/api/logs/{run_id}")
+async def get_run_log(run_id: str):
+    """Serve the log file for a specific pipeline/chat run as plain text."""
+    from fastapi.responses import PlainTextResponse
+
+    # Sanitize: run_id should be alphanumeric only (hex chars)
+    if not run_id.isalnum() or len(run_id) > 32:
+        return JSONResponse({"error": "Invalid run_id"}, status_code=400)
+
+    log_path = os.path.join(LOG_DIR_PATH, "runs", f"{run_id}.log")
+    if not os.path.isfile(log_path):
+        return JSONResponse({"error": "Log not found"}, status_code=404)
+
+    import aiofiles
+    async with aiofiles.open(log_path, "r", encoding="utf-8") as f:
+        content = await f.read()
+    return PlainTextResponse(content)
 
 
 if __name__ == "__main__":
     import uvicorn
-    print(f"Serving JSON files from: {DATA_DIR}")
+    logger.info("Serving JSON files from: %s", DATA_DIR)
     uvicorn.run(socket_app, host="0.0.0.0", port=8191, log_level="info")
