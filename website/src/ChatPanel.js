@@ -186,15 +186,13 @@ function ChatPanel({ pipelineResults }) {
       const body = {
         message: text,
         conversation_id: conversationId,
+        pipeline_context: pipelineResults,
       };
-      // Only send pipeline context on first message
-      if (!conversationId) {
-        body.pipeline_context = pipelineResults;
-      }
 
       const res = await fetch(`${API_BASE}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        credentials: "include",
         body: JSON.stringify(body),
       });
 

@@ -9,6 +9,7 @@ from datetime import datetime
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 import socketio
 
 from detect import run_detection
@@ -28,6 +29,19 @@ from ai_service import (
 
 app = FastAPI()
 
+
+# Ensure all JSON responses include charset=utf-8 to prevent emoji/multi-byte
+# character corruption (mojibake) across proxies and browsers.
+class Utf8JsonMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        ct = response.headers.get("content-type", "")
+        if ct.startswith("application/json") and "charset" not in ct:
+            response.headers["content-type"] = "application/json; charset=utf-8"
+        return response
+
+
+app.add_middleware(Utf8JsonMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -546,28 +560,45 @@ async def test_ai_provider(request: Request):
 # In-memory Chat Conversation Store
 # ---------------------------------------------------------------------------
 
-# { conversation_id: { messages: [...], pipeline_context: {...}, created: str } }
+# Keyed by "{session_id}:{conversation_id}" for per-user isolation.
+# Each browser gets a unique session_id cookie so conversations never leak
+# across users even though we use a single in-memory dict.
 _chat_sessions = {}
 
 
+def _get_session_id(request: Request) -> str:
+    """Return the session_id from the cookie, or generate a new one."""
+    return request.cookies.get("betstamp_session") or uuid.uuid4().hex
+
+
+def _make_key(session_id: str, conversation_id: str) -> str:
+    return f"{session_id}:{conversation_id}"
+
+
 @app.get("/api/chat/sessions")
-async def list_chat_sessions():
-    """Return a list of active chat sessions."""
+async def list_chat_sessions(request: Request):
+    """Return a list of active chat sessions for the current user."""
+    session_id = _get_session_id(request)
+    prefix = f"{session_id}:"
     sessions = []
-    for sid, session in _chat_sessions.items():
-        sessions.append({
-            "id": sid,
-            "message_count": len(session["messages"]),
-            "created": session["created"],
-            "has_pipeline_context": bool(session.get("pipeline_context")),
-        })
+    for key, session in _chat_sessions.items():
+        if key.startswith(prefix):
+            cid = key[len(prefix):]
+            sessions.append({
+                "id": cid,
+                "message_count": len(session["messages"]),
+                "created": session["created"],
+                "has_pipeline_context": bool(session.get("pipeline_context")),
+            })
     return {"sessions": sessions}
 
 
 @app.get("/api/chat/{conversation_id}")
-async def get_chat_conversation(conversation_id: str):
-    """Return the full conversation history for a given ID."""
-    session = _chat_sessions.get(conversation_id)
+async def get_chat_conversation(conversation_id: str, request: Request):
+    """Return the full conversation history for a given ID (scoped to user)."""
+    session_id = _get_session_id(request)
+    key = _make_key(session_id, conversation_id)
+    session = _chat_sessions.get(key)
     if not session:
         return JSONResponse({"error": "Conversation not found"}, status_code=404)
     return {
@@ -580,33 +611,41 @@ async def get_chat_conversation(conversation_id: str):
 
 
 @app.delete("/api/chat/{conversation_id}")
-async def delete_chat_conversation(conversation_id: str):
-    """Delete a conversation session."""
-    _chat_sessions.pop(conversation_id, None)
+async def delete_chat_conversation(conversation_id: str, request: Request):
+    """Delete a conversation session (scoped to user)."""
+    session_id = _get_session_id(request)
+    key = _make_key(session_id, conversation_id)
+    _chat_sessions.pop(key, None)
     return {"status": "ok"}
 
 
 @app.post("/api/chat")
 async def chat(request: Request):
-    """Send a message to the AI chat and get a response with conversation memory."""
+    """Send a message to the AI chat and get a response with conversation memory.
+
+    Conversations are scoped to a browser session via a cookie so multiple
+    users never share state.
+    """
     data = await request.json()
     message = (data.get("message") or "").strip()
     if not message:
         return JSONResponse({"error": "message is required"}, status_code=400)
 
+    session_id = _get_session_id(request)
     conversation_id = data.get("conversation_id") or uuid.uuid4().hex[:12]
+    key = _make_key(session_id, conversation_id)
     pipeline_context = data.get("pipeline_context")
 
-    # Get or create session
-    if conversation_id in _chat_sessions:
-        session = _chat_sessions[conversation_id]
+    # Get or create session (scoped to user)
+    if key in _chat_sessions:
+        session = _chat_sessions[key]
     else:
         session = {
             "messages": [],
             "pipeline_context": None,
             "created": datetime.now().isoformat(),
         }
-        _chat_sessions[conversation_id] = session
+        _chat_sessions[key] = session
 
     # Update pipeline context if provided
     if pipeline_context:
@@ -636,7 +675,8 @@ async def chat(request: Request):
         # Append assistant response
         session["messages"].append({"role": "assistant", "content": result["text"]})
 
-        return {
+        # Set session cookie so subsequent requests are tied to this user
+        response = JSONResponse({
             "conversation_id": conversation_id,
             "response": {
                 "text": result["text"],
@@ -648,7 +688,15 @@ async def chat(request: Request):
                 },
             },
             "message_count": len(session["messages"]),
-        }
+        })
+        response.set_cookie(
+            key="betstamp_session",
+            value=session_id,
+            httponly=True,
+            samesite="lax",
+            max_age=60 * 60 * 24,  # 24 hours
+        )
+        return response
     except Exception as e:
         # Remove the user message we just added since the call failed
         session["messages"].pop()

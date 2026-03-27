@@ -216,7 +216,9 @@ function BetLens() {
         </div>
       )}
 
-      <ChatPanel pipelineResults={pipelineResults} />
+      {pipelineComplete && pipelineResults && (
+        <ChatPanel key={selectedFile} pipelineResults={pipelineResults} />
+      )}
     </>
   );
 }
