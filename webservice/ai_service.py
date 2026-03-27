@@ -1,5 +1,5 @@
 """
-AI Service — Multi-provider AI integration with failover support.
+AI Service — Async multi-provider AI integration with failover support.
 
 Supports:
   - Anthropic (Claude)
@@ -11,10 +11,11 @@ If one fails, the next enabled provider is attempted (when failover is on).
 """
 
 import os
+import sys
 import json
 import time
+import asyncio
 import logging
-import subprocess
 import shutil
 from typing import Optional
 
@@ -56,11 +57,11 @@ def _get_api_key(provider: dict) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# Provider-specific call implementations
+# Provider-specific async call implementations
 # ---------------------------------------------------------------------------
 
-def _call_anthropic(provider: dict, system_prompt: str, user_prompt: str, config: dict) -> dict:
-    """Call the Anthropic Messages API."""
+async def _call_anthropic(provider: dict, system_prompt: str, user_prompt: str, config: dict) -> dict:
+    """Call the Anthropic Messages API asynchronously."""
     try:
         import anthropic
     except ImportError:
@@ -70,13 +71,13 @@ def _call_anthropic(provider: dict, system_prompt: str, user_prompt: str, config
     if not api_key:
         raise RuntimeError(f"No API key found for {provider['id']} (env: {provider.get('api_key_env')})")
 
-    client = anthropic.Anthropic(
+    client = anthropic.AsyncAnthropic(
         api_key=api_key,
         timeout=config.get("timeout_seconds", 60),
     )
 
     start = time.time()
-    response = client.messages.create(
+    response = await client.messages.create(
         model=provider.get("model", "claude-sonnet-4-20250514"),
         max_tokens=provider.get("max_tokens", 4096),
         temperature=provider.get("temperature", 0.3),
@@ -99,8 +100,8 @@ def _call_anthropic(provider: dict, system_prompt: str, user_prompt: str, config
     }
 
 
-def _call_openai(provider: dict, system_prompt: str, user_prompt: str, config: dict) -> dict:
-    """Call the OpenAI Chat Completions API (also works with compatible endpoints)."""
+async def _call_openai(provider: dict, system_prompt: str, user_prompt: str, config: dict) -> dict:
+    """Call the OpenAI Chat Completions API asynchronously (also works with compatible endpoints)."""
     try:
         import openai
     except ImportError:
@@ -114,10 +115,10 @@ def _call_openai(provider: dict, system_prompt: str, user_prompt: str, config: d
     if provider.get("base_url"):
         kwargs["base_url"] = provider["base_url"]
 
-    client = openai.OpenAI(**kwargs)
+    client = openai.AsyncOpenAI(**kwargs)
 
     start = time.time()
-    response = client.chat.completions.create(
+    response = await client.chat.completions.create(
         model=provider.get("model", "gpt-4o"),
         max_tokens=provider.get("max_tokens", 4096),
         temperature=provider.get("temperature", 0.3),
@@ -173,12 +174,15 @@ def _find_node() -> str:
     )
 
 
-def _call_claude_sdk(provider: dict, system_prompt: str, user_prompt: str, config: dict) -> dict:
+async def _call_claude_sdk(provider: dict, system_prompt: str, user_prompt: str, config: dict, *, use_mcp: bool = False, max_turns: int = 1) -> dict:
     """
     Call Claude via the Agent SDK wrapper (Node.js subprocess).
 
     This spawns claude-sdk-wrapper.mjs, sends a JSON command on stdin,
     and reads the JSON result from stdout.
+
+    When ``use_mcp`` is True, the wrapper will load the betstamp-intelligence
+    MCP server config and allow Claude to call MCP tools autonomously.
     """
     if not os.path.isfile(_WRAPPER_SCRIPT):
         raise RuntimeError(
@@ -188,39 +192,54 @@ def _call_claude_sdk(provider: dict, system_prompt: str, user_prompt: str, confi
 
     node_bin = _find_node()
     timeout_seconds = config.get("timeout_seconds", 120)
+    service_dir = os.path.dirname(__file__)
 
     # Build the command payload for the wrapper
     command_payload = {
         "system_prompt": system_prompt,
         "user_prompt": user_prompt,
         "model": provider.get("model", "claude-sonnet-4-20250514"),
-        "max_turns": 1,
-        "cwd": os.path.dirname(__file__),
+        "max_turns": max_turns,
+        "cwd": service_dir,
         "timeout_seconds": timeout_seconds,
+        "use_mcp": use_mcp,
     }
 
     start = time.time()
 
-    proc = subprocess.run(
-        [node_bin, _WRAPPER_SCRIPT],
-        input=json.dumps(command_payload),
-        capture_output=True,
-        text=True,
-        timeout=timeout_seconds + 30,  # Extra buffer beyond the wrapper's own timeout
-        cwd=os.path.dirname(__file__),
+    # Use native asyncio subprocess — no eventlet workaround needed
+    proc = await asyncio.create_subprocess_exec(
+        node_bin, _WRAPPER_SCRIPT,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=service_dir,
     )
+
+    input_bytes = json.dumps(command_payload).encode("utf-8")
+    try:
+        stdout_bytes, stderr_bytes = await asyncio.wait_for(
+            proc.communicate(input=input_bytes),
+            timeout=timeout_seconds + 30,
+        )
+    except asyncio.TimeoutError:
+        proc.kill()
+        raise RuntimeError(f"Claude SDK wrapper timed out after {timeout_seconds + 30}s")
 
     elapsed = round(time.time() - start, 2)
 
-    if proc.returncode != 0 and not proc.stdout.strip():
-        stderr_excerpt = (proc.stderr or "")[:500]
+    stdout_text = stdout_bytes.decode("utf-8", errors="replace")
+    stderr_text = stderr_bytes.decode("utf-8", errors="replace")
+
+    if proc.returncode != 0 and not stdout_text.strip():
+        stderr_excerpt = (stderr_text or "")[:500]
         raise RuntimeError(
             f"Claude SDK wrapper exited with code {proc.returncode}: {stderr_excerpt}"
         )
 
     # Parse the last JSON line from stdout (the result)
     result_line = None
-    for line in proc.stdout.strip().splitlines():
+    for line in stdout_text.strip().splitlines():
         line = line.strip()
         if line:
             result_line = line
@@ -252,7 +271,7 @@ def _call_claude_sdk(provider: dict, system_prompt: str, user_prompt: str, confi
     }
 
 
-# Map provider types to their call functions
+# Map provider types to their async call functions
 _CALL_MAP = {
     "anthropic": _call_anthropic,
     "openai": _call_openai,
@@ -262,11 +281,11 @@ _CALL_MAP = {
 
 
 # ---------------------------------------------------------------------------
-# Provider-specific CHAT implementations (multi-turn)
+# Provider-specific async CHAT implementations (multi-turn)
 # ---------------------------------------------------------------------------
 
-def _call_anthropic_chat(provider: dict, system_prompt: str, messages: list[dict], config: dict) -> dict:
-    """Call the Anthropic Messages API with a full messages array."""
+async def _call_anthropic_chat(provider: dict, system_prompt: str, messages: list[dict], config: dict) -> dict:
+    """Call the Anthropic Messages API with a full messages array asynchronously."""
     try:
         import anthropic
     except ImportError:
@@ -276,13 +295,13 @@ def _call_anthropic_chat(provider: dict, system_prompt: str, messages: list[dict
     if not api_key:
         raise RuntimeError(f"No API key found for {provider['id']} (env: {provider.get('api_key_env')})")
 
-    client = anthropic.Anthropic(
+    client = anthropic.AsyncAnthropic(
         api_key=api_key,
         timeout=config.get("timeout_seconds", 60),
     )
 
     start = time.time()
-    response = client.messages.create(
+    response = await client.messages.create(
         model=provider.get("model", "claude-sonnet-4-20250514"),
         max_tokens=provider.get("max_tokens", 4096),
         temperature=provider.get("temperature", 0.3),
@@ -305,8 +324,8 @@ def _call_anthropic_chat(provider: dict, system_prompt: str, messages: list[dict
     }
 
 
-def _call_openai_chat(provider: dict, system_prompt: str, messages: list[dict], config: dict) -> dict:
-    """Call the OpenAI Chat Completions API with a full messages array."""
+async def _call_openai_chat(provider: dict, system_prompt: str, messages: list[dict], config: dict) -> dict:
+    """Call the OpenAI Chat Completions API with a full messages array asynchronously."""
     try:
         import openai
     except ImportError:
@@ -320,13 +339,13 @@ def _call_openai_chat(provider: dict, system_prompt: str, messages: list[dict], 
     if provider.get("base_url"):
         kwargs["base_url"] = provider["base_url"]
 
-    client = openai.OpenAI(**kwargs)
+    client = openai.AsyncOpenAI(**kwargs)
 
     # Prepend system message to the messages array
     api_messages = [{"role": "system", "content": system_prompt}] + messages
 
     start = time.time()
-    response = client.chat.completions.create(
+    response = await client.chat.completions.create(
         model=provider.get("model", "gpt-4o"),
         max_tokens=provider.get("max_tokens", 4096),
         temperature=provider.get("temperature", 0.3),
@@ -353,8 +372,12 @@ def _call_openai_chat(provider: dict, system_prompt: str, messages: list[dict], 
     }
 
 
-def _call_claude_sdk_chat(provider: dict, system_prompt: str, messages: list[dict], config: dict) -> dict:
-    """Call Claude SDK by concatenating messages into a single prompt."""
+async def _call_claude_sdk_chat(provider: dict, system_prompt: str, messages: list[dict], config: dict) -> dict:
+    """Call Claude SDK by concatenating messages into a single prompt.
+
+    Chat calls enable MCP tool use so Claude can query the betstamp-intelligence
+    server on demand instead of relying on pre-baked pipeline context.
+    """
     # Concatenate all messages into a single user prompt for the request-response SDK
     parts = []
     for msg in messages:
@@ -362,10 +385,10 @@ def _call_claude_sdk_chat(provider: dict, system_prompt: str, messages: list[dic
         parts.append(f"{role_label}: {msg['content']}")
     combined_prompt = "\n\n".join(parts)
 
-    return _call_claude_sdk(provider, system_prompt, combined_prompt, config)
+    return await _call_claude_sdk(provider, system_prompt, combined_prompt, config, use_mcp=True, max_turns=10)
 
 
-# Map provider types to their chat functions
+# Map provider types to their async chat functions
 _CHAT_CALL_MAP = {
     "anthropic": _call_anthropic_chat,
     "openai": _call_openai_chat,
@@ -375,10 +398,10 @@ _CHAT_CALL_MAP = {
 
 
 # ---------------------------------------------------------------------------
-# Main entry point — call with failover
+# Main entry point — async call with failover
 # ---------------------------------------------------------------------------
 
-def call_ai(system_prompt: str, user_prompt: str, provider_id: Optional[str] = None) -> dict:
+async def call_ai(system_prompt: str, user_prompt: str, provider_id: Optional[str] = None) -> dict:
     """
     Send a prompt to an AI provider and return the response.
 
@@ -417,7 +440,7 @@ def call_ai(system_prompt: str, user_prompt: str, provider_id: Optional[str] = N
                     "AI call: provider=%s model=%s attempt=%d/%d",
                     provider["id"], provider.get("model"), attempt, retries,
                 )
-                result = call_fn(provider, system_prompt, user_prompt, config)
+                result = await call_fn(provider, system_prompt, user_prompt, config)
                 return result
             except Exception as exc:
                 msg = f"{provider['id']} attempt {attempt}: {exc}"
@@ -432,7 +455,7 @@ def call_ai(system_prompt: str, user_prompt: str, provider_id: Optional[str] = N
     )
 
 
-def call_ai_chat(messages: list[dict], system_prompt: str, provider_id: Optional[str] = None) -> dict:
+async def call_ai_chat(messages: list[dict], system_prompt: str, provider_id: Optional[str] = None) -> dict:
     """
     Send a multi-turn conversation to an AI provider and return the response.
 
@@ -471,7 +494,7 @@ def call_ai_chat(messages: list[dict], system_prompt: str, provider_id: Optional
                     "AI chat call: provider=%s model=%s attempt=%d/%d messages=%d",
                     provider["id"], provider.get("model"), attempt, retries, len(messages),
                 )
-                result = call_fn(provider, system_prompt, messages, config)
+                result = await call_fn(provider, system_prompt, messages, config)
                 return result
             except Exception as exc:
                 msg = f"{provider['id']} attempt {attempt}: {exc}"
@@ -583,14 +606,14 @@ Guidelines:
 """
 
 
-def run_analyze_phase(detection_data: dict) -> dict:
+async def run_analyze_phase(detection_data: dict) -> dict:
     """Phase 2: AI-powered cross-sportsbook analysis."""
     user_prompt = (
         "Here is the enriched odds data from the detection phase. "
         "Analyze it and return your structured JSON findings.\n\n"
         + json.dumps(detection_data, indent=2)[:30000]  # Cap prompt size
     )
-    result = call_ai(ANALYZE_SYSTEM_PROMPT, user_prompt)
+    result = await call_ai(ANALYZE_SYSTEM_PROMPT, user_prompt)
 
     # Try to parse the AI response as JSON for structured output
     analysis = result["text"]
@@ -610,7 +633,7 @@ def run_analyze_phase(detection_data: dict) -> dict:
     }
 
 
-def run_brief_phase(detection_data: dict, analysis_data: dict) -> dict:
+async def run_brief_phase(detection_data: dict, analysis_data: dict) -> dict:
     """Phase 3: AI-powered daily market briefing (readable text)."""
     from datetime import datetime, timezone
 
@@ -621,7 +644,7 @@ def run_brief_phase(detection_data: dict, analysis_data: dict) -> dict:
         + "\n\n=== CROSS-SPORTSBOOK ANALYSIS ===\n"
         + json.dumps(analysis_data, indent=2)[:15000]
     )
-    result = call_ai(BRIEF_SYSTEM_PROMPT, user_prompt)
+    result = await call_ai(BRIEF_SYSTEM_PROMPT, user_prompt)
 
     return {
         "brief_text": result["text"],

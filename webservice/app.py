@@ -1,15 +1,16 @@
-import eventlet
-eventlet.monkey_patch()
-
 import os
 import re
 import json
 import uuid
+import asyncio
 import subprocess
 from datetime import datetime
-from flask import Flask, jsonify, request
-from flask_cors import CORS
-from flask_socketio import SocketIO, emit
+
+from fastapi import FastAPI, Query, Request
+from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+import socketio
+
 from detect import run_detection
 from ai_service import (
     load_config as load_ai_config,
@@ -21,9 +22,22 @@ from ai_service import (
     CHAT_SYSTEM_PROMPT,
 )
 
-app = Flask(__name__)
-CORS(app)
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
+# ---------------------------------------------------------------------------
+# FastAPI + Socket.IO (async) setup
+# ---------------------------------------------------------------------------
+
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins="*")
+socket_app = socketio.ASGIApp(sio, other_asgi_app=app)
 
 # ---------------------------------------------------------------------------
 # Three-phase processing pipeline (Detect → Analyze → Brief)
@@ -35,7 +49,7 @@ PHASES = [
 ]
 
 
-def _emit_phase(sid, filename, phase, i, status, result=None):
+async def _emit_phase(sid, filename, phase, i, status, result=None):
     """Helper to emit a phase_update event."""
     payload = {
         "filename": filename,
@@ -47,109 +61,109 @@ def _emit_phase(sid, filename, phase, i, status, result=None):
     }
     if result is not None:
         payload["result"] = result
-    socketio.emit("phase_update", payload, to=sid)
+    await sio.emit("phase_update", payload, to=sid)
 
 
-def run_processing_pipeline(filename, sid):
+async def run_processing_pipeline(filename, sid):
     """Execute the 3-phase pipeline, emitting status updates via WebSocket."""
     try:
         pipeline_results = {}
 
         for i, phase in enumerate(PHASES):
-            _emit_phase(sid, filename, phase, i, "in_progress")
+            await _emit_phase(sid, filename, phase, i, "in_progress")
 
             if phase["name"] == "detect":
                 # --- Real detection: compute probabilities, vig, fair odds ---
-                detection = run_detection(filename)
+                detection = await run_detection(filename)
                 pipeline_results["detect"] = detection
-                _emit_phase(sid, filename, phase, i, "complete", result=detection)
+                await _emit_phase(sid, filename, phase, i, "complete", result=detection)
             elif phase["name"] == "analyze":
                 # --- AI-powered cross-sportsbook analysis ---
                 try:
-                    analysis = run_analyze_phase(pipeline_results.get("detect", {}))
+                    analysis = await run_analyze_phase(pipeline_results.get("detect", {}))
                     pipeline_results["analyze"] = analysis
-                    _emit_phase(sid, filename, phase, i, "complete", result=analysis)
+                    await _emit_phase(sid, filename, phase, i, "complete", result=analysis)
                 except Exception as exc:
                     # Graceful degradation: report the error but continue pipeline
                     err_result = {"error": str(exc), "ai_meta": None}
                     pipeline_results["analyze"] = err_result
-                    _emit_phase(sid, filename, phase, i, "complete", result=err_result)
+                    await _emit_phase(sid, filename, phase, i, "complete", result=err_result)
 
             elif phase["name"] == "brief":
                 # --- AI-powered actionable briefing ---
                 try:
-                    brief = run_brief_phase(
+                    brief = await run_brief_phase(
                         pipeline_results.get("detect", {}),
                         pipeline_results.get("analyze", {}),
                     )
                     pipeline_results["brief"] = brief
-                    _emit_phase(sid, filename, phase, i, "complete", result=brief)
+                    await _emit_phase(sid, filename, phase, i, "complete", result=brief)
                 except Exception as exc:
                     err_result = {"error": str(exc), "ai_meta": None}
                     pipeline_results["brief"] = err_result
-                    _emit_phase(sid, filename, phase, i, "complete", result=err_result)
+                    await _emit_phase(sid, filename, phase, i, "complete", result=err_result)
 
             else:
                 # Unknown phase — placeholder
-                socketio.sleep(2)
-                _emit_phase(sid, filename, phase, i, "complete")
+                await asyncio.sleep(2)
+                await _emit_phase(sid, filename, phase, i, "complete")
 
-        socketio.emit("processing_complete", {
+        await sio.emit("processing_complete", {
             "filename": filename,
             "results": pipeline_results,
         }, to=sid)
     except Exception as e:
-        socketio.emit("processing_error", {
+        await sio.emit("processing_error", {
             "filename": filename,
             "error": str(e),
         }, to=sid)
 
 
-@socketio.on("start_processing")
-def handle_start_processing(data):
+@sio.on("start_processing")
+async def handle_start_processing(sid, data):
     filename = data.get("filename", "")
     if not filename.endswith(".json"):
-        emit("processing_error", {"filename": filename, "error": "Only .json files supported"})
+        await sio.emit("processing_error", {"filename": filename, "error": "Only .json files supported"}, to=sid)
         return
-    sid = request.sid
-    socketio.start_background_task(run_processing_pipeline, filename, sid)
+    asyncio.create_task(run_processing_pipeline(filename, sid))
+
 
 DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data"))
 DEV_NOTES_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "devNotesData"))
 CONVERSATIONS_DIR = r"C:\ProgramData\DesktopDevService\Conversations"
 
 
-@app.route("/api/files", methods=["GET"])
-def list_files():
+@app.get("/api/files")
+async def list_files():
     """Return a list of all JSON files in the data directory."""
     if not os.path.isdir(DATA_DIR):
-        return jsonify({"files": []})
+        return {"files": []}
 
-    files = [f for f in os.listdir(DATA_DIR) if f.endswith(".json")]
-    files.sort()
-    return jsonify({"files": files})
+    files = sorted(f for f in os.listdir(DATA_DIR) if f.endswith(".json"))
+    return {"files": files}
 
 
-@app.route("/api/files/<filename>", methods=["GET"])
-def get_file(filename):
+@app.get("/api/files/{filename}")
+async def get_file(filename: str):
     """Return the contents of a specific JSON file."""
     if not filename.endswith(".json"):
-        return jsonify({"error": "Only .json files are supported"}), 400
+        return JSONResponse({"error": "Only .json files are supported"}, status_code=400)
 
-    filepath = os.path.join(DATA_DIR, filename)
-    filepath = os.path.abspath(filepath)
+    filepath = os.path.abspath(os.path.join(DATA_DIR, filename))
 
     # Prevent directory traversal
     if not filepath.startswith(DATA_DIR):
-        return jsonify({"error": "Invalid file path"}), 403
+        return JSONResponse({"error": "Invalid file path"}, status_code=403)
 
     if not os.path.isfile(filepath):
-        return jsonify({"error": "File not found"}), 404
+        return JSONResponse({"error": "File not found"}, status_code=404)
 
-    with open(filepath, "r", encoding="utf-8") as f:
-        data = json.load(f)
+    import aiofiles
+    async with aiofiles.open(filepath, "r", encoding="utf-8") as f:
+        content = await f.read()
+    data = json.loads(content)
 
-    return jsonify(data)
+    return data
 
 
 def _parse_conversation_file(filepath):
@@ -206,28 +220,29 @@ PROJECT_GUID_MAP = {
 }
 
 
-@app.route("/api/conversations", methods=["GET"])
-def list_conversations():
+@app.get("/api/conversations")
+async def list_conversations(project_id: int = Query(...)):
     """Return conversations filtered by project ID."""
-    project_id = request.args.get("project_id", type=int)
-    if project_id is None:
-        return jsonify({"error": "project_id query parameter is required"}), 400
-
     project_guid = PROJECT_GUID_MAP.get(project_id)
     if not project_guid:
-        return jsonify({"error": f"Unknown project_id: {project_id}"}), 404
+        return JSONResponse({"error": f"Unknown project_id: {project_id}"}, status_code=404)
 
     if not os.path.isdir(CONVERSATIONS_DIR):
-        return jsonify({"error": "Conversations directory not found"}), 500
+        return JSONResponse({"error": "Conversations directory not found"}, status_code=500)
 
-    conversations = []
-    for fname in os.listdir(CONVERSATIONS_DIR):
-        if not fname.endswith(".txt"):
-            continue
-        filepath = os.path.join(CONVERSATIONS_DIR, fname)
-        parsed = _parse_conversation_file(filepath)
-        if parsed and parsed["project"] == project_guid:
-            conversations.append(parsed)
+    # Run file parsing in a thread to avoid blocking the event loop
+    def _parse_all():
+        conversations = []
+        for fname in os.listdir(CONVERSATIONS_DIR):
+            if not fname.endswith(".txt"):
+                continue
+            filepath = os.path.join(CONVERSATIONS_DIR, fname)
+            parsed = _parse_conversation_file(filepath)
+            if parsed and parsed["project"] == project_guid:
+                conversations.append(parsed)
+        return conversations
+
+    conversations = await asyncio.to_thread(_parse_all)
 
     # Sort by first message timestamp descending (newest first)
     conversations.sort(
@@ -241,24 +256,28 @@ def list_conversations():
     try:
         os.makedirs(DEV_NOTES_DIR, exist_ok=True)
         save_path = os.path.join(DEV_NOTES_DIR, f"devnotes_project_{project_id}.json")
-        with open(save_path, "w", encoding="utf-8") as f:
-            json.dump(result, f, indent=2)
+        import aiofiles
+        async with aiofiles.open(save_path, "w", encoding="utf-8") as f:
+            await f.write(json.dumps(result, indent=2))
     except Exception:
         pass  # Don't fail the response if saving fails
 
-    return jsonify(result)
+    return result
 
 
-@app.route("/api/devnotes/<int:project_id>", methods=["GET"])
-def get_devnotes(project_id):
+@app.get("/api/devnotes/{project_id}")
+async def get_devnotes(project_id: int):
     """Return previously saved devnotes for a project, or 404 if none exist."""
     filename = f"devnotes_project_{project_id}.json"
     filepath = os.path.join(DEV_NOTES_DIR, filename)
     if not os.path.isfile(filepath):
-        return jsonify({"error": "No saved devnotes found"}), 404
-    with open(filepath, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    return jsonify(data)
+        return JSONResponse({"error": "No saved devnotes found"}, status_code=404)
+
+    import aiofiles
+    async with aiofiles.open(filepath, "r", encoding="utf-8") as f:
+        content = await f.read()
+    data = json.loads(content)
+    return data
 
 
 def _parse_notes_file():
@@ -324,31 +343,31 @@ def _parse_notes_file():
     return notes
 
 
-@app.route("/api/notes", methods=["GET"])
-def get_notes():
+@app.get("/api/notes")
+async def get_notes():
     """Return parsed notes from NOTES.md."""
-    notes = _parse_notes_file()
-    return jsonify({"notes": notes, "count": len(notes)})
+    notes = await asyncio.to_thread(_parse_notes_file)
+    return {"notes": notes, "count": len(notes)}
 
 
 REPO_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 GIT_STATS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "devNotesData"))
 
 
-def _analyze_git_history():
+async def _analyze_git_history():
     """Analyze git commit history and classify commits as Claude or User authored."""
-    # Get git log with commit hash, author, date, subject, and body
-    result = subprocess.run(
-        ["git", "log", "--pretty=format:%H||%an||%ae||%ai||%s||%b%x00"],
+    proc = await asyncio.create_subprocess_exec(
+        "git", "log", "--pretty=format:%H||%an||%ae||%ai||%s||%b%x00",
         cwd=REPO_DIR,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
     )
-    if result.returncode != 0:
-        raise RuntimeError(f"git log failed: {result.stderr}")
+    stdout_bytes, stderr_bytes = await proc.communicate()
 
-    raw = result.stdout.strip()
+    if proc.returncode != 0:
+        raise RuntimeError(f"git log failed: {stderr_bytes.decode('utf-8', errors='replace')}")
+
+    raw = stdout_bytes.decode("utf-8", errors="replace").strip()
     if not raw:
         return {"commits": [], "summary": {}}
 
@@ -404,48 +423,52 @@ def _analyze_git_history():
     return {"commits": commits, "summary": summary}
 
 
-@app.route("/api/git-stats", methods=["GET"])
-def get_git_stats():
+@app.get("/api/git-stats")
+async def get_git_stats():
     """Analyze git history, calculate Claude vs User contribution percentages, and save to JSON."""
     try:
-        stats = _analyze_git_history()
+        stats = await _analyze_git_history()
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return JSONResponse({"error": str(e)}, status_code=500)
 
     # Persist to JSON file
     try:
         os.makedirs(GIT_STATS_DIR, exist_ok=True)
         save_path = os.path.join(GIT_STATS_DIR, "git_stats.json")
-        with open(save_path, "w", encoding="utf-8") as f:
-            json.dump(stats, f, indent=2)
+        import aiofiles
+        async with aiofiles.open(save_path, "w", encoding="utf-8") as f:
+            await f.write(json.dumps(stats, indent=2))
     except Exception:
         pass
 
-    return jsonify(stats)
+    return stats
 
 
-@app.route("/api/git-stats/saved", methods=["GET"])
-def get_saved_git_stats():
+@app.get("/api/git-stats/saved")
+async def get_saved_git_stats():
     """Return previously saved git stats, or 404 if none exist."""
     filepath = os.path.join(GIT_STATS_DIR, "git_stats.json")
     if not os.path.isfile(filepath):
-        return jsonify({"error": "No saved git stats found"}), 404
-    with open(filepath, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    return jsonify(data)
+        return JSONResponse({"error": "No saved git stats found"}, status_code=404)
+
+    import aiofiles
+    async with aiofiles.open(filepath, "r", encoding="utf-8") as f:
+        content = await f.read()
+    data = json.loads(content)
+    return data
 
 
 # ---------------------------------------------------------------------------
 # AI Configuration Endpoints
 # ---------------------------------------------------------------------------
 
-@app.route("/api/ai/config", methods=["GET"])
-def get_ai_config():
+@app.get("/api/ai/config")
+async def get_ai_config():
     """Return the current AI provider configuration (keys redacted)."""
     try:
         config = load_ai_config()
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return JSONResponse({"error": str(e)}, status_code=500)
 
     # Redact API keys — only show whether they are set
     for p in config.get("providers", []):
@@ -453,30 +476,30 @@ def get_ai_config():
         p["api_key_set"] = bool(os.environ.get(env_var)) if env_var else False
         p.pop("api_key", None)  # Never expose direct keys
 
-    return jsonify(config)
+    return config
 
 
-@app.route("/api/ai/config", methods=["PUT"])
-def update_ai_config():
+@app.put("/api/ai/config")
+async def update_ai_config(request: Request):
     """Update AI provider configuration."""
     try:
-        new_config = request.get_json()
+        new_config = await request.json()
         if not new_config or "providers" not in new_config:
-            return jsonify({"error": "Invalid config: 'providers' array required"}), 400
+            return JSONResponse({"error": "Invalid config: 'providers' array required"}, status_code=400)
 
         # Validate providers
         for p in new_config["providers"]:
             if not p.get("id") or not p.get("type"):
-                return jsonify({"error": "Each provider needs 'id' and 'type'"}), 400
+                return JSONResponse({"error": "Each provider needs 'id' and 'type'"}, status_code=400)
 
         save_ai_config(new_config)
-        return jsonify({"status": "ok"})
+        return {"status": "ok"}
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
-@app.route("/api/ai/providers", methods=["GET"])
-def list_ai_providers():
+@app.get("/api/ai/providers")
+async def list_ai_providers():
     """Return a summary of enabled AI providers."""
     try:
         config = load_ai_config()
@@ -493,30 +516,30 @@ def list_ai_providers():
                 "api_key_set": bool(os.environ.get(env_var)) if env_var else False,
             })
         providers.sort(key=lambda x: x["priority"])
-        return jsonify({"providers": providers, "failover_enabled": config.get("failover_enabled", True)})
+        return {"providers": providers, "failover_enabled": config.get("failover_enabled", True)}
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
-@app.route("/api/ai/test", methods=["POST"])
-def test_ai_provider():
+@app.post("/api/ai/test")
+async def test_ai_provider(request: Request):
     """Send a quick test prompt to a specific provider to verify it works."""
-    data = request.get_json() or {}
+    data = await request.json()
     provider_id = data.get("provider_id")
 
     if not provider_id:
-        return jsonify({"error": "provider_id is required"}), 400
+        return JSONResponse({"error": "provider_id is required"}, status_code=400)
 
     try:
         from ai_service import call_ai
-        result = call_ai(
+        result = await call_ai(
             system_prompt="You are a helpful assistant. Respond in one short sentence.",
             user_prompt="Say hello and confirm you are working.",
             provider_id=provider_id,
         )
-        return jsonify({"status": "ok", "response": result})
+        return {"status": "ok", "response": result}
     except Exception as e:
-        return jsonify({"status": "error", "error": str(e)}), 500
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
 
 
 # ---------------------------------------------------------------------------
@@ -527,8 +550,8 @@ def test_ai_provider():
 _chat_sessions = {}
 
 
-@app.route("/api/chat/sessions", methods=["GET"])
-def list_chat_sessions():
+@app.get("/api/chat/sessions")
+async def list_chat_sessions():
     """Return a list of active chat sessions."""
     sessions = []
     for sid, session in _chat_sessions.items():
@@ -538,38 +561,38 @@ def list_chat_sessions():
             "created": session["created"],
             "has_pipeline_context": bool(session.get("pipeline_context")),
         })
-    return jsonify({"sessions": sessions})
+    return {"sessions": sessions}
 
 
-@app.route("/api/chat/<conversation_id>", methods=["GET"])
-def get_chat_conversation(conversation_id):
+@app.get("/api/chat/{conversation_id}")
+async def get_chat_conversation(conversation_id: str):
     """Return the full conversation history for a given ID."""
     session = _chat_sessions.get(conversation_id)
     if not session:
-        return jsonify({"error": "Conversation not found"}), 404
-    return jsonify({
+        return JSONResponse({"error": "Conversation not found"}, status_code=404)
+    return {
         "conversation_id": conversation_id,
         "messages": session["messages"],
         "created": session["created"],
         "has_pipeline_context": bool(session.get("pipeline_context")),
         "message_count": len(session["messages"]),
-    })
+    }
 
 
-@app.route("/api/chat/<conversation_id>", methods=["DELETE"])
-def delete_chat_conversation(conversation_id):
+@app.delete("/api/chat/{conversation_id}")
+async def delete_chat_conversation(conversation_id: str):
     """Delete a conversation session."""
     _chat_sessions.pop(conversation_id, None)
-    return jsonify({"status": "ok"})
+    return {"status": "ok"}
 
 
-@app.route("/api/chat", methods=["POST"])
-def chat():
+@app.post("/api/chat")
+async def chat(request: Request):
     """Send a message to the AI chat and get a response with conversation memory."""
-    data = request.get_json() or {}
-    message = data.get("message", "").strip()
+    data = await request.json()
+    message = (data.get("message") or "").strip()
     if not message:
-        return jsonify({"error": "message is required"}), 400
+        return JSONResponse({"error": "message is required"}, status_code=400)
 
     conversation_id = data.get("conversation_id") or uuid.uuid4().hex[:12]
     pipeline_context = data.get("pipeline_context")
@@ -605,7 +628,7 @@ def chat():
     session["messages"].append({"role": "user", "content": message})
 
     try:
-        result = call_ai_chat(
+        result = await call_ai_chat(
             messages=session["messages"],
             system_prompt=system_prompt,
         )
@@ -613,7 +636,7 @@ def chat():
         # Append assistant response
         session["messages"].append({"role": "assistant", "content": result["text"]})
 
-        return jsonify({
+        return {
             "conversation_id": conversation_id,
             "response": {
                 "text": result["text"],
@@ -625,13 +648,14 @@ def chat():
                 },
             },
             "message_count": len(session["messages"]),
-        })
+        }
     except Exception as e:
         # Remove the user message we just added since the call failed
         session["messages"].pop()
-        return jsonify({"error": str(e)}), 500
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 if __name__ == "__main__":
+    import uvicorn
     print(f"Serving JSON files from: {DATA_DIR}")
-    socketio.run(app, host="0.0.0.0", port=8191, debug=True, use_reloader=False)
+    uvicorn.run(socket_app, host="0.0.0.0", port=8191, log_level="info")

@@ -8,6 +8,7 @@ This module is called by the processing pipeline in app.py during the
 
 import json
 import os
+import aiofiles
 from odds_math import implied_probability, calculate_vig, no_vig_probabilities, fair_odds_to_american
 
 DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data"))
@@ -76,7 +77,7 @@ def _enrich_market_total(market: dict) -> dict:
     }
 
 
-def run_detection(filename: str) -> dict:
+async def run_detection(filename: str) -> dict:
     """Run the detection phase on a data file.
 
     For every odds record, enriches each market (spread, moneyline, total)
@@ -94,8 +95,9 @@ def run_detection(filename: str) -> dict:
         vig_summary    – per-game, per-market vig comparison across books
     """
     filepath = os.path.join(DATA_DIR, filename)
-    with open(filepath, "r", encoding="utf-8") as f:
-        data = json.load(f)
+    async with aiofiles.open(filepath, "r", encoding="utf-8") as f:
+        content = await f.read()
+    data = json.loads(content)
 
     odds_list = data.get("odds", [])
     enriched = []
