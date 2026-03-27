@@ -6,6 +6,7 @@ const TYPE_LABELS = {
   anthropic: "Anthropic",
   openai: "OpenAI",
   openai_compatible: "Custom / Ollama",
+  claude_sdk: "Claude Code SDK",
 };
 
 function AISettings() {
@@ -264,16 +265,25 @@ function AISettings() {
                 </div>
 
                 <div className="ai-provider-card-footer">
-                  <div className="ai-key-status-row">
-                    <span className="ai-key-label">API Key ({p.api_key_env}):</span>
-                    {p.api_key_set ? (
-                      <span className="ai-key-status ai-key-status--set">Set</span>
-                    ) : (
-                      <span className="ai-key-status ai-key-status--unset">
-                        Not Set
+                  {p.type === "claude_sdk" ? (
+                    <div className="ai-key-status-row">
+                      <span className="ai-key-label">Auth:</span>
+                      <span className="ai-key-status ai-key-status--set">
+                        Uses Claude CLI login
                       </span>
-                    )}
-                  </div>
+                    </div>
+                  ) : (
+                    <div className="ai-key-status-row">
+                      <span className="ai-key-label">API Key ({p.api_key_env}):</span>
+                      {p.api_key_set ? (
+                        <span className="ai-key-status ai-key-status--set">Set</span>
+                      ) : (
+                        <span className="ai-key-status ai-key-status--unset">
+                          Not Set
+                        </span>
+                      )}
+                    </div>
+                  )}
                   <button
                     className="ai-test-btn"
                     disabled={test?.status === "testing"}

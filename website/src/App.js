@@ -4,6 +4,7 @@ import { io } from "socket.io-client";
 import DevNotes from "./DevNotes";
 import DataExplorer from "./DataExplorer";
 import AISettings from "./AISettings";
+import ChatPanel from "./ChatPanel";
 import "./App.css";
 
 const API_BASE = "";
@@ -51,6 +52,10 @@ function BetLens() {
   const [pipelineComplete, setPipelineComplete] = useState(false);
   const [pipelineError, setPipelineError] = useState(null);
   const socketRef = useRef(null);
+
+  // Chat state
+  const [chatOpen, setChatOpen] = useState(false);
+  const [pipelineResults, setPipelineResults] = useState(null);
 
   // Fetch available JSON files on mount
   useEffect(() => {
@@ -117,8 +122,9 @@ function BetLens() {
       });
     });
 
-    socket.on("processing_complete", () => {
+    socket.on("processing_complete", (data) => {
       setPipelineComplete(true);
+      setPipelineResults(data.results || null);
       socket.disconnect();
       socketRef.current = null;
     });
@@ -204,6 +210,19 @@ function BetLens() {
           <DataExplorer data={fileData} />
         </div>
       )}
+
+      <button
+        className="chat-fab"
+        onClick={() => setChatOpen(!chatOpen)}
+        title="Chat with AI Assistant"
+      >
+        {chatOpen ? '\u00d7' : '\ud83d\udcac'}
+      </button>
+      <ChatPanel
+        pipelineResults={pipelineResults}
+        isOpen={chatOpen}
+        onToggle={() => setChatOpen(!chatOpen)}
+      />
     </>
   );
 }

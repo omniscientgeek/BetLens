@@ -14,6 +14,8 @@ import os
 import json
 import time
 import logging
+import subprocess
+import shutil
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -145,11 +147,230 @@ def _call_openai(provider: dict, system_prompt: str, user_prompt: str, config: d
     }
 
 
+# ---------------------------------------------------------------------------
+# Claude Agent SDK (claude-sdk-wrapper.mjs bridge)
+# ---------------------------------------------------------------------------
+
+# Resolve the wrapper script path relative to this file
+_WRAPPER_SCRIPT = os.path.join(os.path.dirname(__file__), "claude-sdk-wrapper.mjs")
+
+
+def _find_node() -> str:
+    """Locate the Node.js executable."""
+    node = shutil.which("node")
+    if node:
+        return node
+    # Common Windows paths
+    for candidate in [
+        r"C:\Program Files\nodejs\node.exe",
+        r"C:\Program Files (x86)\nodejs\node.exe",
+        os.path.expandvars(r"%APPDATA%\nvm\current\node.exe"),
+    ]:
+        if os.path.isfile(candidate):
+            return candidate
+    raise RuntimeError(
+        "Node.js not found. Install Node.js to use the Claude SDK provider."
+    )
+
+
+def _call_claude_sdk(provider: dict, system_prompt: str, user_prompt: str, config: dict) -> dict:
+    """
+    Call Claude via the Agent SDK wrapper (Node.js subprocess).
+
+    This spawns claude-sdk-wrapper.mjs, sends a JSON command on stdin,
+    and reads the JSON result from stdout.
+    """
+    if not os.path.isfile(_WRAPPER_SCRIPT):
+        raise RuntimeError(
+            f"claude-sdk-wrapper.mjs not found at {_WRAPPER_SCRIPT}. "
+            "Run 'npm install' in the webservice/ directory."
+        )
+
+    node_bin = _find_node()
+    timeout_seconds = config.get("timeout_seconds", 120)
+
+    # Build the command payload for the wrapper
+    command_payload = {
+        "system_prompt": system_prompt,
+        "user_prompt": user_prompt,
+        "model": provider.get("model", "claude-sonnet-4-20250514"),
+        "max_turns": 1,
+        "cwd": os.path.dirname(__file__),
+        "timeout_seconds": timeout_seconds,
+    }
+
+    start = time.time()
+
+    proc = subprocess.run(
+        [node_bin, _WRAPPER_SCRIPT],
+        input=json.dumps(command_payload),
+        capture_output=True,
+        text=True,
+        timeout=timeout_seconds + 30,  # Extra buffer beyond the wrapper's own timeout
+        cwd=os.path.dirname(__file__),
+    )
+
+    elapsed = round(time.time() - start, 2)
+
+    if proc.returncode != 0 and not proc.stdout.strip():
+        stderr_excerpt = (proc.stderr or "")[:500]
+        raise RuntimeError(
+            f"Claude SDK wrapper exited with code {proc.returncode}: {stderr_excerpt}"
+        )
+
+    # Parse the last JSON line from stdout (the result)
+    result_line = None
+    for line in proc.stdout.strip().splitlines():
+        line = line.strip()
+        if line:
+            result_line = line
+
+    if not result_line:
+        raise RuntimeError("No output from Claude SDK wrapper")
+
+    try:
+        result = json.loads(result_line)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"Invalid JSON from Claude SDK wrapper: {e}\nOutput: {result_line[:300]}")
+
+    if result.get("type") == "error":
+        raise RuntimeError(f"Claude SDK error: {result.get('message', 'Unknown error')}")
+
+    text = result.get("text", "")
+    usage = result.get("usage", {})
+
+    return {
+        "text": text,
+        "provider_id": provider["id"],
+        "provider_name": provider.get("name", "Claude SDK"),
+        "model": provider.get("model", "claude-sonnet-4-20250514"),
+        "usage": {
+            "input_tokens": usage.get("input_tokens", 0),
+            "output_tokens": usage.get("output_tokens", 0),
+        },
+        "elapsed_seconds": elapsed,
+    }
+
+
 # Map provider types to their call functions
 _CALL_MAP = {
     "anthropic": _call_anthropic,
     "openai": _call_openai,
     "openai_compatible": _call_openai,
+    "claude_sdk": _call_claude_sdk,
+}
+
+
+# ---------------------------------------------------------------------------
+# Provider-specific CHAT implementations (multi-turn)
+# ---------------------------------------------------------------------------
+
+def _call_anthropic_chat(provider: dict, system_prompt: str, messages: list[dict], config: dict) -> dict:
+    """Call the Anthropic Messages API with a full messages array."""
+    try:
+        import anthropic
+    except ImportError:
+        raise RuntimeError("anthropic package not installed. Run: pip install anthropic")
+
+    api_key = _get_api_key(provider)
+    if not api_key:
+        raise RuntimeError(f"No API key found for {provider['id']} (env: {provider.get('api_key_env')})")
+
+    client = anthropic.Anthropic(
+        api_key=api_key,
+        timeout=config.get("timeout_seconds", 60),
+    )
+
+    start = time.time()
+    response = client.messages.create(
+        model=provider.get("model", "claude-sonnet-4-20250514"),
+        max_tokens=provider.get("max_tokens", 4096),
+        temperature=provider.get("temperature", 0.3),
+        system=system_prompt,
+        messages=messages,
+    )
+    elapsed = round(time.time() - start, 2)
+
+    text = response.content[0].text if response.content else ""
+    return {
+        "text": text,
+        "provider_id": provider["id"],
+        "provider_name": provider["name"],
+        "model": response.model,
+        "usage": {
+            "input_tokens": response.usage.input_tokens,
+            "output_tokens": response.usage.output_tokens,
+        },
+        "elapsed_seconds": elapsed,
+    }
+
+
+def _call_openai_chat(provider: dict, system_prompt: str, messages: list[dict], config: dict) -> dict:
+    """Call the OpenAI Chat Completions API with a full messages array."""
+    try:
+        import openai
+    except ImportError:
+        raise RuntimeError("openai package not installed. Run: pip install openai")
+
+    api_key = _get_api_key(provider)
+    if not api_key:
+        raise RuntimeError(f"No API key found for {provider['id']} (env: {provider.get('api_key_env')})")
+
+    kwargs = {"api_key": api_key, "timeout": config.get("timeout_seconds", 60)}
+    if provider.get("base_url"):
+        kwargs["base_url"] = provider["base_url"]
+
+    client = openai.OpenAI(**kwargs)
+
+    # Prepend system message to the messages array
+    api_messages = [{"role": "system", "content": system_prompt}] + messages
+
+    start = time.time()
+    response = client.chat.completions.create(
+        model=provider.get("model", "gpt-4o"),
+        max_tokens=provider.get("max_tokens", 4096),
+        temperature=provider.get("temperature", 0.3),
+        messages=api_messages,
+    )
+    elapsed = round(time.time() - start, 2)
+
+    choice = response.choices[0] if response.choices else None
+    text = choice.message.content if choice else ""
+    usage = {}
+    if response.usage:
+        usage = {
+            "input_tokens": response.usage.prompt_tokens,
+            "output_tokens": response.usage.completion_tokens,
+        }
+
+    return {
+        "text": text,
+        "provider_id": provider["id"],
+        "provider_name": provider["name"],
+        "model": response.model or provider.get("model"),
+        "usage": usage,
+        "elapsed_seconds": elapsed,
+    }
+
+
+def _call_claude_sdk_chat(provider: dict, system_prompt: str, messages: list[dict], config: dict) -> dict:
+    """Call Claude SDK by concatenating messages into a single prompt."""
+    # Concatenate all messages into a single user prompt for the request-response SDK
+    parts = []
+    for msg in messages:
+        role_label = msg["role"].upper()
+        parts.append(f"{role_label}: {msg['content']}")
+    combined_prompt = "\n\n".join(parts)
+
+    return _call_claude_sdk(provider, system_prompt, combined_prompt, config)
+
+
+# Map provider types to their chat functions
+_CHAT_CALL_MAP = {
+    "anthropic": _call_anthropic_chat,
+    "openai": _call_openai_chat,
+    "openai_compatible": _call_openai_chat,
+    "claude_sdk": _call_claude_sdk_chat,
 }
 
 
@@ -209,6 +430,81 @@ def call_ai(system_prompt: str, user_prompt: str, provider_id: Optional[str] = N
     raise RuntimeError(
         "All AI providers failed:\n" + "\n".join(f"  - {e}" for e in errors)
     )
+
+
+def call_ai_chat(messages: list[dict], system_prompt: str, provider_id: Optional[str] = None) -> dict:
+    """
+    Send a multi-turn conversation to an AI provider and return the response.
+
+    ``messages`` is a list of dicts with "role" and "content" keys.
+    If ``provider_id`` is given, only that provider is tried.
+    Otherwise, enabled providers are tried in priority order with failover.
+
+    Returns a dict with keys: text, provider_id, provider_name, model, usage, elapsed_seconds.
+    On total failure raises RuntimeError.
+    """
+    config = load_config()
+    failover = config.get("failover_enabled", True)
+    retries = config.get("retry_attempts", 2)
+
+    if provider_id:
+        matches = [p for p in config["providers"] if p["id"] == provider_id]
+        if not matches:
+            raise RuntimeError(f"Unknown provider: {provider_id}")
+        providers = matches
+    else:
+        providers = get_enabled_providers(config)
+        if not providers:
+            raise RuntimeError("No AI providers are enabled. Configure at least one in AI Settings.")
+
+    errors = []
+
+    for provider in providers:
+        call_fn = _CHAT_CALL_MAP.get(provider.get("type"))
+        if not call_fn:
+            errors.append(f"{provider['id']}: unsupported type '{provider.get('type')}'")
+            continue
+
+        for attempt in range(1, retries + 1):
+            try:
+                logger.info(
+                    "AI chat call: provider=%s model=%s attempt=%d/%d messages=%d",
+                    provider["id"], provider.get("model"), attempt, retries, len(messages),
+                )
+                result = call_fn(provider, system_prompt, messages, config)
+                return result
+            except Exception as exc:
+                msg = f"{provider['id']} attempt {attempt}: {exc}"
+                logger.warning(msg)
+                errors.append(msg)
+
+        if not failover:
+            break
+
+    raise RuntimeError(
+        "All AI providers failed:\n" + "\n".join(f"  - {e}" for e in errors)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Chat system prompt
+# ---------------------------------------------------------------------------
+
+CHAT_SYSTEM_PROMPT = """\
+You are a sports-betting data analyst assistant for BetStamp. You help users understand \
+odds data, analysis results, and betting opportunities.
+
+You have access to the pipeline results from the current session, which include:
+- Detection data: enriched odds with implied probabilities, vig calculations, and fair odds
+- Analysis data: cross-sportsbook analysis identifying best lines, arbitrage, outliers, efficiency, and stale lines
+- Brief data: actionable betting recommendations
+
+When pipeline context is provided, reference specific data points, game IDs, sportsbooks, \
+and numbers in your answers. Be precise and quantitative. If the user asks about something \
+not in the data, say so clearly.
+
+Keep responses concise but thorough. Use bullet points for lists of findings.
+"""
 
 
 # ---------------------------------------------------------------------------

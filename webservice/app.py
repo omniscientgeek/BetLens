@@ -4,6 +4,7 @@ eventlet.monkey_patch()
 import os
 import re
 import json
+import uuid
 import subprocess
 from datetime import datetime
 from flask import Flask, jsonify, request
@@ -16,6 +17,8 @@ from ai_service import (
     get_enabled_providers,
     run_analyze_phase,
     run_brief_phase,
+    call_ai_chat,
+    CHAT_SYSTEM_PROMPT,
 )
 
 app = Flask(__name__)
@@ -514,6 +517,119 @@ def test_ai_provider():
         return jsonify({"status": "ok", "response": result})
     except Exception as e:
         return jsonify({"status": "error", "error": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# In-memory Chat Conversation Store
+# ---------------------------------------------------------------------------
+
+# { conversation_id: { messages: [...], pipeline_context: {...}, created: str } }
+_chat_sessions = {}
+
+
+@app.route("/api/chat/sessions", methods=["GET"])
+def list_chat_sessions():
+    """Return a list of active chat sessions."""
+    sessions = []
+    for sid, session in _chat_sessions.items():
+        sessions.append({
+            "id": sid,
+            "message_count": len(session["messages"]),
+            "created": session["created"],
+            "has_pipeline_context": bool(session.get("pipeline_context")),
+        })
+    return jsonify({"sessions": sessions})
+
+
+@app.route("/api/chat/<conversation_id>", methods=["GET"])
+def get_chat_conversation(conversation_id):
+    """Return the full conversation history for a given ID."""
+    session = _chat_sessions.get(conversation_id)
+    if not session:
+        return jsonify({"error": "Conversation not found"}), 404
+    return jsonify({
+        "conversation_id": conversation_id,
+        "messages": session["messages"],
+        "created": session["created"],
+        "has_pipeline_context": bool(session.get("pipeline_context")),
+        "message_count": len(session["messages"]),
+    })
+
+
+@app.route("/api/chat/<conversation_id>", methods=["DELETE"])
+def delete_chat_conversation(conversation_id):
+    """Delete a conversation session."""
+    _chat_sessions.pop(conversation_id, None)
+    return jsonify({"status": "ok"})
+
+
+@app.route("/api/chat", methods=["POST"])
+def chat():
+    """Send a message to the AI chat and get a response with conversation memory."""
+    data = request.get_json() or {}
+    message = data.get("message", "").strip()
+    if not message:
+        return jsonify({"error": "message is required"}), 400
+
+    conversation_id = data.get("conversation_id") or uuid.uuid4().hex[:12]
+    pipeline_context = data.get("pipeline_context")
+
+    # Get or create session
+    if conversation_id in _chat_sessions:
+        session = _chat_sessions[conversation_id]
+    else:
+        session = {
+            "messages": [],
+            "pipeline_context": None,
+            "created": datetime.now().isoformat(),
+        }
+        _chat_sessions[conversation_id] = session
+
+    # Update pipeline context if provided
+    if pipeline_context:
+        session["pipeline_context"] = pipeline_context
+
+    # Build system prompt with optional pipeline context
+    system_prompt = CHAT_SYSTEM_PROMPT
+    if session.get("pipeline_context"):
+        context_str = json.dumps(session["pipeline_context"], indent=2)
+        # Truncate to 20KB
+        if len(context_str) > 20480:
+            context_str = context_str[:20480] + "\n... (truncated)"
+        system_prompt += (
+            "\n\n=== PIPELINE CONTEXT ===\n"
+            + context_str
+        )
+
+    # Append user message
+    session["messages"].append({"role": "user", "content": message})
+
+    try:
+        result = call_ai_chat(
+            messages=session["messages"],
+            system_prompt=system_prompt,
+        )
+
+        # Append assistant response
+        session["messages"].append({"role": "assistant", "content": result["text"]})
+
+        return jsonify({
+            "conversation_id": conversation_id,
+            "response": {
+                "text": result["text"],
+                "ai_meta": {
+                    "provider": result["provider_name"],
+                    "model": result["model"],
+                    "usage": result["usage"],
+                    "elapsed_seconds": result["elapsed_seconds"],
+                },
+            },
+            "message_count": len(session["messages"]),
+        })
+    except Exception as e:
+        # Remove the user message we just added since the call failed
+        session["messages"].pop()
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":

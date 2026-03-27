@@ -1,0 +1,9 @@
+{
+  "name": "betstamp-claude-sdk",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Claude Agent SDK bridge for BetStamp AI pipeline",
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.76"
+  }
+}

@@ -34,6 +34,16 @@
       "temperature": 0.3
     },
     {
+      "id": "claude-sdk",
+      "name": "Claude Code SDK",
+      "type": "claude_sdk",
+      "model": "claude-sonnet-4-20250514",
+      "enabled": false,
+      "priority": 4,
+      "max_tokens": 4096,
+      "temperature": 0.3
+    },
+    {
       "id": "custom",
       "name": "Custom Endpoint",
       "type": "openai_compatible",
