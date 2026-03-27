@@ -29,6 +29,7 @@ from ai_service import (
     call_ai_chat,
     CHAT_SYSTEM_PROMPT,
 )
+from verification_agents import run_verification
 
 # ---------------------------------------------------------------------------
 # FastAPI + Socket.IO (async) setup
@@ -149,6 +150,36 @@ async def run_processing_pipeline(filename, sid):
                     run_logger.info("Phase %d: %s completed in %.2fs", i, phase["name"], elapsed)
                     logger.info("PIPELINE Phase %d: %s completed in %.2fs", i, phase["name"], elapsed)
                     await _emit_phase(sid, filename, phase, i, "complete", result=brief, run_id=run_id)
+
+                    # --- Verification: run 3 agents in parallel to double-check the brief ---
+                    try:
+                        run_logger.info("Starting verification agents for brief...")
+                        source_data = json.dumps({
+                            "detect": pipeline_results.get("detect", {}),
+                            "analyze": pipeline_results.get("analyze", {}),
+                        }, indent=2)[:20000]
+
+                        verification = await run_verification(
+                            text_to_verify=brief["brief_text"],
+                            source_data=source_data,
+                            run_logger=run_logger,
+                        )
+                        brief["verification"] = verification
+                        pipeline_results["brief"] = brief
+
+                        await sio.emit("verification_update", {
+                            "filename": filename,
+                            "verification": verification,
+                            "run_id": run_id,
+                        }, to=sid)
+                        run_logger.info(
+                            "Verification complete: overall=%s elapsed=%.2fs",
+                            verification["overall_verdict"],
+                            verification["elapsed_seconds"],
+                        )
+                    except Exception as vex:
+                        run_logger.error("Verification FAILED (non-blocking): %s", vex)
+                        logger.error("PIPELINE Verification FAILED: %s", vex)
                 except Exception as exc:
                     run_logger.error("Brief phase FAILED: %s", exc)
                     logger.error("PIPELINE Brief phase FAILED: %s", exc)
@@ -741,6 +772,27 @@ async def chat(request: Request):
         run_logger.info("CHAT complete: provider=%s model=%s elapsed=%.2fs",
                         result["provider_name"], result["model"], result["elapsed_seconds"])
 
+        # --- Verification: run 3 agents in parallel to double-check the response ---
+        verification = None
+        try:
+            source_data = ""
+            if session.get("pipeline_context"):
+                source_data = json.dumps(session["pipeline_context"], indent=2)[:10000]
+
+            verification = await run_verification(
+                text_to_verify=result["text"],
+                source_data=source_data,
+                run_logger=run_logger,
+            )
+            run_logger.info(
+                "CHAT verification complete: overall=%s elapsed=%.2fs",
+                verification["overall_verdict"],
+                verification["elapsed_seconds"],
+            )
+        except Exception as vex:
+            run_logger.error("CHAT verification FAILED (non-blocking): %s", vex)
+            logger.error("Chat verification FAILED: %s", vex)
+
         # Set session cookie so subsequent requests are tied to this user
         response = JSONResponse({
             "conversation_id": conversation_id,
@@ -753,6 +805,7 @@ async def chat(request: Request):
                     "usage": result["usage"],
                     "elapsed_seconds": result["elapsed_seconds"],
                 },
+                "verification": verification,
             },
             "message_count": len(session["messages"]),
         })

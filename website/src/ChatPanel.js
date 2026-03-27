@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
+import { VerificationBadge } from "./BriefPanel";
 
 const API_BASE = "";
 
@@ -220,6 +221,7 @@ function ChatPanel({ pipelineResults, debugMode }) {
         content: typeof responseText === "string" ? responseText : JSON.stringify(responseText),
         timestamp: new Date(),
         run_id: data.run_id || null,
+        verification: data.response?.verification || null,
       };
       setMessages((prev) => [...prev, assistantMsg]);
     } catch (err) {
@@ -289,6 +291,9 @@ function ChatPanel({ pipelineResults, debugMode }) {
                   ? renderMarkdown(msg.content)
                   : msg.content}
               </div>
+              {msg.role === "assistant" && msg.verification && (
+                <VerificationBadge verification={msg.verification} />
+              )}
               <div className="chat-msg-meta">
                 <span className="chat-msg-time">{formatTime(msg.timestamp)}</span>
                 {debugMode && msg.run_id && (

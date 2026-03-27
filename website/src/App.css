@@ -2075,3 +2075,181 @@
   margin-left: 8px;
   font-weight: normal;
 }
+
+/* ================================================================== */
+/*  Verification Badges                                                */
+/* ================================================================== */
+
+.vb-container {
+  margin: 8px 0;
+  border-radius: 8px;
+  border: 1px solid #e0e0e0;
+  overflow: hidden;
+  font-size: 0.85rem;
+}
+
+.vb-container.vb--pass  { border-color: #4caf50; background: #f1f8e9; }
+.vb-container.vb--warn  { border-color: #ff9800; background: #fff8e1; }
+.vb-container.vb--fail  { border-color: #f44336; background: #ffebee; }
+.vb-container.vb--error { border-color: #9e9e9e; background: #fafafa; }
+
+.vb-summary-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: #333;
+  text-align: left;
+}
+
+.vb-summary-btn:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+.vb-icon {
+  font-size: 1.1rem;
+}
+
+.vb-label {
+  font-weight: 600;
+}
+
+.vb-agents-mini {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.vb-agent-dot {
+  font-size: 0.8rem;
+}
+
+.vb-elapsed {
+  color: #888;
+  font-size: 0.75rem;
+}
+
+.vb-chevron {
+  color: #888;
+  font-size: 0.65rem;
+  transition: transform 0.2s;
+}
+
+.vb-chevron--open {
+  transform: rotate(180deg);
+}
+
+/* --- Expanded details panel --- */
+
+.vb-details {
+  border-top: 1px solid rgba(0, 0, 0, 0.08);
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.vb-agent {
+  border-radius: 6px;
+  padding: 10px;
+  border: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.vb-agent.vb--pass  { background: #e8f5e9; }
+.vb-agent.vb--warn  { background: #fff3e0; }
+.vb-agent.vb--fail  { background: #fce4ec; }
+.vb-agent.vb--error { background: #f5f5f5; }
+
+.vb-agent-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.vb-agent-icon {
+  font-size: 1rem;
+}
+
+.vb-agent-name {
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+
+.vb-agent-verdict {
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.08);
+}
+
+.vb-agent-confidence {
+  font-size: 0.7rem;
+  color: #666;
+  margin-left: auto;
+}
+
+.vb-agent-summary {
+  margin: 4px 0 0;
+  font-size: 0.8rem;
+  color: #444;
+  line-height: 1.4;
+}
+
+.vb-issues {
+  list-style: none;
+  padding: 0;
+  margin: 6px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.vb-issue {
+  display: flex;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.vb-issue--error   { background: rgba(244, 67, 54, 0.08); }
+.vb-issue--warning { background: rgba(255, 152, 0, 0.08); }
+.vb-issue--info    { background: rgba(33, 150, 243, 0.06); }
+
+.vb-issue-severity {
+  flex-shrink: 0;
+  font-size: 0.85rem;
+}
+
+.vb-issue-claim {
+  display: block;
+  font-size: 0.78rem;
+  margin-bottom: 2px;
+}
+
+.vb-issue-finding {
+  display: block;
+  color: #555;
+  font-size: 0.75rem;
+}
+
+.vb-agent-meta {
+  margin-top: 6px;
+  font-size: 0.7rem;
+  color: #888;
+}
+
+/* Verification badge inside chat messages */
+.chat-msg--assistant .vb-container {
+  margin-top: 8px;
+  font-size: 0.8rem;
+}

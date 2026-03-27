@@ -155,6 +155,16 @@ function BetLens() {
       }
     });
 
+    // Receive verification results (arrives after brief phase, before processing_complete)
+    socket.on("verification_update", (data) => {
+      if (data.verification) {
+        setPhaseResults((prev) => ({
+          ...prev,
+          brief: { ...prev.brief, verification: data.verification },
+        }));
+      }
+    });
+
     socket.on("processing_complete", (data) => {
       if (data.run_id) setRunId(data.run_id);
       setPipelineComplete(true);

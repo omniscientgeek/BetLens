@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 
 /* ------------------------------------------------------------------ */
 /*  Section heading icons based on content                             */
@@ -197,14 +197,114 @@ function renderBriefMarkdown(text) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Verification Badge — shows agent verification status                */
+/* ------------------------------------------------------------------ */
+
+const VERDICT_CONFIG = {
+  pass:  { icon: "\u2705", label: "Verified",   className: "vb--pass"  },
+  warn:  { icon: "\u26A0\uFE0F", label: "Warnings",  className: "vb--warn"  },
+  fail:  { icon: "\u274C", label: "Issues",     className: "vb--fail"  },
+  error: { icon: "\u2753", label: "Error",      className: "vb--error" },
+};
+
+const AGENT_LABELS = {
+  reasoning: "Reasoning",
+  factual:   "Fact Check",
+  betting:   "Bet Quality",
+};
+
+function VerificationBadge({ verification }) {
+  const [expanded, setExpanded] = useState(false);
+
+  if (!verification) return null;
+
+  const { overall_verdict, agents, elapsed_seconds } = verification;
+  const cfg = VERDICT_CONFIG[overall_verdict] || VERDICT_CONFIG.error;
+
+  return (
+    <div className={`vb-container ${cfg.className}`}>
+      <button
+        className="vb-summary-btn"
+        onClick={() => setExpanded(!expanded)}
+        title="Click to expand verification details"
+      >
+        <span className="vb-icon">{cfg.icon}</span>
+        <span className="vb-label">{cfg.label}</span>
+        <span className="vb-agents-mini">
+          {agents && Object.entries(agents).map(([name, a]) => {
+            const ac = VERDICT_CONFIG[a.verdict] || VERDICT_CONFIG.error;
+            return (
+              <span key={name} className="vb-agent-dot" title={`${AGENT_LABELS[name]}: ${a.verdict}`}>
+                {ac.icon}
+              </span>
+            );
+          })}
+        </span>
+        {elapsed_seconds != null && (
+          <span className="vb-elapsed">{elapsed_seconds.toFixed(1)}s</span>
+        )}
+        <span className={`vb-chevron ${expanded ? "vb-chevron--open" : ""}`}>{"\u25BC"}</span>
+      </button>
+
+      {expanded && agents && (
+        <div className="vb-details">
+          {Object.entries(agents).map(([name, agent]) => {
+            const ac = VERDICT_CONFIG[agent.verdict] || VERDICT_CONFIG.error;
+            return (
+              <div key={name} className={`vb-agent ${ac.className}`}>
+                <div className="vb-agent-header">
+                  <span className="vb-agent-icon">{ac.icon}</span>
+                  <span className="vb-agent-name">{AGENT_LABELS[name] || name}</span>
+                  <span className="vb-agent-verdict">{agent.verdict.toUpperCase()}</span>
+                  {agent.confidence != null && (
+                    <span className="vb-agent-confidence">
+                      {(agent.confidence * 100).toFixed(0)}% confidence
+                    </span>
+                  )}
+                </div>
+                {agent.summary && (
+                  <p className="vb-agent-summary">{agent.summary}</p>
+                )}
+                {agent.issues && agent.issues.length > 0 && (
+                  <ul className="vb-issues">
+                    {agent.issues.map((issue, idx) => (
+                      <li key={idx} className={`vb-issue vb-issue--${issue.severity}`}>
+                        <span className="vb-issue-severity">
+                          {issue.severity === "error" ? "\u274C" : issue.severity === "warning" ? "\u26A0\uFE0F" : "\u2139\uFE0F"}
+                        </span>
+                        <div>
+                          <strong className="vb-issue-claim">{issue.claim}</strong>
+                          <span className="vb-issue-finding">{issue.finding}</span>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {agent.ai_meta && (
+                  <div className="vb-agent-meta">
+                    {agent.ai_meta.provider} &middot; {agent.ai_meta.model} &middot; {agent.ai_meta.elapsed_seconds?.toFixed(1)}s
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /*  BriefPanel component                                               */
 /* ------------------------------------------------------------------ */
 
 export default function BriefPanel({ briefResult, isInterim = false }) {
-  if (!briefResult || !briefResult.brief_text) return null;
-
-  const { brief_text, generated_at, ai_meta } = briefResult;
   const bodyRef = useRef(null);
+
+  const brief_text = briefResult?.brief_text || null;
+  const generated_at = briefResult?.generated_at;
+  const ai_meta = briefResult?.ai_meta;
+  const verification = briefResult?.verification;
 
   // Auto-scroll to bottom as streaming content arrives
   useEffect(() => {
@@ -217,6 +317,8 @@ export default function BriefPanel({ briefResult, isInterim = false }) {
       }
     }
   }, [brief_text, isInterim]);
+
+  if (!brief_text) return null;
 
   const fmtDate = generated_at
     ? new Date(generated_at).toLocaleString()
@@ -254,6 +356,11 @@ export default function BriefPanel({ briefResult, isInterim = false }) {
         )}
       </div>
 
+      {/* Verification badges — shown when brief is complete (not during streaming) */}
+      {!isInterim && verification && (
+        <VerificationBadge verification={verification} />
+      )}
+
       {/* Brief text body */}
       <div className="bp-body" ref={bodyRef}>
         <div className="bp-content">
@@ -264,3 +371,5 @@ export default function BriefPanel({ briefResult, isInterim = false }) {
     </div>
   );
 }
+
+export { VerificationBadge };
