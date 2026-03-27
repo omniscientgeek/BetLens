@@ -237,7 +237,7 @@ function BetLens() {
                 )}
                 <div className={`pipeline-step pipeline-step--${status}`}>
                   <div className="pipeline-step-indicator">
-                    {status === "complete" ? "\u2713" : idx + 1}
+                    {status === "complete" ? "\u2713" : status === "error" ? "\u2717" : idx + 1}
                   </div>
                   <span className="pipeline-step-label">
                     {PHASE_LABELS[phaseName]}
@@ -267,7 +267,13 @@ function BetLens() {
       {pipelineComplete && (
         <>
           <div className="pipeline-done">Processing complete</div>
-          {pipelineResults?.brief && (
+          {pipelineResults?.brief?.error && (
+            <div className="error">Brief generation failed: {pipelineResults.brief.error}</div>
+          )}
+          {pipelineResults?.analyze?.error && (
+            <div className="error">Analysis failed: {pipelineResults.analyze.error}</div>
+          )}
+          {pipelineResults?.brief && !pipelineResults.brief.error && (
             <BriefPanel briefResult={pipelineResults.brief} />
           )}
         </>
@@ -291,7 +297,20 @@ function BetLens() {
   );
 }
 
+const PAGE_TITLES = {
+  "/": "BetLens",
+  "/devnotes": "Dev Notes",
+  "/ai-settings": "AI Settings",
+};
+
 function AppContent() {
+  const location = useLocation();
+
+  useEffect(() => {
+    const pageName = PAGE_TITLES[location.pathname] || "Bet Stamp";
+    document.title = `${pageName} — Bet Stamp`;
+  }, [location.pathname]);
+
   return (
     <div className="App">
       <header className="App-header">
