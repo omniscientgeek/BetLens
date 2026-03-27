@@ -14,6 +14,8 @@ import sys
 import os
 import json
 from datetime import datetime, timezone
+from math import sqrt
+from statistics import pstdev
 from typing import Optional
 
 # Allow imports from sibling webservice/ directory
@@ -50,6 +52,7 @@ class _OddsCache:
         self._mtime: dict[str, float] = {}              # filepath -> os.path.getmtime
         self._enriched: dict[str, list[dict]] = {}      # filepath -> enriched odds
         self._by_game: dict[str, dict] = {}             # filepath -> grouped by game_id
+        self._consensus: dict[str, dict] = {}           # filepath -> {game_id: {market: consensus}}
         self._analysis: dict[str, dict] = {}            # (filepath, tool_key) -> result
 
     def _resolve(self, filename: Optional[str] = None) -> str:
@@ -76,6 +79,7 @@ class _OddsCache:
         self._mtime.pop(filepath, None)
         self._enriched.pop(filepath, None)
         self._by_game.pop(filepath, None)
+        self._consensus.pop(filepath, None)
         # Clear analysis entries for this filepath
         keys_to_drop = [k for k in self._analysis if k[0] == filepath]
         for k in keys_to_drop:
@@ -95,14 +99,23 @@ class _OddsCache:
         return self._raw[filepath]
 
     def load_enriched(self, filename: Optional[str] = None) -> list[dict]:
-        """Return enriched odds (with vig/prob/fair odds), cached."""
+        """Return enriched odds (with vig/prob/fair odds + consensus), cached."""
         filepath = self._resolve(filename)
         if not filepath:
             return []
         # Ensure raw is loaded first (triggers invalidation if needed)
         raw = self.load_odds(filename)
         if filepath not in self._enriched:
-            self._enriched[filepath] = [_enrich_record(r) for r in raw]
+            enriched = [_enrich_record(r) for r in raw]
+            # Attach consensus (market average) data to each record
+            consensus = self.load_consensus(filename)
+            for record in enriched:
+                game_id = record.get("game_id", "unknown")
+                game_consensus = consensus.get(game_id, {})
+                for market_name, market in record.get("markets", {}).items():
+                    if market_name in game_consensus:
+                        market["consensus"] = game_consensus[market_name]
+            self._enriched[filepath] = enriched
         return self._enriched[filepath]
 
     def load_by_game(self, filename: Optional[str] = None) -> dict[str, list[dict]]:
@@ -114,6 +127,20 @@ class _OddsCache:
         if filepath not in self._by_game:
             self._by_game[filepath] = _group_by_game(raw)
         return self._by_game[filepath]
+
+    def load_consensus(self, filename: Optional[str] = None) -> dict[str, dict]:
+        """Return consensus (market average) data per game per market, cached.
+
+        Structure: {game_id: {market_type: {field: avg_value, ...}}}
+        For each game & market, averages the line and odds across all sportsbooks.
+        """
+        filepath = self._resolve(filename)
+        if not filepath:
+            return {}
+        by_game = self.load_by_game(filename)
+        if filepath not in self._consensus:
+            self._consensus[filepath] = _compute_consensus(by_game)
+        return self._consensus[filepath]
 
     def get_analysis(self, filename: Optional[str], key: str) -> Optional[dict]:
         """Retrieve a cached analysis result (e.g. vig, arb, ev)."""
@@ -190,6 +217,79 @@ def _group_by_game(odds: list[dict]) -> dict[str, list[dict]]:
         gid = record.get("game_id", "unknown")
         games.setdefault(gid, []).append(record)
     return games
+
+
+def _compute_consensus(by_game: dict[str, list[dict]]) -> dict[str, dict]:
+    """Compute consensus (market average) line and odds across all sportsbooks per game & market.
+
+    Returns: {game_id: {market_type: {field: avg, ...}, ...}, ...}
+    """
+    consensus: dict[str, dict] = {}
+
+    for game_id, records in by_game.items():
+        game_consensus: dict[str, dict] = {}
+
+        # --- Spread ---
+        spread_data = [
+            r["markets"]["spread"]
+            for r in records
+            if "spread" in r.get("markets", {})
+        ]
+        if spread_data:
+            home_lines = [s["home_line"] for s in spread_data if "home_line" in s]
+            home_odds  = [s["home_odds"] for s in spread_data if "home_odds" in s]
+            away_odds  = [s["away_odds"] for s in spread_data if "away_odds" in s]
+            game_consensus["spread"] = {
+                "avg_home_line": round(sum(home_lines) / len(home_lines), 2) if home_lines else None,
+                "avg_away_line": round(-sum(home_lines) / len(home_lines), 2) if home_lines else None,
+                "avg_home_odds": round(sum(home_odds) / len(home_odds), 1) if home_odds else None,
+                "avg_away_odds": round(sum(away_odds) / len(away_odds), 1) if away_odds else None,
+                "std_home_line": round(pstdev(home_lines), 3) if len(home_lines) > 1 else 0.0,
+                "std_home_odds": round(pstdev(home_odds), 2) if len(home_odds) > 1 else 0.0,
+                "std_away_odds": round(pstdev(away_odds), 2) if len(away_odds) > 1 else 0.0,
+                "book_count": len(spread_data),
+            }
+
+        # --- Moneyline ---
+        ml_data = [
+            r["markets"]["moneyline"]
+            for r in records
+            if "moneyline" in r.get("markets", {})
+        ]
+        if ml_data:
+            home_odds = [m["home_odds"] for m in ml_data if "home_odds" in m]
+            away_odds = [m["away_odds"] for m in ml_data if "away_odds" in m]
+            game_consensus["moneyline"] = {
+                "avg_home_odds": round(sum(home_odds) / len(home_odds), 1) if home_odds else None,
+                "avg_away_odds": round(sum(away_odds) / len(away_odds), 1) if away_odds else None,
+                "std_home_odds": round(pstdev(home_odds), 2) if len(home_odds) > 1 else 0.0,
+                "std_away_odds": round(pstdev(away_odds), 2) if len(away_odds) > 1 else 0.0,
+                "book_count": len(ml_data),
+            }
+
+        # --- Total ---
+        total_data = [
+            r["markets"]["total"]
+            for r in records
+            if "total" in r.get("markets", {})
+        ]
+        if total_data:
+            lines      = [t["line"] for t in total_data if "line" in t]
+            over_odds  = [t["over_odds"] for t in total_data if "over_odds" in t]
+            under_odds = [t["under_odds"] for t in total_data if "under_odds" in t]
+            game_consensus["total"] = {
+                "avg_line": round(sum(lines) / len(lines), 2) if lines else None,
+                "avg_over_odds": round(sum(over_odds) / len(over_odds), 1) if over_odds else None,
+                "avg_under_odds": round(sum(under_odds) / len(under_odds), 1) if under_odds else None,
+                "std_line": round(pstdev(lines), 3) if len(lines) > 1 else 0.0,
+                "std_over_odds": round(pstdev(over_odds), 2) if len(over_odds) > 1 else 0.0,
+                "std_under_odds": round(pstdev(under_odds), 2) if len(under_odds) > 1 else 0.0,
+                "book_count": len(total_data),
+            }
+
+        consensus[game_id] = game_consensus
+
+    return consensus
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -485,6 +585,98 @@ def get_vig_analysis(game_id: Optional[str] = None, filename: Optional[str] = No
         "best_book": book_rankings[0] if book_rankings else None,
         "worst_book": book_rankings[-1] if book_rankings else None,
         "context": f"Tightest margins: {book_rankings[0]['sportsbook']} ({book_rankings[0]['average_vig_pct']} avg vig). Widest: {book_rankings[-1]['sportsbook']} ({book_rankings[-1]['average_vig_pct']})." if book_rankings else "No data",
+    }
+    _cache.set_analysis(filename, cache_key, result)
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+def get_hold_percentage(filename: Optional[str] = None) -> str:
+    """Calculate hold percentage by sportsbook - the overall margin a book keeps.
+
+    Hold percentage measures how much a sportsbook retains from every dollar
+    wagered. Lower hold = fairer pricing for bettors. Broken down by market
+    type (spread, moneyline, total) and aggregated into an overall hold.
+
+    Hold pct per market = (sum of implied probabilities for both sides - 1) x 100.
+    Sportsbook hold = average hold across all markets offered by that book.
+
+    Args:
+        filename: Data file to load. Optional.
+
+    Returns per-sportsbook hold percentages ranked from lowest (best) to highest.
+    """
+    cache_key = "hold_percentage"
+    cached = _cache.get_analysis(filename, cache_key)
+    if cached is not None:
+        return json.dumps(cached, indent=2)
+
+    enriched = _cache.load_enriched(filename)
+    if not enriched:
+        return json.dumps({"error": "No odds data found"})
+
+    # Collect vig (= hold) per sportsbook per market type
+    book_holds: dict[str, dict[str, list[float]]] = {}
+
+    for record in enriched:
+        book = record["sportsbook"]
+        if book not in book_holds:
+            book_holds[book] = {"spread": [], "moneyline": [], "total": [], "_all": []}
+
+        for market_name, market in record.get("markets", {}).items():
+            hold_val = market.get("vig", 0)
+            if market_name in book_holds[book]:
+                book_holds[book][market_name].append(hold_val)
+            book_holds[book]["_all"].append(hold_val)
+
+    # Build per-sportsbook hold report
+    hold_report = []
+    for book, markets in book_holds.items():
+        all_holds = markets["_all"]
+        if not all_holds:
+            continue
+
+        overall_hold = sum(all_holds) / len(all_holds)
+
+        entry = {
+            "sportsbook": book,
+            "overall_hold_pct": f"{round(overall_hold * 100, 2)}%",
+            "overall_hold_raw": round(overall_hold, 6),
+            "markets_sampled": len(all_holds),
+            "by_market": {},
+        }
+
+        for mkt in ("spread", "moneyline", "total"):
+            vals = markets.get(mkt, [])
+            if vals:
+                avg = sum(vals) / len(vals)
+                entry["by_market"][mkt] = {
+                    "hold_pct": f"{round(avg * 100, 2)}%",
+                    "hold_raw": round(avg, 6),
+                    "sample_count": len(vals),
+                    "min_hold_pct": f"{round(min(vals) * 100, 2)}%",
+                    "max_hold_pct": f"{round(max(vals) * 100, 2)}%",
+                }
+
+        hold_report.append(entry)
+
+    hold_report.sort(key=lambda x: x["overall_hold_raw"])
+
+    all_holds_flat = [h["overall_hold_raw"] for h in hold_report]
+    avg_market_hold = sum(all_holds_flat) / len(all_holds_flat) if all_holds_flat else 0
+
+    result = {
+        "hold_by_sportsbook": hold_report,
+        "lowest_hold": hold_report[0] if hold_report else None,
+        "highest_hold": hold_report[-1] if hold_report else None,
+        "market_average_hold_pct": f"{round(avg_market_hold * 100, 2)}%",
+        "book_count": len(hold_report),
+        "context": (
+            f"Hold % ranks sportsbooks by how much margin they keep. "
+            f"Lowest hold: {hold_report[0]['sportsbook']} ({hold_report[0]['overall_hold_pct']}). "
+            f"Highest hold: {hold_report[-1]['sportsbook']} ({hold_report[-1]['overall_hold_pct']}). "
+            f"Market average: {round(avg_market_hold * 100, 2)}%."
+        ) if hold_report else "No data",
     }
     _cache.set_analysis(filename, cache_key, result)
     return json.dumps(result, indent=2)
@@ -793,12 +985,72 @@ def detect_line_outliers(filename: Optional[str] = None, threshold_odds: int = 1
                             "context": f"OUTLIER: {v['sportsbook']} {side} {market_type} at {v['odds']} (avg {round(avg,1)}, dev {round(deviation,1)}). {'Potential value!' if v['odds'] > avg else 'Avoid — worse than market.'}",
                         })
 
+    # Also check for LINE outliers (spread line / total line deviations)
+    for game_id, records in games.items():
+        first = records[0]
+
+        # Spread line outliers
+        spread_entries = []
+        for r in records:
+            spread = r.get("markets", {}).get("spread", {})
+            if "home_line" in spread:
+                spread_entries.append({"sportsbook": r["sportsbook"], "home_line": spread["home_line"], "last_updated": r.get("last_updated")})
+        if len(spread_entries) >= 3:
+            lines = [e["home_line"] for e in spread_entries]
+            avg_line = sum(lines) / len(lines)
+            for e in spread_entries:
+                line_dev = abs(e["home_line"] - avg_line)
+                if line_dev >= 1.0:
+                    outliers.append({
+                        "game_id": game_id,
+                        "sport": first.get("sport"),
+                        "home_team": first.get("home_team"),
+                        "away_team": first.get("away_team"),
+                        "market_type": "spread",
+                        "type": "line_outlier",
+                        "sportsbook": e["sportsbook"],
+                        "line": e["home_line"],
+                        "consensus_line": round(avg_line, 1),
+                        "deviation": round(line_dev, 1),
+                        "last_updated": e.get("last_updated"),
+                        "context": f"LINE OUTLIER: {e['sportsbook']} spread {e['home_line']} vs consensus {round(avg_line, 1)} (dev {round(line_dev, 1)} pts)",
+                    })
+
+        # Total line outliers
+        total_entries = []
+        for r in records:
+            total = r.get("markets", {}).get("total", {})
+            if "line" in total:
+                total_entries.append({"sportsbook": r["sportsbook"], "line": total["line"], "last_updated": r.get("last_updated")})
+        if len(total_entries) >= 3:
+            lines = [e["line"] for e in total_entries]
+            avg_line = sum(lines) / len(lines)
+            for e in total_entries:
+                line_dev = abs(e["line"] - avg_line)
+                if line_dev >= 1.0:
+                    outliers.append({
+                        "game_id": game_id,
+                        "sport": first.get("sport"),
+                        "home_team": first.get("home_team"),
+                        "away_team": first.get("away_team"),
+                        "market_type": "total",
+                        "type": "line_outlier",
+                        "sportsbook": e["sportsbook"],
+                        "line": e["line"],
+                        "consensus_line": round(avg_line, 1),
+                        "deviation": round(line_dev, 1),
+                        "last_updated": e.get("last_updated"),
+                        "context": f"LINE OUTLIER: {e['sportsbook']} total {e['line']} vs consensus {round(avg_line, 1)} (dev {round(line_dev, 1)} pts)",
+                    })
+
     outliers.sort(key=lambda o: o["deviation"], reverse=True)
     result = {
         "outliers": outliers,
         "count": len(outliers),
         "threshold": threshold_odds,
-        "context": f"Found {len(outliers)} outlier lines (>{threshold_odds} pts from consensus)." + (f" Biggest: {outliers[0]['context']}" if outliers else ""),
+        "odds_outliers": len([o for o in outliers if o.get("type") != "line_outlier"]),
+        "line_outliers": len([o for o in outliers if o.get("type") == "line_outlier"]),
+        "context": f"Found {len(outliers)} outlier lines (>{threshold_odds} pts from consensus for odds, >=1 pt for lines)." + (f" Biggest: {outliers[0]['context']}" if outliers else ""),
     }
     _cache.set_analysis(filename, cache_key, result)
     return json.dumps(result, indent=2)
@@ -807,6 +1059,109 @@ def detect_line_outliers(filename: Optional[str] = None, threshold_odds: int = 1
 # ═══════════════════════════════════════════════════════════════════════════
 # TOOLS — Aggregation / Summary
 # ═══════════════════════════════════════════════════════════════════════════
+
+
+@mcp.tool()
+def get_fair_odds(game_id: Optional[str] = None, filename: Optional[str] = None) -> str:
+    """Get the consensus no-vig "fair" odds for each game and market.
+
+    Removes the vig from each sportsbook's odds, then averages across all
+    books to produce a consensus true probability baseline. Useful for
+    comparing any single book's line against the market-implied fair price.
+
+    Args:
+        game_id: Filter to a specific game. Optional (shows all games).
+        filename: Data file to load. Optional.
+
+    Returns consensus fair probabilities and fair American odds per game per market.
+    """
+    cache_key = f"fair_odds:{game_id or 'all'}"
+    cached = _cache.get_analysis(filename, cache_key)
+    if cached is not None:
+        return json.dumps(cached, indent=2)
+
+    enriched = _cache.load_enriched(filename)
+    if game_id:
+        enriched = [r for r in enriched if r.get("game_id") == game_id]
+    games = _group_by_game(enriched)
+
+    fair_odds_list = []
+    for gid, records in games.items():
+        first = records[0]
+        game_entry = {
+            "game_id": gid,
+            "sport": first.get("sport"),
+            "home_team": first.get("home_team"),
+            "away_team": first.get("away_team"),
+            "markets": {},
+        }
+
+        for market_type in ("spread", "moneyline", "total"):
+            market_records = [r["markets"][market_type] for r in records if market_type in r.get("markets", {})]
+            if not market_records:
+                continue
+
+            if market_type in ("spread", "moneyline"):
+                # Collect fair probs from each book's enriched data
+                home_fair_probs = [m.get("home_implied_prob", 0) for m in market_records]
+                away_fair_probs = [m.get("away_implied_prob", 0) for m in market_records]
+                home_vigs = [m.get("vig", 0) for m in market_records]
+
+                # Average raw implied probs, then normalize to remove vig
+                avg_home = sum(home_fair_probs) / len(home_fair_probs)
+                avg_away = sum(away_fair_probs) / len(away_fair_probs)
+                total_prob = avg_home + avg_away
+                fair_home = avg_home / total_prob if total_prob else 0.5
+                fair_away = avg_away / total_prob if total_prob else 0.5
+
+                market_entry = {
+                    "home_fair_prob": round(fair_home, 6),
+                    "away_fair_prob": round(fair_away, 6),
+                    "home_fair_prob_pct": f"{round(fair_home * 100, 2)}%",
+                    "away_fair_prob_pct": f"{round(fair_away * 100, 2)}%",
+                    "home_fair_odds": fair_odds_to_american(fair_home),
+                    "away_fair_odds": fair_odds_to_american(fair_away),
+                    "avg_vig": round(sum(home_vigs) / len(home_vigs), 6) if home_vigs else 0,
+                    "books_sampled": len(market_records),
+                }
+                if market_type == "spread":
+                    lines = [m.get("home_line", 0) for m in market_records]
+                    market_entry["consensus_line"] = round(sum(lines) / len(lines), 1)
+
+                game_entry["markets"][market_type] = market_entry
+            else:
+                over_probs = [m.get("over_implied_prob", 0) for m in market_records]
+                under_probs = [m.get("under_implied_prob", 0) for m in market_records]
+                total_vigs = [m.get("vig", 0) for m in market_records]
+
+                avg_over = sum(over_probs) / len(over_probs)
+                avg_under = sum(under_probs) / len(under_probs)
+                total_prob = avg_over + avg_under
+                fair_over = avg_over / total_prob if total_prob else 0.5
+                fair_under = avg_under / total_prob if total_prob else 0.5
+
+                lines = [m.get("line", 0) for m in market_records]
+                game_entry["markets"]["total"] = {
+                    "consensus_line": round(sum(lines) / len(lines), 1),
+                    "over_fair_prob": round(fair_over, 6),
+                    "under_fair_prob": round(fair_under, 6),
+                    "over_fair_prob_pct": f"{round(fair_over * 100, 2)}%",
+                    "under_fair_prob_pct": f"{round(fair_under * 100, 2)}%",
+                    "over_fair_odds": fair_odds_to_american(fair_over),
+                    "under_fair_odds": fair_odds_to_american(fair_under),
+                    "avg_vig": round(sum(total_vigs) / len(total_vigs), 6) if total_vigs else 0,
+                    "books_sampled": len(market_records),
+                }
+
+        fair_odds_list.append(game_entry)
+
+    result = {
+        "games": fair_odds_list,
+        "count": len(fair_odds_list),
+        "context": f"Consensus fair (no-vig) odds for {len(fair_odds_list)} games. Compare individual book lines against these baselines to find value.",
+    }
+    _cache.set_analysis(filename, cache_key, result)
+    return json.dumps(result, indent=2)
 
 
 @mcp.tool()
@@ -820,6 +1175,7 @@ def get_market_summary(filename: Optional[str] = None) -> str:
     - Arbitrage opportunities
     - Stale lines
     - Biggest outliers
+    - Power rankings (market-implied team strength)
 
     Args:
         filename: Data file to load. Optional.
@@ -848,6 +1204,11 @@ def get_market_summary(filename: Optional[str] = None) -> str:
     stale_data = json.loads(detect_stale_lines(filename))
     outlier_data = json.loads(detect_line_outliers(filename))
 
+    middles_data = json.loads(find_middle_opportunities(filename))
+    fair_odds_data = json.loads(get_fair_odds(filename))
+    hold_data = json.loads(get_hold_percentage(filename))
+    power_data = json.loads(get_power_rankings(filename))
+
     result = {
         "summary": {
             "total_records": len(odds),
@@ -863,6 +1224,10 @@ def get_market_summary(filename: Optional[str] = None) -> str:
             "count": arb_data.get("count", 0),
             "top_3": arb_data.get("arbitrage_opportunities", [])[:3],
         },
+        "middle_opportunities": {
+            "count": middles_data.get("count", 0),
+            "top_3": middles_data.get("middle_opportunities", [])[:3],
+        },
         "top_ev_bets": {
             "count": ev_data.get("count", 0),
             "top_5": ev_data.get("ev_bets", [])[:5],
@@ -873,9 +1238,29 @@ def get_market_summary(filename: Optional[str] = None) -> str:
         },
         "outliers": {
             "count": outlier_data.get("count", 0),
+            "odds_outliers": outlier_data.get("odds_outliers", 0),
+            "line_outliers": outlier_data.get("line_outliers", 0),
             "top_3": outlier_data.get("outliers", [])[:3],
         },
-        "context": "Full market summary with sportsbook rankings, arb opportunities, +EV bets, stale lines, and outliers. Drill into specific tools for more detail.",
+        "fair_odds_consensus": fair_odds_data.get("games", [])[:3],
+        "hold_percentage": {
+            "market_average": hold_data.get("market_average_hold_pct", "N/A"),
+            "lowest_hold": hold_data.get("lowest_hold"),
+            "highest_hold": hold_data.get("highest_hold"),
+            "by_sportsbook": hold_data.get("hold_by_sportsbook", []),
+        },
+        "power_rankings": {
+            "total_teams": power_data.get("total_teams", 0),
+            "top_5": [
+                {"rank": r["rank"], "team": r["team"], "strength": r["strength_pct"], "tier": r["tier"]}
+                for r in power_data.get("power_rankings", [])[:5]
+            ],
+            "bottom_5": [
+                {"rank": r["rank"], "team": r["team"], "strength": r["strength_pct"], "tier": r["tier"]}
+                for r in power_data.get("power_rankings", [])[-5:]
+            ],
+        },
+        "context": "Full market summary with sportsbook rankings, hold percentage, arb opportunities, middles, +EV bets, stale lines, outliers (odds + line), fair odds, and power rankings. Drill into specific tools for more detail.",
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
     _cache.set_analysis(filename, cache_key, result)
@@ -1033,8 +1418,12 @@ def get_best_bets_today(filename: Optional[str] = None, count: int = 10) -> str:
                     "sportsbook": best_entry["sportsbook"],
                     "odds": best_entry["odds"],
                     "ev_edge_pct": round(ev_edge, 3),
+                    "book_implied_prob": round(best_prob, 6),
+                    "consensus_fair_prob": round(avg_prob, 6),
                     "vig_at_book": round(vig, 6),
                     "composite_score": round(composite_score, 3),
+                    "last_updated": best_entry.get("last_updated", ""),
+                    "freshness_penalty": round(freshness_penalty, 3),
                     "reasons": [],
                 })
 
@@ -1290,6 +1679,7 @@ def get_book_rankings(filename: Optional[str] = None) -> str:
             "grade": grade,
             "composite_score": round(score, 3),
             "avg_vig_pct": f"{round(avg_vig * 100, 2)}%",
+            "hold_pct": f"{round(avg_vig * 100, 2)}%",
             "best_odds_pct": f"{round(best_pct, 1)}%",
             "worst_odds_pct": f"{round(worst_pct, 1)}%",
             "avg_staleness_min": round(avg_stale, 1),
@@ -1331,16 +1721,54 @@ def get_daily_digest(filename: Optional[str] = None) -> str:
     best_bets_data = json.loads(get_best_bets_today(filename, count=5))
     middles_data = json.loads(find_middle_opportunities(filename))
     rankings_data = json.loads(get_book_rankings(filename))
+    power_data = json.loads(get_power_rankings(filename))
+
+    # Build lookup sets for cross-referencing stale lines and outliers
+    stale_keys = set()
+    for stale in summary_data.get("stale_lines", {}).get("top_3", []):
+        stale_keys.add((stale.get("game_id"), stale.get("sportsbook")))
+
+    outlier_lookup = {}
+    for outlier in summary_data.get("outliers", {}).get("top_3", []):
+        key = (outlier.get("game_id"), outlier.get("sportsbook"), outlier.get("market_type"), outlier.get("side"))
+        outlier_lookup[key] = outlier
 
     # Categorize
     must_bet = []
     for bet in best_bets_data.get("best_bets", []):
         if bet.get("composite_score", 0) > 2.0:
+            # Cross-reference: check if this bet's book+game is flagged as stale
+            warnings = []
+            is_stale = (bet.get("game_id"), bet.get("sportsbook")) in stale_keys
+            if is_stale:
+                warnings.append("⚠️ This book's line for this game is flagged as stale — verify before betting")
+
+            # Cross-reference: check if this bet is an outlier
+            outlier_key = (bet.get("game_id"), bet.get("sportsbook"), bet.get("market_type"), bet.get("side"))
+            outlier_match = outlier_lookup.get(outlier_key)
+            if outlier_match:
+                warnings.append(f"⚠️ Outlier: odds {bet['odds']} vs consensus avg {outlier_match.get('consensus_avg')} — may be mispriced/stale")
+
+            # Confidence tier
+            has_freshness_issue = bet.get("freshness_penalty", 0) > 0 or is_stale
+            has_outlier_flag = outlier_match is not None
+            if not has_freshness_issue and not has_outlier_flag and bet.get("ev_edge_pct", 0) >= 2.0:
+                confidence = "high"
+            elif has_freshness_issue or has_outlier_flag:
+                confidence = "speculative"
+            else:
+                confidence = "moderate"
+
             must_bet.append({
                 "action": f"Bet {bet['side']} {bet['market_type']} at {bet['sportsbook']}",
                 "game": f"{bet.get('away_team', '?')} @ {bet.get('home_team', '?')}",
                 "odds": bet["odds"],
                 "ev_edge": f"{bet['ev_edge_pct']}%",
+                "book_implied_prob": f"{round(bet.get('book_implied_prob', 0) * 100, 1)}%",
+                "consensus_fair_prob": f"{round(bet.get('consensus_fair_prob', 0) * 100, 1)}%",
+                "last_updated": bet.get("last_updated", "unknown"),
+                "confidence": confidence,
+                "warnings": warnings,
                 "reasons": bet.get("reasons", []),
             })
 
@@ -1390,7 +1818,141 @@ def get_daily_digest(filename: Optional[str] = None) -> str:
         "avoid": avoid,
         "interesting": interesting,
         "book_grades": book_grades,
+        "power_rankings": [
+            {"rank": r["rank"], "team": r["team"], "strength": r["strength_pct"], "tier": r["tier"]}
+            for r in power_data.get("power_rankings", [])
+        ],
         "context": f"Daily digest: {len(must_bet)} must-bet opps, {len(avoid)} lines to avoid, {len(interesting)} interesting situations across {summary_data.get('summary', {}).get('unique_games', 0)} games.",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _cache.set_analysis(filename, cache_key, result)
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+def get_power_rankings(filename: Optional[str] = None) -> str:
+    """Derive implied team strength ratings from moneyline odds and rank all teams.
+
+    Aggregates each team's no-vig (fair) moneyline win probability across every
+    game they appear in, then averages those probabilities to produce a single
+    strength rating per team.  Teams are ranked from strongest to weakest.
+
+    The rating reflects how the *market* prices each team — a higher rating means
+    sportsbooks collectively view that team as more likely to win its games.
+
+    Args:
+        filename: Data file to load. Optional.
+
+    Returns a ranked list of teams with strength ratings, game-level detail,
+    and contextual notes.
+    """
+    cache_key = "power_rankings"
+    cached = _cache.get_analysis(filename, cache_key)
+    if cached is not None:
+        return json.dumps(cached, indent=2)
+
+    enriched = _cache.load_enriched(filename)
+    if not enriched:
+        return json.dumps({"error": "No data available"})
+
+    # Collect per-team fair win probabilities from each game's moneyline.
+    # We use fair (no-vig) probabilities so the bookmaker margin doesn't inflate
+    # one side.  Each game contributes two data points — one for each team.
+    team_games: dict[str, list[dict]] = {}  # team_name -> [{game detail}, ...]
+
+    by_game = _cache.load_by_game(filename)
+    consensus = _cache.load_consensus(filename)
+
+    for game_id, records in by_game.items():
+        # Identify home/away team names from the first record of this game
+        sample = records[0]
+        home_team = sample.get("home_team", "Unknown")
+        away_team = sample.get("away_team", "Unknown")
+
+        # Use consensus moneyline odds to derive fair probabilities for this game
+        game_consensus = consensus.get(game_id, {})
+        ml_consensus = game_consensus.get("moneyline")
+        if not ml_consensus:
+            continue
+
+        avg_home_odds = ml_consensus.get("avg_home_odds")
+        avg_away_odds = ml_consensus.get("avg_away_odds")
+        if avg_home_odds is None or avg_away_odds is None:
+            continue
+
+        fair = no_vig_probabilities(avg_home_odds, avg_away_odds)
+        home_fair_prob = fair["fair_a"]
+        away_fair_prob = fair["fair_b"]
+
+        game_detail_home = {
+            "game_id": game_id,
+            "opponent": away_team,
+            "location": "home",
+            "fair_win_prob": round(home_fair_prob, 4),
+            "consensus_odds": round(avg_home_odds, 1),
+            "book_count": ml_consensus.get("book_count", 0),
+        }
+        game_detail_away = {
+            "game_id": game_id,
+            "opponent": home_team,
+            "location": "away",
+            "fair_win_prob": round(away_fair_prob, 4),
+            "consensus_odds": round(avg_away_odds, 1),
+            "book_count": ml_consensus.get("book_count", 0),
+        }
+
+        team_games.setdefault(home_team, []).append(game_detail_home)
+        team_games.setdefault(away_team, []).append(game_detail_away)
+
+    # Build rankings: average fair win probability across all appearances
+    rankings = []
+    for team, games in team_games.items():
+        probs = [g["fair_win_prob"] for g in games]
+        avg_prob = sum(probs) / len(probs)
+        rankings.append({
+            "team": team,
+            "strength_rating": round(avg_prob, 4),
+            "strength_pct": f"{round(avg_prob * 100, 1)}%",
+            "games_sampled": len(games),
+            "game_details": sorted(games, key=lambda g: g["fair_win_prob"], reverse=True),
+        })
+
+    # Sort strongest to weakest
+    rankings.sort(key=lambda r: r["strength_rating"], reverse=True)
+
+    # Assign rank numbers
+    for i, r in enumerate(rankings, 1):
+        r["rank"] = i
+
+    # Tier labels for readability
+    for r in rankings:
+        pct = r["strength_rating"] * 100
+        if pct >= 65:
+            r["tier"] = "elite"
+        elif pct >= 55:
+            r["tier"] = "strong"
+        elif pct >= 45:
+            r["tier"] = "average"
+        elif pct >= 35:
+            r["tier"] = "below_average"
+        else:
+            r["tier"] = "weak"
+
+    result = {
+        "power_rankings": rankings,
+        "total_teams": len(rankings),
+        "methodology": (
+            "Each team's consensus (cross-book average) moneyline odds are converted "
+            "to no-vig fair win probabilities.  A team's strength rating is the average "
+            "of its fair win probabilities across all games it appears in.  Higher = "
+            "the market views the team as stronger."
+        ),
+        "context": (
+            f"Power rankings for {len(rankings)} teams derived from moneyline odds "
+            f"across {len(by_game)} games.  Ratings reflect market-implied strength, "
+            f"not predictions — a team priced as a heavy favorite in easy matchups may "
+            f"rate higher than a good team facing tough opponents."
+        ),
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
     _cache.set_analysis(filename, cache_key, result)
@@ -1426,7 +1988,7 @@ def get_glossary() -> str:
             "closing_line_value": "Whether your bet was placed at better odds than the final closing line. The gold standard metric of sharp betting.",
             "steam_move": "A sudden, sharp line movement typically driven by professional/sharp bettors.",
             "reverse_line_movement": "When the line moves in the opposite direction of where the public is betting — often a sign of sharp action.",
-            "hold": "The sportsbook's total margin across all bets on a market. Similar to vig but applied to the overall market.",
+            "hold": "Hold percentage — the sportsbook's overall margin across all markets. Calculated as (sum of implied probabilities - 1) x 100. Lower hold = fairer book. Use get_hold_percentage for per-sportsbook breakdowns by market type.",
         }
     }, indent=2)
 
