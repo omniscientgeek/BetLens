@@ -114,10 +114,12 @@ def _shin_solve_z(probs: list[float], tol: float = 1e-10, max_iter: int = 200) -
     Given raw implied probabilities *probs* (which sum to S > 1 due to vig),
     find z ∈ (0, 1) such that the Shin-adjusted true probabilities sum to 1.
 
-    The Shin formula for each outcome i:
-        q_i = ( sqrt(z² + 4·(1-z)·p_i² / S²) − z ) / ( 2·(1-z) )
+    The Shin (1993) formula for each outcome i:
+        q_i = ( sqrt(z² + 4·(1-z)·p_i² / S) − z ) / ( 2·(1-z) )
 
-    We search for z where  Σ q_i(z) = 1.
+    Note the critical distinction: the term is ``p_i² / S`` (not ``(p_i/S)²``).
+    At z=0 this gives q_i = p_i / √S, so Σq_i = S/√S = √S > 1 when S > 1,
+    meaning the bisection finds a positive z where Σq_i = 1.
 
     Parameters
     ----------
@@ -141,7 +143,7 @@ def _shin_solve_z(probs: list[float], tol: float = 1e-10, max_iter: int = 200) -
         total = 0.0
         denom = 2.0 * (1.0 - z)
         for p in probs:
-            discriminant = z * z + 4.0 * (1.0 - z) * (p / S) ** 2
+            discriminant = z * z + 4.0 * (1.0 - z) * (p * p) / S
             total += (sqrt(discriminant) - z) / denom
         return total
 
@@ -179,7 +181,7 @@ def shin_probabilities(odds_side_a: int | float, odds_side_b: int | float) -> di
     For each outcome *i* with raw implied probability *p_i* and total
     overround *S = Σp_i*:
 
-        q_i = ( √(z² + 4·(1−z)·(p_i/S)²) − z ) / ( 2·(1−z) )
+        q_i = ( √(z² + 4·(1−z)·p_i²/S) − z ) / ( 2·(1−z) )
 
     Parameters
     ----------
@@ -237,8 +239,8 @@ def shin_probabilities(odds_side_a: int | float, odds_side_b: int | float) -> di
 
     # Compute Shin-adjusted true probabilities
     denom = 2.0 * (1.0 - z)
-    disc_a = z * z + 4.0 * (1.0 - z) * (prob_a / S) ** 2
-    disc_b = z * z + 4.0 * (1.0 - z) * (prob_b / S) ** 2
+    disc_a = z * z + 4.0 * (1.0 - z) * (prob_a * prob_a) / S
+    disc_b = z * z + 4.0 * (1.0 - z) * (prob_b * prob_b) / S
     shin_a = (sqrt(disc_a) - z) / denom
     shin_b = (sqrt(disc_b) - z) / denom
 
