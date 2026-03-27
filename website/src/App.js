@@ -63,6 +63,18 @@ function BetLens() {
   // Streaming brief text (accumulated from brief_chunk events)
   const [streamingBrief, setStreamingBrief] = useState("");
 
+  // Debug mode
+  const [debugMode, setDebugMode] = useState(
+    () => localStorage.getItem("betstamp_debug") === "true"
+  );
+  const [runId, setRunId] = useState(null);
+
+  const toggleDebug = () => {
+    const next = !debugMode;
+    setDebugMode(next);
+    localStorage.setItem("betstamp_debug", String(next));
+  };
+
   // Fetch available JSON files on mount
   useEffect(() => {
     fetch(`${API_BASE}/files`)
@@ -90,6 +102,7 @@ function BetLens() {
     setPipelineError(null);
     setPhaseResults({});
     setStreamingBrief("");
+    setRunId(null);
 
     if (!filename) return;
 
@@ -121,6 +134,7 @@ function BetLens() {
     });
 
     socket.on("phase_update", (data) => {
+      if (data.run_id) setRunId(data.run_id);
       setPipeline({
         phase: data.phase,
         status: data.status,
@@ -142,6 +156,7 @@ function BetLens() {
     });
 
     socket.on("processing_complete", (data) => {
+      if (data.run_id) setRunId(data.run_id);
       setPipelineComplete(true);
       setPipelineResults(data.results || null);
       setStreamingBrief(""); // Clear streaming text — final brief is in results
@@ -216,6 +231,23 @@ function BetLens() {
             </option>
           ))}
         </select>
+        <button
+          className={`debug-toggle ${debugMode ? "debug-toggle--on" : ""}`}
+          onClick={toggleDebug}
+          title="Toggle debug mode — shows links to per-run log files"
+        >
+          {debugMode ? "Debug: ON" : "Debug: OFF"}
+        </button>
+        {debugMode && runId && (
+          <a
+            href={`${API_BASE}/logs/${runId}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="debug-log-link"
+          >
+            View Log ({runId})
+          </a>
+        )}
       </div>
 
       {error && <div className="error">{error}</div>}
@@ -283,15 +315,15 @@ function BetLens() {
         <div className="error">Pipeline error: {pipelineError}</div>
       )}
 
+      {pipelineComplete && pipelineResults && (
+        <ChatPanel key={selectedFile} pipelineResults={pipelineResults} debugMode={debugMode} />
+      )}
+
       {fileData && (
         <div className="bet-lens">
           <h2>{selectedFile}</h2>
           <DataExplorer data={fileData} />
         </div>
-      )}
-
-      {pipelineComplete && pipelineResults && (
-        <ChatPanel key={selectedFile} pipelineResults={pipelineResults} />
       )}
     </>
   );
