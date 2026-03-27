@@ -11,7 +11,8 @@ import os
 import aiofiles
 from collections import defaultdict
 from datetime import datetime
-from odds_math import implied_probability, calculate_vig, no_vig_probabilities, fair_odds_to_american, expected_value
+from itertools import combinations
+from odds_math import implied_probability, calculate_vig, no_vig_probabilities, fair_odds_to_american, expected_value, arbitrage_profit
 
 DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data"))
 
@@ -185,12 +186,16 @@ async def run_detection(filename: str) -> dict:
     # Build an EV summary: game_id → market → list of +EV opportunities sorted by edge
     ev_summary = _build_ev_summary(enriched)
 
+    # Build arbitrage profit curves: all book-pair combinations per game/market
+    arb_profit_curves = _build_arb_profit_curves(enriched)
+
     return {
         "enriched_odds": enriched,
         "vig_summary": vig_summary,
         "ev_summary": ev_summary,
         "consensus": consensus,
         "stale_summary": stale_summary,
+        "arb_profit_curves": arb_profit_curves,
     }
 
 
@@ -513,3 +518,159 @@ def _enrich_staleness(
             else:
                 record["staleness_minutes"] = 0.0
             record["is_stale"] = False
+
+
+# ---------------------------------------------------------------------------
+# Arbitrage profit curves – all book-pair combinations
+# ---------------------------------------------------------------------------
+
+
+def _build_arb_profit_curves(enriched_odds: list) -> dict:
+    """Compute arb profit for every sportsbook pairing per game/market.
+
+    For each game and market type, enumerates all ordered pairs of sportsbooks
+    (book_a supplies side A odds, book_b supplies side B odds) and calculates
+    the arbitrage profit (or loss) for that combination.
+
+    The result is sorted by profit descending so the most profitable pairings
+    appear first — forming a "profit curve" from best to worst pairing.
+
+    Structure
+    ---------
+    {
+        "game_id": {
+            "moneyline": {
+                "curve": [
+                    {
+                        "book_a": "Pinnacle", "book_b": "DraftKings",
+                        "side_a": "home",     "side_b": "away",
+                        "odds_a": -210,       "odds_b": 205,
+                        "combined_implied": 0.9534,
+                        "is_arb": true,
+                        "profit_pct": 4.89,
+                        "stake_a_pct": 67.2,
+                        "stake_b_pct": 32.8,
+                    },
+                    ...
+                ],
+                "best_pairing": { ... },        # top entry (or null)
+                "arb_count": 3,                 # how many pairings are actual arbs
+                "total_pairings": 56,
+            },
+            ...
+        },
+        ...
+    }
+
+    Also includes a top-level ``best_pairings`` list (across all games/markets)
+    sorted by profit_pct descending.
+    """
+    # Group enriched records by game_id
+    games: dict[str, list[dict]] = defaultdict(list)
+    for record in enriched_odds:
+        games[record["game_id"]].append(record)
+
+    result: dict = {}
+    all_best: list[dict] = []
+
+    for game_id, records in games.items():
+        if len(records) < 2:
+            continue
+
+        first = records[0]
+        game_entry: dict = {}
+
+        for market_type in ("spread", "moneyline", "total"):
+            if market_type in ("spread", "moneyline"):
+                side_a_name, side_b_name = "home", "away"
+                key_a, key_b = "home_odds", "away_odds"
+            else:
+                side_a_name, side_b_name = "over", "under"
+                key_a, key_b = "over_odds", "under_odds"
+
+            # Collect (sportsbook, odds_a, odds_b) for books that have this market
+            book_odds: list[dict] = []
+            for r in records:
+                market = r.get("markets", {}).get(market_type)
+                if market and key_a in market and key_b in market:
+                    book_odds.append({
+                        "sportsbook": r["sportsbook"],
+                        "odds_a": market[key_a],
+                        "odds_b": market[key_b],
+                    })
+
+            if len(book_odds) < 2:
+                continue
+
+            curve: list[dict] = []
+
+            # Enumerate all *ordered* pairs: book_i supplies side A, book_j supplies side B
+            # We want both (i→A, j→B) and (j→A, i→B) since they may yield different results
+            for i, j in combinations(range(len(book_odds)), 2):
+                for ba, bb in [(book_odds[i], book_odds[j]),
+                               (book_odds[j], book_odds[i])]:
+                    # Skip same-book pairing (already covered by single-book vig)
+                    if ba["sportsbook"] == bb["sportsbook"]:
+                        continue
+
+                    arb = arbitrage_profit(ba["odds_a"], bb["odds_b"])
+                    entry = {
+                        "book_a": ba["sportsbook"],
+                        "book_b": bb["sportsbook"],
+                        "side_a": side_a_name,
+                        "side_b": side_b_name,
+                        "odds_a": ba["odds_a"],
+                        "odds_b": bb["odds_b"],
+                        "combined_implied": arb["combined_implied"],
+                        "is_arb": arb["is_arb"],
+                        "profit_pct": arb["profit_pct"],
+                        "stake_a_pct": arb["stake_a_pct"],
+                        "stake_b_pct": arb["stake_b_pct"],
+                    }
+                    curve.append(entry)
+
+            # Sort by profit descending (best arb first)
+            curve.sort(key=lambda x: x["profit_pct"], reverse=True)
+            arb_count = sum(1 for c in curve if c["is_arb"])
+
+            best = curve[0] if curve else None
+            game_entry[market_type] = {
+                "curve": curve,
+                "best_pairing": best,
+                "arb_count": arb_count,
+                "total_pairings": len(curve),
+            }
+
+            if best and best["is_arb"]:
+                all_best.append({
+                    "game_id": game_id,
+                    "sport": first.get("sport"),
+                    "home_team": first.get("home_team"),
+                    "away_team": first.get("away_team"),
+                    "market_type": market_type,
+                    **best,
+                })
+
+        if game_entry:
+            result[game_id] = game_entry
+
+    # Sort global best pairings by profit
+    all_best.sort(key=lambda x: x["profit_pct"], reverse=True)
+
+    return {
+        "games": result,
+        "best_pairings": all_best,
+        "total_arb_pairings": sum(
+            v[mt]["arb_count"]
+            for v in result.values()
+            for mt in v
+        ),
+        "context": (
+            f"Analyzed book-pair arb curves across {len(result)} games. "
+            f"Found {len(all_best)} profitable pairings."
+            + (f" Best: {all_best[0]['book_a']}+{all_best[0]['book_b']} on "
+               f"{all_best[0]['game_id']} {all_best[0]['market_type']} = "
+               f"{all_best[0]['profit_pct']}% profit"
+               if all_best else "")
+        ),
+    }
