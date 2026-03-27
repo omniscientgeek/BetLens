@@ -12,7 +12,7 @@ import aiofiles
 from collections import defaultdict
 from datetime import datetime
 from itertools import combinations
-from odds_math import implied_probability, calculate_vig, no_vig_probabilities, fair_odds_to_american, expected_value, arbitrage_profit
+from odds_math import implied_probability, calculate_vig, no_vig_probabilities, fair_odds_to_american, expected_value, arbitrage_profit, kelly_criterion
 
 DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data"))
 
@@ -95,10 +95,16 @@ async def run_detection(filename: str) -> dict:
     Returns
     -------
     dict with:
-        enriched_odds  – list of odds records with computed fields added
-        vig_summary    – per-game, per-market vig comparison across books
-        ev_summary     – per-game, per-market +EV opportunities (sorted by edge)
-        consensus      – consensus fair probabilities per game/market
+        enriched_odds        – list of odds records with computed fields added
+        vig_summary          – per-game, per-market vig comparison across books
+        ev_summary           – per-game, per-market +EV opportunities (sorted by edge)
+        consensus            – consensus fair probabilities per game/market
+        stale_summary        – stale line flags per sportsbook/game
+        arb_profit_curves    – all book-pair arbitrage combinations
+        synthetic_perfect_book – synthetic "perfect book" combining the best
+                                 line from each sportsbook for every side of
+                                 every market; negative total hold signals
+                                 guaranteed cross-book arbitrage
     """
     filepath = os.path.join(DATA_DIR, filename)
     async with aiofiles.open(filepath, "r", encoding="utf-8") as f:
@@ -189,6 +195,9 @@ async def run_detection(filename: str) -> dict:
     # Build arbitrage profit curves: all book-pair combinations per game/market
     arb_profit_curves = _build_arb_profit_curves(enriched)
 
+    # ---------- Synthetic "Perfect Book" construction ----------
+    synthetic_perfect_book = _build_synthetic_perfect_book(enriched, consensus)
+
     return {
         "enriched_odds": enriched,
         "vig_summary": vig_summary,
@@ -196,6 +205,7 @@ async def run_detection(filename: str) -> dict:
         "consensus": consensus,
         "stale_summary": stale_summary,
         "arb_profit_curves": arb_profit_curves,
+        "synthetic_perfect_book": synthetic_perfect_book,
     }
 
 
@@ -672,5 +682,286 @@ def _build_arb_profit_curves(enriched_odds: list) -> dict:
                f"{all_best[0]['game_id']} {all_best[0]['market_type']} = "
                f"{all_best[0]['profit_pct']}% profit"
                if all_best else "")
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Synthetic "Perfect Book" construction
+# ---------------------------------------------------------------------------
+
+
+def _build_synthetic_perfect_book(enriched_odds: list, consensus: dict) -> dict:
+    """Construct a synthetic 'perfect book' by combining the best line from
+    each sportsbook for every side of every market.
+
+    For each game and market type:
+    1. Finds the best (highest / most bettor-friendly) odds on each side
+       across all available sportsbooks.
+    2. Calculates the combined implied probability (synthetic hold) of those
+       best odds.  If the synthetic hold is **negative**, guaranteed arbitrage
+       exists across those books.
+    3. Compares the synthetic best-available odds against consensus fair odds
+       to measure the edge a disciplined line-shopper captures.
+
+    Structure
+    ---------
+    {
+        "games": {
+            "<game_id>": {
+                "sport": "...",
+                "home_team": "...",
+                "away_team": "...",
+                "book_count": 8,
+                "markets": {
+                    "spread": {
+                        "best_home": { "odds", "sportsbook", "line",
+                                       "implied_prob", "fair_prob",
+                                       "edge_vs_fair" },
+                        "best_away": { ... },
+                        "combined_implied": 0.9823,
+                        "synthetic_hold_pct": "-1.77%",
+                        "is_arb": true,
+                        "arb_profit_pct": 1.80,
+                        "arb_stakes": { "side_a_pct", "side_b_pct" },
+                    },
+                    ...
+                },
+                "avg_synthetic_hold_pct": "-0.5%",
+                "arb_markets": 1,
+            },
+            ...
+        },
+        "aggregate": { ... },
+        "arb_alerts": [ ... ],
+    }
+    """
+    # Group enriched records by game_id
+    games: dict[str, list[dict]] = defaultdict(list)
+    for record in enriched_odds:
+        games[record["game_id"]].append(record)
+
+    game_results: dict = {}
+    all_holds: list[float] = []
+    market_type_holds: dict[str, list[float]] = {
+        "spread": [], "moneyline": [], "total": [],
+    }
+    arb_alerts: list[dict] = []
+
+    for game_id, records in games.items():
+        if len(records) < 2:
+            continue
+
+        first = records[0]
+        game_entry: dict = {
+            "sport": first.get("sport"),
+            "home_team": first.get("home_team"),
+            "away_team": first.get("away_team"),
+            "book_count": len(records),
+            "markets": {},
+        }
+
+        for market_type in ("spread", "moneyline", "total"):
+            if market_type in ("spread", "moneyline"):
+                side_a_key, side_b_key = "home_odds", "away_odds"
+                side_a_label, side_b_label = "home", "away"
+                line_key = "home_line" if market_type == "spread" else None
+            else:
+                side_a_key, side_b_key = "over_odds", "under_odds"
+                side_a_label, side_b_label = "over", "under"
+                line_key = "line"
+
+            # ---- Find the best (highest) odds on each side ----
+            best_a: dict | None = None
+            best_b: dict | None = None
+
+            for r in records:
+                market = r.get("markets", {}).get(market_type)
+                if not market:
+                    continue
+
+                odds_a = market.get(side_a_key)
+                odds_b = market.get(side_b_key)
+
+                if odds_a is not None:
+                    if best_a is None or odds_a > best_a["odds"]:
+                        best_a = {
+                            "odds": odds_a,
+                            "sportsbook": r["sportsbook"],
+                            "line": market.get(line_key) if line_key else None,
+                        }
+                if odds_b is not None:
+                    if best_b is None or odds_b > best_b["odds"]:
+                        best_b = {
+                            "odds": odds_b,
+                            "sportsbook": r["sportsbook"],
+                            "line": market.get(line_key) if line_key else None,
+                        }
+
+            if best_a is None or best_b is None:
+                continue
+
+            # ---- Calculate synthetic hold ----
+            prob_a = implied_probability(best_a["odds"])
+            prob_b = implied_probability(best_b["odds"])
+            combined_implied = prob_a + prob_b
+            synthetic_hold = combined_implied - 1.0  # negative = bettor edge
+
+            # ---- Compare against consensus fair odds ----
+            game_con = consensus.get(game_id, {}).get(market_type, {})
+            if market_type in ("spread", "moneyline"):
+                fair_a = game_con.get("home_fair_prob", 0.5)
+                fair_b = game_con.get("away_fair_prob", 0.5)
+            else:
+                fair_a = game_con.get("over_fair_prob", 0.5)
+                fair_b = game_con.get("under_fair_prob", 0.5)
+
+            edge_a = fair_a - prob_a  # positive = bettor value on this side
+            edge_b = fair_b - prob_b
+
+            # ---- Arbitrage details (when hold < 0) ----
+            is_arb = combined_implied < 1.0
+            if is_arb:
+                arb_profit_pct = round((1.0 - combined_implied) / combined_implied * 100, 4)
+                stake_a_pct = round(prob_a / combined_implied * 100, 2)
+                stake_b_pct = round(prob_b / combined_implied * 100, 2)
+            else:
+                arb_profit_pct = 0.0
+                stake_a_pct = 50.0
+                stake_b_pct = 50.0
+
+            market_entry = {
+                f"best_{side_a_label}": {
+                    "odds": best_a["odds"],
+                    "sportsbook": best_a["sportsbook"],
+                    "line": best_a["line"],
+                    "implied_prob": round(prob_a, 6),
+                    "implied_prob_pct": f"{round(prob_a * 100, 2)}%",
+                    "fair_prob": round(fair_a, 6),
+                    "edge_vs_fair": round(edge_a * 100, 3),
+                    "edge_vs_fair_pct": f"{round(edge_a * 100, 3)}%",
+                },
+                f"best_{side_b_label}": {
+                    "odds": best_b["odds"],
+                    "sportsbook": best_b["sportsbook"],
+                    "line": best_b["line"],
+                    "implied_prob": round(prob_b, 6),
+                    "implied_prob_pct": f"{round(prob_b * 100, 2)}%",
+                    "fair_prob": round(fair_b, 6),
+                    "edge_vs_fair": round(edge_b * 100, 3),
+                    "edge_vs_fair_pct": f"{round(edge_b * 100, 3)}%",
+                },
+                "combined_implied": round(combined_implied, 6),
+                "combined_implied_pct": f"{round(combined_implied * 100, 2)}%",
+                "synthetic_hold": round(synthetic_hold, 6),
+                "synthetic_hold_pct": f"{round(synthetic_hold * 100, 3)}%",
+                "is_arb": is_arb,
+                "arb_profit_pct": arb_profit_pct,
+                "arb_stakes": {
+                    f"{side_a_label}_pct": stake_a_pct,
+                    f"{side_b_label}_pct": stake_b_pct,
+                },
+            }
+
+            # Add consensus line for spread / total markets
+            if market_type == "spread":
+                lines = [
+                    r["markets"][market_type].get("home_line", 0)
+                    for r in records
+                    if market_type in r.get("markets", {})
+                    and "home_line" in r["markets"][market_type]
+                ]
+                if lines:
+                    market_entry["consensus_line"] = round(
+                        sum(lines) / len(lines), 1,
+                    )
+            elif market_type == "total":
+                lines = [
+                    r["markets"][market_type].get("line", 0)
+                    for r in records
+                    if market_type in r.get("markets", {})
+                    and "line" in r["markets"][market_type]
+                ]
+                if lines:
+                    market_entry["consensus_line"] = round(
+                        sum(lines) / len(lines), 1,
+                    )
+
+            game_entry["markets"][market_type] = market_entry
+            all_holds.append(synthetic_hold)
+            market_type_holds[market_type].append(synthetic_hold)
+
+            # Collect arb alerts
+            if is_arb:
+                arb_alerts.append({
+                    "game_id": game_id,
+                    "sport": first.get("sport"),
+                    "home_team": first.get("home_team"),
+                    "away_team": first.get("away_team"),
+                    "market_type": market_type,
+                    "synthetic_hold_pct": f"{round(synthetic_hold * 100, 3)}%",
+                    "arb_profit_pct": arb_profit_pct,
+                    f"best_{side_a_label}_book": best_a["sportsbook"],
+                    f"best_{side_a_label}_odds": best_a["odds"],
+                    f"best_{side_b_label}_book": best_b["sportsbook"],
+                    f"best_{side_b_label}_odds": best_b["odds"],
+                    "arb_stakes": {
+                        f"{side_a_label}_pct": stake_a_pct,
+                        f"{side_b_label}_pct": stake_b_pct,
+                    },
+                })
+
+        # Per-game summary
+        if game_entry["markets"]:
+            game_holds = [
+                m["synthetic_hold"]
+                for m in game_entry["markets"].values()
+            ]
+            game_entry["avg_synthetic_hold_pct"] = (
+                f"{round(sum(game_holds) / len(game_holds) * 100, 3)}%"
+            )
+            game_entry["arb_markets"] = sum(
+                1 for m in game_entry["markets"].values() if m["is_arb"]
+            )
+            game_results[game_id] = game_entry
+
+    # ---- Aggregate statistics ----
+    avg_hold = sum(all_holds) / len(all_holds) if all_holds else 0
+    arb_market_count = sum(1 for h in all_holds if h < 0)
+
+    by_market_summary: dict = {}
+    for mkt in ("spread", "moneyline", "total"):
+        holds = market_type_holds[mkt]
+        if holds:
+            by_market_summary[mkt] = {
+                "avg_synthetic_hold_pct": f"{round(sum(holds) / len(holds) * 100, 3)}%",
+                "min_hold_pct": f"{round(min(holds) * 100, 3)}%",
+                "max_hold_pct": f"{round(max(holds) * 100, 3)}%",
+                "arb_markets": sum(1 for h in holds if h < 0),
+                "market_count": len(holds),
+            }
+
+    # Sort arb alerts by profit descending
+    arb_alerts.sort(key=lambda a: a["arb_profit_pct"], reverse=True)
+
+    return {
+        "games": game_results,
+        "game_count": len(game_results),
+        "aggregate": {
+            "total_markets_analyzed": len(all_holds),
+            "avg_synthetic_hold_pct": f"{round(avg_hold * 100, 3)}%",
+            "avg_sharp_edge_pct": f"{round(-avg_hold * 100, 3)}%",
+            "arb_market_count": arb_market_count,
+            "guaranteed_arb_exists": arb_market_count > 0,
+            "by_market_type": by_market_summary,
+        },
+        "arb_alerts": arb_alerts,
+        "context": (
+            f"Synthetic perfect book constructed across {len(game_results)} games "
+            f"and {len(all_holds)} markets. "
+            f"Average synthetic hold: {round(avg_hold * 100, 3)}% "
+            f"(sharp edge: {round(-avg_hold * 100, 3)}%). "
+            f"{arb_market_count} market(s) with negative hold "
+            f"(guaranteed arbitrage exists across books)."
         ),
     }
