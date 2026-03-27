@@ -53,6 +53,7 @@ class _OddsCache:
         self._enriched: dict[str, list[dict]] = {}      # filepath -> enriched odds
         self._by_game: dict[str, dict] = {}             # filepath -> grouped by game_id
         self._consensus: dict[str, dict] = {}           # filepath -> {game_id: {market: consensus}}
+        self._sharp_vs_crowd: dict[str, dict] = {}     # filepath -> {game_id: {market: sharp_vs_crowd}}
         self._analysis: dict[str, dict] = {}            # (filepath, tool_key) -> result
 
     def _resolve(self, filename: Optional[str] = None) -> str:
@@ -80,6 +81,7 @@ class _OddsCache:
         self._enriched.pop(filepath, None)
         self._by_game.pop(filepath, None)
         self._consensus.pop(filepath, None)
+        self._sharp_vs_crowd.pop(filepath, None)
         # Clear analysis entries for this filepath
         keys_to_drop = [k for k in self._analysis if k[0] == filepath]
         for k in keys_to_drop:
@@ -109,12 +111,16 @@ class _OddsCache:
             enriched = [_enrich_record(r) for r in raw]
             # Attach consensus (market average) data to each record
             consensus = self.load_consensus(filename)
+            sharp_vs_crowd = self.load_sharp_vs_crowd(filename)
             for record in enriched:
                 game_id = record.get("game_id", "unknown")
                 game_consensus = consensus.get(game_id, {})
+                game_svc = sharp_vs_crowd.get(game_id, {})
                 for market_name, market in record.get("markets", {}).items():
                     if market_name in game_consensus:
                         market["consensus"] = game_consensus[market_name]
+                    if market_name in game_svc:
+                        market["sharp_vs_crowd"] = game_svc[market_name]
             self._enriched[filepath] = enriched
         return self._enriched[filepath]
 
@@ -141,6 +147,19 @@ class _OddsCache:
         if filepath not in self._consensus:
             self._consensus[filepath] = _compute_consensus(by_game)
         return self._consensus[filepath]
+
+    def load_sharp_vs_crowd(self, filename: Optional[str] = None) -> dict[str, dict]:
+        """Return sharp (Pinnacle) vs crowd (all books) comparison per game per market, cached.
+
+        Structure: {game_id: {market_type: {crowd_*, sharp_*, divergence_*, ...}}}
+        """
+        filepath = self._resolve(filename)
+        if not filepath:
+            return {}
+        by_game = self.load_by_game(filename)
+        if filepath not in self._sharp_vs_crowd:
+            self._sharp_vs_crowd[filepath] = _compute_sharp_vs_crowd(by_game)
+        return self._sharp_vs_crowd[filepath]
 
     def get_analysis(self, filename: Optional[str], key: str) -> Optional[dict]:
         """Retrieve a cached analysis result (e.g. vig, arb, ev)."""
@@ -363,6 +382,171 @@ def _compute_consensus(by_game: dict[str, list[dict]]) -> dict[str, dict]:
         consensus[game_id] = game_consensus
 
     return consensus
+
+
+# ---------------------------------------------------------------------------
+# Sharp vs. Crowd — Pinnacle (sharp book) vs all-book average (crowd wisdom)
+# ---------------------------------------------------------------------------
+
+SHARP_BOOK = "Pinnacle"
+
+
+def _compute_sharp_vs_crowd(by_game: dict[str, list[dict]]) -> dict[str, dict]:
+    """Compare Pinnacle's no-vig implied probabilities against the crowd average.
+
+    For each game and market, computes:
+      - crowd_fair_*   : average no-vig prob across ALL books (wisdom of crowds)
+      - sharp_fair_*   : Pinnacle's no-vig prob (sharp wisdom)
+      - divergence_pct : absolute difference in probability points (* 100)
+      - mispriced_side : which side the crowd is mispricing (if divergence is notable)
+
+    Returns: {game_id: {market_type: {crowd, sharp, divergence, ...}}}
+    """
+    result: dict[str, dict] = {}
+
+    for game_id, records in by_game.items():
+        game_result: dict[str, dict] = {}
+
+        sharp_records = [r for r in records if r.get("sportsbook", "").lower() == SHARP_BOOK.lower()]
+        crowd_records = records  # all books including Pinnacle for the crowd average
+
+        for market_type in ("spread", "moneyline", "total"):
+            # Gather crowd data (all books)
+            crowd_markets = [
+                r["markets"][market_type]
+                for r in crowd_records
+                if market_type in r.get("markets", {})
+            ]
+            # Gather sharp data (Pinnacle only)
+            sharp_markets = [
+                r["markets"][market_type]
+                for r in sharp_records
+                if market_type in r.get("markets", {})
+            ]
+
+            if not crowd_markets or not sharp_markets:
+                continue
+
+            sharp_m = sharp_markets[0]  # only one Pinnacle record per game
+
+            if market_type in ("spread", "moneyline"):
+                # --- Crowd average no-vig probs ---
+                crowd_home_probs = []
+                crowd_away_probs = []
+                for m in crowd_markets:
+                    home_odds = m.get("home_odds")
+                    away_odds = m.get("away_odds")
+                    if home_odds is not None and away_odds is not None:
+                        fair = no_vig_probabilities(home_odds, away_odds)
+                        crowd_home_probs.append(fair["fair_a"])
+                        crowd_away_probs.append(fair["fair_b"])
+
+                if not crowd_home_probs:
+                    continue
+
+                crowd_home = sum(crowd_home_probs) / len(crowd_home_probs)
+                crowd_away = sum(crowd_away_probs) / len(crowd_away_probs)
+
+                # --- Sharp (Pinnacle) no-vig probs ---
+                sharp_fair = no_vig_probabilities(sharp_m["home_odds"], sharp_m["away_odds"])
+                sharp_home = sharp_fair["fair_a"]
+                sharp_away = sharp_fair["fair_b"]
+
+                # --- Divergence ---
+                div_home = abs(sharp_home - crowd_home)
+                div_away = abs(sharp_away - crowd_away)
+                max_div = max(div_home, div_away)
+
+                # Determine which side the crowd is mispricing
+                mispriced_side = None
+                mispriced_direction = None
+                if max_div >= 0.01:  # >= 1 pp divergence threshold
+                    if div_home >= div_away:
+                        mispriced_side = "home"
+                        mispriced_direction = "crowd overvalues home" if crowd_home > sharp_home else "crowd undervalues home"
+                    else:
+                        mispriced_side = "away"
+                        mispriced_direction = "crowd overvalues away" if crowd_away > sharp_away else "crowd undervalues away"
+
+                entry: dict = {
+                    "crowd_home_fair_prob": round(crowd_home, 6),
+                    "crowd_away_fair_prob": round(crowd_away, 6),
+                    "sharp_home_fair_prob": round(sharp_home, 6),
+                    "sharp_away_fair_prob": round(sharp_away, 6),
+                    "divergence_home_pct": round(div_home * 100, 2),
+                    "divergence_away_pct": round(div_away * 100, 2),
+                    "max_divergence_pct": round(max_div * 100, 2),
+                    "crowd_books": len(crowd_home_probs),
+                    "sharp_book": SHARP_BOOK,
+                }
+                if market_type == "spread":
+                    crowd_lines = [m.get("home_line", 0) for m in crowd_markets if "home_line" in m]
+                    entry["crowd_consensus_line"] = round(sum(crowd_lines) / len(crowd_lines), 1) if crowd_lines else None
+                    entry["sharp_line"] = sharp_m.get("home_line")
+                if mispriced_side:
+                    entry["mispriced_side"] = mispriced_side
+                    entry["mispriced_direction"] = mispriced_direction
+
+                game_result[market_type] = entry
+
+            else:  # total
+                crowd_over_probs = []
+                crowd_under_probs = []
+                for m in crowd_markets:
+                    over_odds = m.get("over_odds")
+                    under_odds = m.get("under_odds")
+                    if over_odds is not None and under_odds is not None:
+                        fair = no_vig_probabilities(over_odds, under_odds)
+                        crowd_over_probs.append(fair["fair_a"])
+                        crowd_under_probs.append(fair["fair_b"])
+
+                if not crowd_over_probs:
+                    continue
+
+                crowd_over = sum(crowd_over_probs) / len(crowd_over_probs)
+                crowd_under = sum(crowd_under_probs) / len(crowd_under_probs)
+
+                sharp_fair = no_vig_probabilities(sharp_m["over_odds"], sharp_m["under_odds"])
+                sharp_over = sharp_fair["fair_a"]
+                sharp_under = sharp_fair["fair_b"]
+
+                div_over = abs(sharp_over - crowd_over)
+                div_under = abs(sharp_under - crowd_under)
+                max_div = max(div_over, div_under)
+
+                mispriced_side = None
+                mispriced_direction = None
+                if max_div >= 0.01:
+                    if div_over >= div_under:
+                        mispriced_side = "over"
+                        mispriced_direction = "crowd overvalues over" if crowd_over > sharp_over else "crowd undervalues over"
+                    else:
+                        mispriced_side = "under"
+                        mispriced_direction = "crowd overvalues under" if crowd_under > sharp_under else "crowd undervalues under"
+
+                crowd_lines = [m.get("line", 0) for m in crowd_markets if "line" in m]
+                entry = {
+                    "crowd_over_fair_prob": round(crowd_over, 6),
+                    "crowd_under_fair_prob": round(crowd_under, 6),
+                    "sharp_over_fair_prob": round(sharp_over, 6),
+                    "sharp_under_fair_prob": round(sharp_under, 6),
+                    "divergence_over_pct": round(div_over * 100, 2),
+                    "divergence_under_pct": round(div_under * 100, 2),
+                    "max_divergence_pct": round(max_div * 100, 2),
+                    "crowd_consensus_line": round(sum(crowd_lines) / len(crowd_lines), 1) if crowd_lines else None,
+                    "sharp_line": sharp_m.get("line"),
+                    "crowd_books": len(crowd_over_probs),
+                    "sharp_book": SHARP_BOOK,
+                }
+                if mispriced_side:
+                    entry["mispriced_side"] = mispriced_side
+                    entry["mispriced_direction"] = mispriced_direction
+
+                game_result["total"] = entry
+
+        result[game_id] = game_result
+
+    return result
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1676,6 +1860,117 @@ def calculate_odds(american_odds: int) -> str:
 # 
 
 @mcp.tool()
+def get_kelly_sizing(game_id: Optional[str] = None, filename: Optional[str] = None, kelly_fraction: float = 0.25, bankroll: float = 1000.0) -> str:
+    """Calculate Kelly Criterion bet sizing for every +EV opportunity.
+
+    Uses Pinnacle's no-vig odds as the "true" probability baseline (falls back
+    to consensus when Pinnacle data is unavailable).  For each +EV bet at other
+    books, computes the optimal Kelly fraction of bankroll to wager.
+
+    This answers "how much should I bet?" -- not just "what should I bet?"
+
+    Args:
+        game_id: Filter to a specific game. Optional (shows all games).
+        filename: Data file to load. Optional.
+        kelly_fraction: Kelly fraction to apply (default 0.25 = quarter Kelly, safest).
+                        Common values: 1.0 (full), 0.5 (half), 0.25 (quarter).
+        bankroll: Your bankroll in dollars for sizing examples. Default $1,000.
+
+    Returns all +EV opportunities with Kelly bet sizes, sorted by recommended wager.
+    """
+    cache_key = f"kelly:{game_id or 'all'}:{kelly_fraction}:{bankroll}"
+    cached = _cache.get_analysis(filename, cache_key)
+    if cached is not None:
+        return json.dumps(cached, indent=2)
+
+    games = _cache.load_by_game(filename)
+    if game_id:
+        games = {k: v for k, v in games.items() if k == game_id}
+
+    pinnacle_probs = _get_pinnacle_fair_probs(games)
+    kelly_bets = []
+
+    for gid, records in games.items():
+        first = records[0]
+
+        for market_type in ("spread", "moneyline", "total"):
+            if market_type in ("spread", "moneyline"):
+                sides = [("home", "home_odds", "side_a_prob"), ("away", "away_odds", "side_b_prob")]
+            else:
+                sides = [("over", "over_odds", "side_a_prob"), ("under", "under_odds", "side_b_prob")]
+
+            for side, odds_key, prob_key in sides:
+                game_fair = pinnacle_probs.get(gid, {}).get(market_type)
+                if not game_fair:
+                    continue
+                fair_prob = game_fair[prob_key]
+                prob_source = game_fair["source"]
+
+                for r in records:
+                    # Skip the sharp book itself
+                    if r.get("sportsbook", "").lower() == SHARP_BOOK.lower():
+                        continue
+
+                    market = r.get("markets", {}).get(market_type, {})
+                    if odds_key not in market:
+                        continue
+
+                    book_odds = market[odds_key]
+                    book_prob = implied_probability(book_odds)
+                    ev_edge = fair_prob - book_prob
+
+                    if ev_edge <= 0:
+                        continue
+
+                    # Kelly sizing
+                    kelly = kelly_criterion(book_odds, fair_prob, fraction=kelly_fraction)
+                    if not kelly["is_positive"]:
+                        continue
+
+                    wager = round(kelly["recommended_fraction"] * bankroll, 2)
+
+                    kelly_bets.append({
+                        "game_id": gid,
+                        "sport": first.get("sport"),
+                        "home_team": first.get("home_team"),
+                        "away_team": first.get("away_team"),
+                        "market_type": market_type,
+                        "side": side,
+                        "sportsbook": r["sportsbook"],
+                        "odds": book_odds,
+                        "book_implied_prob": round(book_prob, 6),
+                        "fair_prob": round(fair_prob, 6),
+                        "fair_prob_source": prob_source,
+                        "ev_edge_pct": round(ev_edge * 100, 3),
+                        "kelly_pct": kelly["recommended_pct"],
+                        "wager": f"${wager}",
+                        "wager_raw": wager,
+                        "full_kelly_pct": kelly["full_kelly_pct"],
+                        "last_updated": r.get("last_updated"),
+                        "context": f"Bet ${wager} ({kelly['recommended_pct']} of bankroll) on {side} {market_type} at {r['sportsbook']} ({book_odds}). Edge: {round(ev_edge*100,2)}% vs {prob_source}.",
+                    })
+
+    kelly_bets.sort(key=lambda b: b["wager_raw"], reverse=True)
+    total_wagered = round(sum(b["wager_raw"] for b in kelly_bets), 2)
+
+    result = {
+        "kelly_bets": kelly_bets,
+        "count": len(kelly_bets),
+        "settings": {
+            "kelly_fraction": kelly_fraction,
+            "bankroll": f"${bankroll}",
+            "fair_prob_source": "Pinnacle no-vig (preferred) with consensus fallback",
+        },
+        "total_suggested_wager": f"${total_wagered}",
+        "bankroll_pct_deployed": f"{round(total_wagered / bankroll * 100, 1)}%" if bankroll > 0 else "N/A",
+        "kelly_note": f"Using {kelly_fraction}x Kelly ({round(kelly_fraction*100)}% of full Kelly). Quarter Kelly (0.25) is recommended for most bettors to manage variance.",
+        "context": f"Found {len(kelly_bets)} Kelly-sized bets totaling ${total_wagered} ({round(total_wagered/bankroll*100,1)}% of ${bankroll} bankroll)." + (f" Top: {kelly_bets[0]['context']}" if kelly_bets else ""),
+    }
+    _cache.set_analysis(filename, cache_key, result)
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
 def get_market_entropy(game_id: Optional[str] = None, filename: Optional[str] = None) -> str:
     """Measure market efficiency via Shannon entropy of implied probabilities across books.
 
@@ -1870,17 +2165,19 @@ def get_market_entropy(game_id: Optional[str] = None, filename: Optional[str] = 
 
 @mcp.tool()
 def get_best_bets_today(filename: Optional[str] = None, count: int = 10) -> str:
-    """Get the top-N best bets right now, ranked by a composite value score.
+    """Get the top-N best bets right now, ranked by a composite value score, with Kelly bet sizing.
 
-    Combines +EV edge, low vig, outlier value, and line freshness into a single
-    ranked list of actionable recommendations. This is the best tool for
-    answering "what should I bet on?"
+    Combines +EV edge (using Pinnacle no-vig as true probability), low vig,
+    outlier value, and line freshness into a single ranked list of actionable
+    recommendations. Each bet includes Kelly Criterion sizing showing how much
+    of your bankroll to wager. This is the best tool for answering "what should
+    I bet on and how much?"
 
     Args:
         filename: Data file to load. Optional.
         count: Number of top bets to return. Default 10.
 
-    Returns a ranked list of the best bets with reasoning for each.
+    Returns a ranked list of the best bets with reasoning and Kelly sizing for each.
     """
     cache_key = f"best_bets:{count}"
     cached = _cache.get_analysis(filename, cache_key)
@@ -1889,6 +2186,7 @@ def get_best_bets_today(filename: Optional[str] = None, count: int = 10) -> str:
 
     odds = _load_odds(filename)
     games = _cache.load_by_game(filename)
+    pinnacle_probs = _get_pinnacle_fair_probs(games)
 
     scored_bets = []
 
@@ -1897,11 +2195,11 @@ def get_best_bets_today(filename: Optional[str] = None, count: int = 10) -> str:
 
         for market_type in ("spread", "moneyline", "total"):
             if market_type in ("spread", "moneyline"):
-                sides = [("home", "home_odds"), ("away", "away_odds")]
+                sides = [("home", "home_odds", "side_a_prob"), ("away", "away_odds", "side_b_prob")]
             else:
-                sides = [("over", "over_odds"), ("under", "under_odds")]
+                sides = [("over", "over_odds", "side_a_prob"), ("under", "under_odds", "side_b_prob")]
 
-            for side, odds_key in sides:
+            for side, odds_key, prob_key in sides:
                 all_entries = []
                 for r in records:
                     market = r.get("markets", {}).get(market_type, {})
@@ -1916,16 +2214,25 @@ def get_best_bets_today(filename: Optional[str] = None, count: int = 10) -> str:
                 if len(all_entries) < 2:
                     continue
 
-                # Consensus probability
-                probs = [implied_probability(e["odds"]) for e in all_entries]
-                avg_prob = sum(probs) / len(probs)
+                # Use Pinnacle fair prob if available, else consensus
+                game_fair = pinnacle_probs.get(game_id, {}).get(market_type)
+                if game_fair:
+                    fair_prob = game_fair[prob_key]
+                    prob_source = game_fair["source"]
+                else:
+                    probs = [implied_probability(e["odds"]) for e in all_entries]
+                    fair_prob = sum(probs) / len(probs)
+                    prob_source = "consensus"
 
-                # Find the best odds entry (highest American odds)
-                best_entry = max(all_entries, key=lambda e: e["odds"])
+                # Find the best odds entry (highest American odds), skip Pinnacle
+                non_pinnacle = [e for e in all_entries if e["sportsbook"].lower() != SHARP_BOOK.lower()]
+                if not non_pinnacle:
+                    continue
+                best_entry = max(non_pinnacle, key=lambda e: e["odds"])
                 best_prob = implied_probability(best_entry["odds"])
 
                 # EV edge
-                ev_edge = (avg_prob - best_prob) * 100
+                ev_edge = (fair_prob - best_prob) * 100
                 if ev_edge <= 0:
                     continue
 
@@ -1968,6 +2275,11 @@ def get_best_bets_today(filename: Optional[str] = None, count: int = 10) -> str:
                 elif market_type == "total":
                     extra_info["line"] = first["markets"].get("total", {}).get("line")
 
+                # Kelly sizing
+                kelly_full = kelly_criterion(best_entry["odds"], fair_prob, fraction=1.0)
+                kelly_half = kelly_criterion(best_entry["odds"], fair_prob, fraction=0.5)
+                kelly_quarter = kelly_criterion(best_entry["odds"], fair_prob, fraction=0.25)
+
                 scored_bets.append({
                     "game_id": game_id,
                     "sport": first.get("sport"),
@@ -1980,9 +2292,16 @@ def get_best_bets_today(filename: Optional[str] = None, count: int = 10) -> str:
                     "odds": best_entry["odds"],
                     "ev_edge_pct": round(ev_edge, 3),
                     "book_implied_prob": round(best_prob, 6),
-                    "consensus_fair_prob": round(avg_prob, 6),
+                    "fair_prob": round(fair_prob, 6),
+                    "fair_prob_source": prob_source,
                     "vig_at_book": round(vig, 6),
                     "composite_score": round(composite_score, 3),
+                    "kelly": {
+                        "full_kelly": kelly_full["recommended_pct"],
+                        "half_kelly": kelly_half["recommended_pct"],
+                        "quarter_kelly": kelly_quarter["recommended_pct"],
+                        "quarter_kelly_example": kelly_quarter["bankroll_example"],
+                    },
                     "last_updated": best_entry.get("last_updated", ""),
                     "freshness_penalty": round(freshness_penalty, 3),
                     "reasons": [],
@@ -1990,7 +2309,8 @@ def get_best_bets_today(filename: Optional[str] = None, count: int = 10) -> str:
 
                 # Build reasoning
                 bet = scored_bets[-1]
-                bet["reasons"].append(f"+EV edge: {round(ev_edge, 2)}% vs consensus")
+                bet["reasons"].append(f"+EV edge: {round(ev_edge, 2)}% vs {prob_source} fair prob")
+                bet["reasons"].append(f"Kelly sizing (quarter): {kelly_quarter['recommended_pct']} — {kelly_quarter['bankroll_example']}")
                 if outlier_bonus > 0.5:
                     bet["reasons"].append(f"Outlier value: {round(outlier_bonus, 1)} pts better than avg")
                 if vig < 0.04:
@@ -2005,7 +2325,9 @@ def get_best_bets_today(filename: Optional[str] = None, count: int = 10) -> str:
         "best_bets": top,
         "count": len(top),
         "total_candidates": len(scored_bets),
-        "context": f"Top {len(top)} bets by composite score (EV + outlier value - vig - staleness)." + (f" #1: {top[0]['side']} {top[0]['market_type']} at {top[0]['sportsbook']} ({top[0]['odds']}) — {', '.join(top[0]['reasons'])}" if top else ""),
+        "fair_prob_source": "Pinnacle no-vig (preferred) with consensus fallback",
+        "kelly_note": "Quarter Kelly (25%) is recommended. Kelly sizing uses Pinnacle no-vig probabilities as truth.",
+        "context": f"Top {len(top)} bets by composite score (EV + outlier value - vig - staleness) with Kelly sizing." + (f" #1: {top[0]['side']} {top[0]['market_type']} at {top[0]['sportsbook']} ({top[0]['odds']}) — {', '.join(top[0]['reasons'])}" if top else ""),
     }
     _cache.set_analysis(filename, cache_key, result)
     return json.dumps(result, indent=2)
@@ -2451,13 +2773,19 @@ def get_daily_digest(filename: Optional[str] = None) -> str:
             else:
                 confidence = "moderate"
 
+            # Include Kelly sizing if available
+            kelly_info = bet.get("kelly", {})
+
             must_bet.append({
                 "action": f"Bet {bet['side']} {bet['market_type']} at {bet['sportsbook']}",
                 "game": f"{bet.get('away_team', '?')} @ {bet.get('home_team', '?')}",
                 "odds": bet["odds"],
                 "ev_edge": f"{bet['ev_edge_pct']}%",
                 "book_implied_prob": f"{round(bet.get('book_implied_prob', 0) * 100, 1)}%",
-                "consensus_fair_prob": f"{round(bet.get('consensus_fair_prob', 0) * 100, 1)}%",
+                "fair_prob": f"{round(bet.get('fair_prob', bet.get('consensus_fair_prob', 0)) * 100, 1)}%",
+                "fair_prob_source": bet.get("fair_prob_source", "consensus"),
+                "kelly_quarter": kelly_info.get("quarter_kelly", "N/A"),
+                "kelly_example": kelly_info.get("quarter_kelly_example", "N/A"),
                 "last_updated": bet.get("last_updated", "unknown"),
                 "confidence": confidence,
                 "warnings": warnings,
@@ -3291,10 +3619,493 @@ def get_synthetic_hold_free_market(game_id: Optional[str] = None, filename: Opti
 
 
 
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CLUSTER ANALYSIS — Sportsbook Pricing Similarity
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+@mcp.tool()
+def get_sportsbook_clusters(filename: Optional[str] = None) -> str:
+    """Cluster sportsbooks by how similarly they price lines across all games.
+
+    Groups books that consistently post near-identical odds — revealing which
+    sportsbooks likely share the same odds feed, risk model, or parent company.
+    Also identifies books that price independently (e.g., Pinnacle).
+
+    Methodology:
+    1. For every game x market x side, each sportsbook contributes an odds value.
+    2. A pairwise "distance" is computed for each sportsbook pair as the average
+       absolute difference in American odds across all shared data points.
+    3. Agglomerative (average-linkage) clustering groups books whose average
+       pairwise distance falls below a configurable threshold.
+    4. A correlation matrix and agreement-rate matrix add additional context.
+
+    Args:
+        filename: Data file to load.  Optional — defaults to the first
+                  available file in the data directory.
+
+    Returns JSON with:
+        clusters          – list of clusters (groups of similar books)
+        distance_matrix   – full pairwise avg-odds-distance table
+        agreement_matrix  – pct of markets where two books post identical odds
+        independents      – books that don't cluster tightly with anyone
+        insights          – human-readable takeaways
+    """
+    cache_key = "sportsbook_clusters"
+    cached = _cache.get_analysis(filename, cache_key)
+    if cached is not None:
+        return json.dumps(cached, indent=2)
+
+    enriched = _cache.load_enriched(filename)
+    if not enriched:
+        return json.dumps({"error": "No data available"})
+
+    by_game = _cache.load_by_game(filename)
+
+    # ------------------------------------------------------------------
+    # Step 1: Build a per-sportsbook odds vector.
+    # Each vector element is keyed by (game_id, market_type, side) and the
+    # value is the American odds posted by that book.
+    # ------------------------------------------------------------------
+    book_vectors: dict[str, dict[tuple, float]] = {}
+
+    for game_id, records in by_game.items():
+        for record in records:
+            book = record["sportsbook"]
+            markets = record.get("markets", {})
+
+            for market_type, market_data in markets.items():
+                if market_type == "spread":
+                    sides = [
+                        ("home_spread", market_data.get("home_odds")),
+                        ("away_spread", market_data.get("away_odds")),
+                        ("home_line", market_data.get("home_line")),
+                        ("away_line", market_data.get("away_line")),
+                    ]
+                elif market_type == "moneyline":
+                    sides = [
+                        ("home_ml", market_data.get("home_odds")),
+                        ("away_ml", market_data.get("away_odds")),
+                    ]
+                elif market_type == "total":
+                    sides = [
+                        ("over", market_data.get("over_odds")),
+                        ("under", market_data.get("under_odds")),
+                        ("total_line", market_data.get("line")),
+                    ]
+                else:
+                    continue
+
+                for side_label, odds_val in sides:
+                    if odds_val is None:
+                        continue
+                    key = (game_id, market_type, side_label)
+                    book_vectors.setdefault(book, {})[key] = float(odds_val)
+
+    books = sorted(book_vectors.keys())
+    n = len(books)
+
+    if n < 2:
+        return json.dumps({"error": "Need at least 2 sportsbooks for cluster analysis"})
+
+    # ------------------------------------------------------------------
+    # Step 2: Pairwise distance & agreement matrices
+    # Distance = mean |odds_a - odds_b| across all shared data points
+    # Agreement = fraction of shared points where odds are exactly equal
+    # ------------------------------------------------------------------
+    dist_matrix: dict[str, dict[str, float]] = {b: {} for b in books}
+    agree_matrix: dict[str, dict[str, float]] = {b: {} for b in books}
+    pair_details: dict[tuple, dict] = {}
+
+    for i in range(n):
+        for j in range(i, n):
+            ba, bb = books[i], books[j]
+            shared_keys = set(book_vectors[ba].keys()) & set(book_vectors[bb].keys())
+            if not shared_keys:
+                dist_matrix[ba][bb] = dist_matrix[bb][ba] = float("inf")
+                agree_matrix[ba][bb] = agree_matrix[bb][ba] = 0.0
+                continue
+
+            diffs = []
+            exact_matches = 0
+            for k in shared_keys:
+                va, vb = book_vectors[ba][k], book_vectors[bb][k]
+                diffs.append(abs(va - vb))
+                if va == vb:
+                    exact_matches += 1
+
+            avg_diff = mean(diffs) if diffs else 0.0
+            agree_pct = (exact_matches / len(shared_keys) * 100) if shared_keys else 0.0
+
+            dist_matrix[ba][bb] = round(avg_diff, 2)
+            dist_matrix[bb][ba] = round(avg_diff, 2)
+            agree_matrix[ba][bb] = round(agree_pct, 1)
+            agree_matrix[bb][ba] = round(agree_pct, 1)
+
+            if i != j:
+                pair_details[(ba, bb)] = {
+                    "avg_odds_diff": round(avg_diff, 2),
+                    "agreement_pct": round(agree_pct, 1),
+                    "shared_data_points": len(shared_keys),
+                    "exact_matches": exact_matches,
+                    "max_diff": round(max(diffs), 1) if diffs else 0,
+                }
+
+    # ------------------------------------------------------------------
+    # Step 3: Agglomerative clustering (average-linkage)
+    # Merge the closest pair of clusters until the minimum inter-cluster
+    # distance exceeds the threshold.
+    # ------------------------------------------------------------------
+    CLUSTER_THRESHOLD = 8.0  # avg odds diff <= 8 pts -> same cluster
+
+    # Start with each book in its own cluster
+    clusters: list[set[str]] = [{b} for b in books]
+
+    def _cluster_dist(c1: set[str], c2: set[str]) -> float:
+        """Average-linkage distance between two clusters."""
+        dists = []
+        for a in c1:
+            for b in c2:
+                d = dist_matrix[a].get(b, inf)
+                if d < inf:
+                    dists.append(d)
+        return mean(dists) if dists else inf
+
+    while True:
+        best_dist = inf
+        merge_i, merge_j = -1, -1
+        for i in range(len(clusters)):
+            for j in range(i + 1, len(clusters)):
+                d = _cluster_dist(clusters[i], clusters[j])
+                if d < best_dist:
+                    best_dist = d
+                    merge_i, merge_j = i, j
+        if best_dist > CLUSTER_THRESHOLD or merge_i < 0:
+            break
+        clusters[merge_i] = clusters[merge_i] | clusters[merge_j]
+        clusters.pop(merge_j)
+
+    # ------------------------------------------------------------------
+    # Step 4: Label clusters and identify independents
+    # ------------------------------------------------------------------
+    cluster_results = []
+    independents = []
+
+    for idx, members in enumerate(sorted(clusters, key=len, reverse=True)):
+        sorted_members = sorted(members)
+        if len(members) == 1:
+            book = sorted_members[0]
+            # Find its closest neighbor
+            closest = None
+            closest_dist = inf
+            for other in books:
+                if other == book:
+                    continue
+                d = dist_matrix[book].get(other, inf)
+                if d < closest_dist:
+                    closest_dist = d
+                    closest = other
+            independents.append({
+                "sportsbook": book,
+                "closest_peer": closest,
+                "distance_to_closest": round(closest_dist, 2),
+                "interpretation": (
+                    f"{book} prices independently — closest to {closest} "
+                    f"(avg diff {round(closest_dist, 1)} pts) but still outside "
+                    f"the clustering threshold of {CLUSTER_THRESHOLD} pts."
+                ),
+            })
+            continue
+
+        # Intra-cluster stats
+        intra_dists = []
+        intra_agreements = []
+        for i, a in enumerate(sorted_members):
+            for b in sorted_members[i + 1:]:
+                intra_dists.append(dist_matrix[a][b])
+                intra_agreements.append(agree_matrix[a][b])
+
+        avg_intra = round(mean(intra_dists), 2) if intra_dists else 0
+        avg_agree = round(mean(intra_agreements), 1) if intra_agreements else 0
+
+        # Pairwise breakdown within cluster
+        pairwise = []
+        for i, a in enumerate(sorted_members):
+            for b in sorted_members[i + 1:]:
+                key = (a, b) if (a, b) in pair_details else (b, a)
+                detail = pair_details.get(key, {})
+                pairwise.append({
+                    "books": [a, b],
+                    "avg_odds_diff": detail.get("avg_odds_diff", 0),
+                    "agreement_pct": detail.get("agreement_pct", 0),
+                })
+
+        cluster_results.append({
+            "cluster_id": idx + 1,
+            "members": sorted_members,
+            "size": len(members),
+            "avg_internal_distance": avg_intra,
+            "avg_agreement_pct": avg_agree,
+            "likely_shared_feed": avg_intra <= 3.0,
+            "pairwise_details": sorted(pairwise, key=lambda p: p["avg_odds_diff"]),
+            "interpretation": (
+                f"These {len(members)} books price very similarly "
+                f"(avg diff {avg_intra} pts, {avg_agree}% exact agreement). "
+                + ("Likely sharing an odds feed or risk model." if avg_intra <= 3.0
+                   else "Similar pricing philosophy but some independent adjustments.")
+            ),
+        })
+
+    # ------------------------------------------------------------------
+    # Step 5: Build sorted pair rankings (most similar -> least)
+    # ------------------------------------------------------------------
+    all_pairs = []
+    for (a, b), detail in sorted(pair_details.items()):
+        all_pairs.append({
+            "books": [a, b],
+            **detail,
+        })
+    all_pairs.sort(key=lambda p: p["avg_odds_diff"])
+
+    # ------------------------------------------------------------------
+    # Step 6: Generate insights
+    # ------------------------------------------------------------------
+    insights = []
+
+    if cluster_results:
+        biggest = cluster_results[0]
+        insights.append(
+            f"Largest cluster: {', '.join(biggest['members'])} "
+            f"({biggest['size']} books, avg diff {biggest['avg_internal_distance']} pts)"
+        )
+        if biggest.get("likely_shared_feed"):
+            insights.append(
+                f"⚠️ {', '.join(biggest['members'])} likely share the same odds feed — "
+                f"shopping between them adds little value."
+            )
+
+    if independents:
+        indie_names = [ind["sportsbook"] for ind in independents]
+        insights.append(
+            f"Independent pricers: {', '.join(indie_names)} — "
+            f"these books set their own lines and are valuable for line shopping."
+        )
+
+    if all_pairs:
+        closest = all_pairs[0]
+        insights.append(
+            f"Most similar pair: {closest['books'][0]} & {closest['books'][1]} "
+            f"(avg diff {closest['avg_odds_diff']} pts, {closest['agreement_pct']}% agreement)"
+        )
+        farthest = all_pairs[-1]
+        insights.append(
+            f"Most different pair: {farthest['books'][0]} & {farthest['books'][1]} "
+            f"(avg diff {farthest['avg_odds_diff']} pts, {farthest['agreement_pct']}% agreement)"
+        )
+
+    result = {
+        "clusters": cluster_results,
+        "independents": independents,
+        "most_similar_pairs": all_pairs[:5],
+        "most_different_pairs": all_pairs[-5:][::-1] if len(all_pairs) >= 5 else list(reversed(all_pairs)),
+        "distance_matrix": {b: {b2: dist_matrix[b][b2] for b2 in books} for b in books},
+        "agreement_matrix": {b: {b2: agree_matrix[b][b2] for b2 in books} for b in books},
+        "insights": insights,
+        "methodology": (
+            "For every game x market x side, each sportsbook's American odds (and lines "
+            "for spread/totals) form a vector. Pairwise distance = mean absolute difference "
+            "across all shared data points. Books are clustered using average-linkage "
+            f"agglomerative clustering with a threshold of {CLUSTER_THRESHOLD} points. "
+            "High agreement % + low distance -> likely shared odds feed or risk model."
+        ),
+        "cluster_threshold": CLUSTER_THRESHOLD,
+        "total_sportsbooks": n,
+        "total_data_points": sum(len(v) for v in book_vectors.values()),
+        "context": (
+            f"Clustered {n} sportsbooks into {len(cluster_results)} group(s) "
+            f"with {len(independents)} independent pricer(s). "
+            f"Books in the same cluster tend to share odds feeds or risk models."
+        ),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _cache.set_analysis(filename, cache_key, result)
+    return json.dumps(result, indent=2)
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # RESOURCES — Context Data
 # ═══════════════════════════════════════════════════════════════════════════
 
+
+
+@mcp.tool()
+def get_zscore_anomalies(
+    game_id: Optional[str] = None,
+    filename: Optional[str] = None,
+    z_threshold: float = 2.0,
+) -> str:
+    """Detect anomalous odds using z-score analysis across sportsbooks.
+
+    For each game's market (spread, moneyline, total), computes the mean and
+    standard deviation of odds across all books, then flags any individual
+    book's odds whose absolute z-score exceeds the threshold.
+
+    High z-scores indicate the book is pricing significantly differently from
+    the consensus - could signal a stale line, pricing error, or sharp move.
+
+    Args:
+        game_id: Optional game to limit analysis to.
+        filename: Data file to load. Optional.
+        z_threshold: Minimum absolute z-score to flag (default 2.0).
+
+    Returns anomalies sorted by z-score descending with full context.
+    """
+    cache_key = f"zscore_anomalies:{game_id or 'all'}:{z_threshold}"
+    cached = _cache.get_analysis(filename, cache_key)
+    if cached is not None:
+        return json.dumps(cached, indent=2)
+
+    games = _cache.load_by_game(filename)
+    anomalies: list[dict] = []
+
+    target_games = {game_id: games[game_id]} if game_id and game_id in games else games
+
+    for gid, records in target_games.items():
+        first = records[0]
+
+        market_keys_map = {
+            "spread": ["home_odds", "away_odds"],
+            "moneyline": ["home_odds", "away_odds"],
+            "total": ["over_odds", "under_odds"],
+        }
+
+        for market_type, odds_keys in market_keys_map.items():
+            for odds_key in odds_keys:
+                entries = []
+                for r in records:
+                    market = r.get("markets", {}).get(market_type, {})
+                    if odds_key in market:
+                        entries.append({
+                            "sportsbook": r["sportsbook"],
+                            "odds": market[odds_key],
+                            "last_updated": r.get("last_updated"),
+                        })
+
+                if len(entries) < 3:
+                    continue
+
+                values = [e["odds"] for e in entries]
+                mu = mean(values)
+                sigma = pstdev(values)
+
+                if sigma == 0:
+                    continue
+
+                for e in entries:
+                    z = (e["odds"] - mu) / sigma
+                    if abs(z) >= z_threshold:
+                        side = odds_key.replace("_odds", "")
+                        direction = (
+                            "better_for_bettor" if e["odds"] > mu else "worse_for_bettor"
+                        )
+                        anomalies.append({
+                            "game_id": gid,
+                            "sport": first.get("sport"),
+                            "home_team": first.get("home_team"),
+                            "away_team": first.get("away_team"),
+                            "market_type": market_type,
+                            "side": side,
+                            "sportsbook": e["sportsbook"],
+                            "odds": e["odds"],
+                            "z_score": round(z, 3),
+                            "abs_z_score": round(abs(z), 3),
+                            "mean_odds": round(mu, 2),
+                            "std_dev": round(sigma, 2),
+                            "deviation": round(e["odds"] - mu, 2),
+                            "direction": direction,
+                            "last_updated": e.get("last_updated"),
+                            "context": (
+                                f"Z-SCORE ANOMALY: {e['sportsbook']} {side} {market_type} "
+                                f"at {e['odds']} (z={round(z, 2)}, mean={round(mu, 1)}, "
+                                f"σ={round(sigma, 1)}). "
+                                f"{'Potential value - priced above market!' if direction == 'better_for_bettor' else 'Avoid - priced below market.'}"
+                            ),
+                        })
+
+        # Also check spread LINES and total LINES for z-score anomalies
+        line_checks = [
+            ("spread", "home_line", "spread line"),
+            ("total", "line", "total line"),
+        ]
+        for market_type, line_key, label in line_checks:
+            entries = []
+            for r in records:
+                market = r.get("markets", {}).get(market_type, {})
+                if line_key in market:
+                    entries.append({
+                        "sportsbook": r["sportsbook"],
+                        "line": market[line_key],
+                        "last_updated": r.get("last_updated"),
+                    })
+
+            if len(entries) < 3:
+                continue
+
+            values = [e["line"] for e in entries]
+            mu = mean(values)
+            sigma = pstdev(values)
+
+            if sigma == 0:
+                continue
+
+            for e in entries:
+                z = (e["line"] - mu) / sigma
+                if abs(z) >= z_threshold:
+                    anomalies.append({
+                        "game_id": gid,
+                        "sport": first.get("sport"),
+                        "home_team": first.get("home_team"),
+                        "away_team": first.get("away_team"),
+                        "market_type": market_type,
+                        "type": "line_anomaly",
+                        "sportsbook": e["sportsbook"],
+                        "line": e["line"],
+                        "z_score": round(z, 3),
+                        "abs_z_score": round(abs(z), 3),
+                        "mean_line": round(mu, 2),
+                        "std_dev": round(sigma, 2),
+                        "deviation": round(e["line"] - mu, 2),
+                        "last_updated": e.get("last_updated"),
+                        "context": (
+                            f"Z-SCORE LINE ANOMALY: {e['sportsbook']} {label} "
+                            f"at {e['line']} (z={round(z, 2)}, mean={round(mu, 1)}, "
+                            f"σ={round(sigma, 2)})"
+                        ),
+                    })
+
+    anomalies.sort(key=lambda a: a["abs_z_score"], reverse=True)
+
+    odds_anomalies = [a for a in anomalies if a.get("type") != "line_anomaly"]
+    line_anomalies = [a for a in anomalies if a.get("type") == "line_anomaly"]
+
+    result = {
+        "anomalies": anomalies,
+        "count": len(anomalies),
+        "odds_anomalies": len(odds_anomalies),
+        "line_anomalies": len(line_anomalies),
+        "z_threshold": z_threshold,
+        "games_analyzed": len(target_games),
+        "context": (
+            f"Found {len(anomalies)} z-score anomalies (|z| > {z_threshold}) "
+            f"across {len(target_games)} game(s): "
+            f"{len(odds_anomalies)} odds anomalies, {len(line_anomalies)} line anomalies."
+            + (f" Most extreme: {anomalies[0]['context']}" if anomalies else "")
+        ),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _cache.set_analysis(filename, cache_key, result)
+    return json.dumps(result, indent=2)
 
 @mcp.resource("betstamp://data/{filename}")
 def get_raw_data(filename: str) -> str:

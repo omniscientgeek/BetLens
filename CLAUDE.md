@@ -52,7 +52,7 @@ A standalone MCP server (`mcp-server/mcp_server.py`) that exposes betting intell
 
 **Run manually:** `python mcp-server/mcp_server.py`
 
-### Available MCP Tools (24 total)
+### Available MCP Tools (26 total)
 
 | Tool | Purpose |
 |------|---------|
@@ -79,6 +79,8 @@ A standalone MCP server (`mcp-server/mcp_server.py`) that exposes betting intell
 | `get_sharpness_scores` | Score each sportsbook's sharpness vs Pinnacle (benchmark sharp book) — correlation, line diffs, classification |
 | `get_market_correlations` | Cross-market consistency analysis: spread vs ML vs total correlations, per-book consistency scores, mispricing flags |
 | `get_market_entropy` | Shannon entropy of implied probabilities across books — higher entropy = more disagreement = potentially exploitable |
+| `get_synthetic_hold_free_market` | Build a "perfect book" from best odds across all sportsbooks — shows the edge a sharp line-shopper captures vs fair odds |
+| `get_sportsbook_clusters` | Cluster sportsbooks by pricing similarity — reveals shared odds feeds, risk models, and independent pricers |
 | `get_daily_digest` | Structured daily briefing: must-bet, avoid, interesting, book grades, power rankings |
 
 ### MCP Resources
