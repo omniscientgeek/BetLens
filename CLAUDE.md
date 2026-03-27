@@ -52,7 +52,7 @@ A standalone MCP server (`mcp-server/mcp_server.py`) that exposes betting intell
 
 **Run manually:** `python mcp-server/mcp_server.py`
 
-### Available MCP Tools (27 total)
+### Available MCP Tools (34 total)
 
 | Tool | Purpose |
 |------|---------|
@@ -82,6 +82,15 @@ A standalone MCP server (`mcp-server/mcp_server.py`) that exposes betting intell
 | `get_market_entropy` | Shannon entropy of implied probabilities across books — higher entropy = more disagreement = potentially exploitable |
 | `get_synthetic_hold_free_market` | Build a "perfect book" from best odds across all sportsbooks — shows the edge a sharp line-shopper captures vs fair odds |
 | `get_sportsbook_clusters` | Cluster sportsbooks by pricing similarity — reveals shared odds feeds, risk models, and independent pricers |
+| `get_sportsbook_correlation_network` | Pearson correlation matrix of sportsbook pairs — reveals shared odds feeds (high r) vs. independent pricers (low r), with per-book role classification |
+| `get_odds_shape_analysis` | Visual heatmap + pattern recognition to detect abnormal odds shapes — flags potential match fixing with per-game integrity scores (0-100) |
+| `find_cross_market_arbitrage` | Cross-market arb detection: ML vs spread mispricings, tight-spread equivalence gaps, and cross-market probability inconsistencies |
+| `detect_knn_anomalies` | Unsupervised KNN + Isolation Forest anomaly detection — flags odds deviating from normative patterns using 10-D feature vectors (odds deviation, staleness, line movement direction) |
+| `get_closing_line_value` | CLV simulation — identify which early lines beat the closing line, per-book CLV profiles, and exploitable vs sharp book classification |
+| `get_gamlss_analysis` | GAMLSS (Location, Scale, Shape) modeling of odds distributions — models skewness and kurtosis to detect anomalies that standard z-scores miss |
+| `get_poisson_score_predictions` | Poisson model for score prediction — derive exact score probabilities, price alternative spreads/totals, identify key numbers, and estimate half/quarter distributions from consensus spread + total |
+| `get_shin_fair_odds` | Shin model margin decomposition — allocates more vig to longshots (how books actually operate) for more accurate true probabilities than naive vig removal |
+| `get_information_flow` | Map timestamp-based information flow — which sportsbook moves first (market leader/sharpest) vs followers, with exploitable laggard windows |
 | `get_daily_digest` | Structured daily briefing: must-bet, avoid, interesting, book grades, power rankings |
 
 ### MCP Resources

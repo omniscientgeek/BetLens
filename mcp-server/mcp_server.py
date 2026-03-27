@@ -2205,6 +2205,382 @@ def get_kelly_sizing(game_id: Optional[str] = None, filename: Optional[str] = No
     return json.dumps(result, indent=2)
 
 
+
+
+@mcp.tool()
+def simulate_bankroll_kelly(
+    filename: Optional[str] = None,
+    bankroll: float = 1000.0,
+    kelly_fraction: float = 0.5,
+    min_ev_pct: float = 0.0,
+    max_bet_pct: float = 10.0,
+    num_simulations: int = 1000,
+) -> str:
+    """Run a full bankroll management simulation using fractional Kelly across all games.
+
+    For every +EV opportunity found across all games, this tool calculates
+    Kelly-optimal bet sizes (scaled by kelly_fraction), then runs Monte Carlo
+    simulations to project bankroll outcomes over the full slate.
+
+    The Kelly formula: f* = (bp - q) / b
+      where b = decimal odds - 1, p = true probability, q = 1 - p
+
+    Fractional Kelly (e.g. half-Kelly with kelly_fraction=0.5) is applied to
+    reduce variance and drawdown risk while retaining most of the edge.
+
+    The simulation:
+    1. Identifies all +EV bets across every game/market/sportsbook.
+    2. For each bet, calculates the fractional Kelly wager (capped at max_bet_pct
+       of current bankroll).
+    3. Runs num_simulations Monte Carlo trials where each bet is resolved
+       randomly according to its fair probability.
+    4. Reports projected bankroll growth, risk of ruin, drawdown stats, and
+       per-bet breakdowns.
+
+    Args:
+        filename: Data file to load. Optional.
+        bankroll: Starting bankroll in dollars. Default $1,000.
+        kelly_fraction: Fraction of full Kelly to bet (0.5 = half-Kelly recommended).
+                        Common values: 1.0 (full, aggressive), 0.5 (half, balanced),
+                        0.25 (quarter, conservative).
+        min_ev_pct: Minimum EV edge (%) to include a bet. Default 0 (all +EV bets).
+        max_bet_pct: Maximum single bet as % of current bankroll (risk cap). Default 10%.
+        num_simulations: Number of Monte Carlo trials. Default 1,000.
+
+    Returns a comprehensive bankroll simulation with per-bet sizing, projected
+    outcomes, drawdown analysis, and risk metrics.
+    """
+    cache_key = f"bankroll_sim:{bankroll}:{kelly_fraction}:{min_ev_pct}:{max_bet_pct}:{num_simulations}"
+    cached = _cache.get_analysis(filename, cache_key)
+    if cached is not None:
+        return json.dumps(cached, indent=2)
+
+    games = _cache.load_by_game(filename)
+    pinnacle_probs = _get_pinnacle_fair_probs(games)
+
+    # ── Step 1: Collect all +EV opportunities with Kelly sizing ──────────
+    bet_slate: list[dict] = []
+
+    for gid, records in games.items():
+        first = records[0]
+        home_team = first.get("home_team", "Unknown")
+        away_team = first.get("away_team", "Unknown")
+        sport = first.get("sport", "Unknown")
+
+        for market_type in ("spread", "moneyline", "total"):
+            if market_type in ("spread", "moneyline"):
+                sides = [("home", "home_odds", "side_a_prob"),
+                         ("away", "away_odds", "side_b_prob")]
+            else:
+                sides = [("over", "over_odds", "side_a_prob"),
+                         ("under", "under_odds", "side_b_prob")]
+
+            for side, odds_key, prob_key in sides:
+                game_fair = pinnacle_probs.get(gid, {}).get(market_type)
+                if not game_fair:
+                    continue
+                fair_prob = game_fair[prob_key]
+                prob_source = game_fair["source"]
+
+                for r in records:
+                    if r.get("sportsbook", "").lower() == SHARP_BOOK.lower():
+                        continue
+
+                    market = r.get("markets", {}).get(market_type, {})
+                    if odds_key not in market:
+                        continue
+
+                    book_odds = market[odds_key]
+                    book_prob = implied_probability(book_odds)
+                    ev_edge = fair_prob - book_prob
+
+                    if ev_edge <= 0 or (ev_edge * 100) < min_ev_pct:
+                        continue
+
+                    # Decimal net payout (b)
+                    if book_odds < 0:
+                        b = 100 / abs(book_odds)
+                    elif book_odds > 0:
+                        b = book_odds / 100
+                    else:
+                        b = 1.0
+
+                    p = fair_prob
+                    q = 1 - p
+
+                    # Full Kelly: f* = (bp - q) / b
+                    full_kelly = (b * p - q) / b if b != 0 else 0.0
+                    full_kelly = max(0.0, min(full_kelly, 1.0))
+
+                    if full_kelly <= 0:
+                        continue
+
+                    frac_kelly = full_kelly * kelly_fraction
+                    # Cap at max_bet_pct of bankroll
+                    frac_kelly = min(frac_kelly, max_bet_pct / 100.0)
+
+                    decimal_odds = b + 1  # total payout per $1
+
+                    bet_slate.append({
+                        "game_id": gid,
+                        "sport": sport,
+                        "home_team": home_team,
+                        "away_team": away_team,
+                        "market_type": market_type,
+                        "side": side,
+                        "sportsbook": r["sportsbook"],
+                        "odds": book_odds,
+                        "decimal_odds": round(decimal_odds, 4),
+                        "book_implied_prob": round(book_prob, 6),
+                        "fair_prob": round(fair_prob, 6),
+                        "fair_prob_source": prob_source,
+                        "ev_edge_pct": round(ev_edge * 100, 3),
+                        "full_kelly_pct": round(full_kelly * 100, 3),
+                        "fractional_kelly_pct": round(frac_kelly * 100, 3),
+                        "wager_on_starting_bankroll": round(frac_kelly * bankroll, 2),
+                        "net_payout_per_dollar": round(b, 4),
+                        "expected_value_per_dollar": round(p * b - q, 4),
+                        "last_updated": r.get("last_updated"),
+                    })
+
+    # Sort by EV edge descending (best opportunities first)
+    bet_slate.sort(key=lambda x: x["ev_edge_pct"], reverse=True)
+
+    if not bet_slate:
+        result = {
+            "error": "No +EV opportunities found for simulation.",
+            "settings": {
+                "bankroll": f"${bankroll}",
+                "kelly_fraction": kelly_fraction,
+                "min_ev_pct": min_ev_pct,
+            },
+        }
+        _cache.set_analysis(filename, cache_key, result)
+        return json.dumps(result, indent=2)
+
+    # ── Step 2: Deterministic (expected) bankroll projection ─────────────
+    # Walk through bets sequentially, sizing each off current bankroll
+    expected_bankroll = bankroll
+    bet_plan: list[dict] = []
+
+    for bet in bet_slate:
+        wager = round(bet["fractional_kelly_pct"] / 100.0 * expected_bankroll, 2)
+        wager = min(wager, expected_bankroll)  # can't bet more than you have
+
+        ev_per_dollar = bet["expected_value_per_dollar"]
+        expected_profit = round(wager * ev_per_dollar, 2)
+        expected_bankroll_after = round(expected_bankroll + expected_profit, 2)
+
+        bet_plan.append({
+            "order": len(bet_plan) + 1,
+            "game": f"{bet['away_team']} @ {bet['home_team']}",
+            "bet": f"{bet['side']} {bet['market_type']} at {bet['sportsbook']}",
+            "odds": bet["odds"],
+            "fair_prob": f"{round(bet['fair_prob'] * 100, 1)}%",
+            "ev_edge": f"{bet['ev_edge_pct']}%",
+            "kelly_full": f"{bet['full_kelly_pct']}%",
+            "kelly_used": f"{bet['fractional_kelly_pct']}%",
+            "wager": f"${wager}",
+            "wager_raw": wager,
+            "expected_profit": f"${expected_profit}",
+            "bankroll_before": f"${round(expected_bankroll, 2)}",
+            "bankroll_after_ev": f"${expected_bankroll_after}",
+        })
+
+        expected_bankroll = expected_bankroll_after
+
+    total_wagered = round(sum(b["wager_raw"] for b in bet_plan), 2)
+    expected_growth = round(expected_bankroll - bankroll, 2)
+    expected_roi = round((expected_bankroll / bankroll - 1) * 100, 3)
+
+    # ── Step 3: Monte Carlo simulation ───────────────────────────────────
+    final_bankrolls: list[float] = []
+    max_drawdowns: list[float] = []
+    bust_count = 0  # bankroll drops below 1% of starting
+
+    for _ in range(num_simulations):
+        sim_bankroll = bankroll
+        peak = bankroll
+        worst_drawdown = 0.0
+
+        for bet in bet_slate:
+            if sim_bankroll <= 0:
+                break
+
+            wager = bet["fractional_kelly_pct"] / 100.0 * sim_bankroll
+            wager = min(wager, sim_bankroll)
+
+            # Resolve bet randomly using fair probability
+            if random.random() < bet["fair_prob"]:
+                # Win: profit = wager * net_payout
+                sim_bankroll += wager * bet["net_payout_per_dollar"]
+            else:
+                # Loss: lose the wager
+                sim_bankroll -= wager
+
+            # Track peak and drawdown
+            if sim_bankroll > peak:
+                peak = sim_bankroll
+            dd = (peak - sim_bankroll) / peak if peak > 0 else 0
+            if dd > worst_drawdown:
+                worst_drawdown = dd
+
+        final_bankrolls.append(round(sim_bankroll, 2))
+        max_drawdowns.append(round(worst_drawdown * 100, 2))
+        if sim_bankroll < bankroll * 0.01:
+            bust_count += 1
+
+    final_bankrolls.sort()
+    max_drawdowns.sort()
+    n = len(final_bankrolls)
+
+    avg_final = round(mean(final_bankrolls), 2)
+    median_final = final_bankrolls[n // 2]
+    p5 = final_bankrolls[int(n * 0.05)]
+    p25 = final_bankrolls[int(n * 0.25)]
+    p75 = final_bankrolls[int(n * 0.75)]
+    p95 = final_bankrolls[int(n * 0.95)]
+    worst_case = final_bankrolls[0]
+    best_case = final_bankrolls[-1]
+
+    avg_drawdown = round(mean(max_drawdowns), 2)
+    median_drawdown = max_drawdowns[len(max_drawdowns) // 2]
+    worst_drawdown_sim = max_drawdowns[-1]
+
+    profitable_sims = sum(1 for b in final_bankrolls if b > bankroll)
+    win_rate = round(profitable_sims / n * 100, 1)
+
+    # ── Step 4: Per-game summary ─────────────────────────────────────────
+    game_summaries: dict[str, dict] = {}
+    for bet in bet_slate:
+        gid = bet["game_id"]
+        if gid not in game_summaries:
+            game_summaries[gid] = {
+                "game": f"{bet['away_team']} @ {bet['home_team']}",
+                "sport": bet["sport"],
+                "bet_count": 0,
+                "total_kelly_exposure_pct": 0.0,
+                "best_ev_edge_pct": 0.0,
+                "bets": [],
+            }
+        gs = game_summaries[gid]
+        gs["bet_count"] += 1
+        gs["total_kelly_exposure_pct"] += bet["fractional_kelly_pct"]
+        gs["best_ev_edge_pct"] = max(gs["best_ev_edge_pct"], bet["ev_edge_pct"])
+        gs["bets"].append(
+            f"{bet['side']} {bet['market_type']} at {bet['sportsbook']} "
+            f"({bet['odds']}, edge {bet['ev_edge_pct']}%)"
+        )
+
+    for gs in game_summaries.values():
+        gs["total_kelly_exposure_pct"] = round(gs["total_kelly_exposure_pct"], 3)
+
+    game_list = sorted(
+        game_summaries.values(),
+        key=lambda g: g["best_ev_edge_pct"],
+        reverse=True,
+    )
+
+    # ── Step 5: Assemble result ──────────────────────────────────────────
+    result = {
+        "simulation_settings": {
+            "starting_bankroll": f"${bankroll}",
+            "kelly_fraction": kelly_fraction,
+            "kelly_label": {
+                1.0: "Full Kelly",
+                0.5: "Half Kelly",
+                0.25: "Quarter Kelly",
+            }.get(kelly_fraction, f"{kelly_fraction}x Kelly"),
+            "min_ev_pct": min_ev_pct,
+            "max_single_bet_pct": f"{max_bet_pct}%",
+            "num_simulations": num_simulations,
+            "fair_prob_source": "Pinnacle no-vig (preferred) with consensus fallback",
+        },
+        "bet_slate": {
+            "total_bets": len(bet_slate),
+            "unique_games": len(game_summaries),
+            "total_wagered_on_starting_bankroll": f"${total_wagered}",
+            "bankroll_pct_deployed": f"{round(total_wagered / bankroll * 100, 1)}%",
+        },
+        "expected_outcome": {
+            "expected_final_bankroll": f"${round(expected_bankroll, 2)}",
+            "expected_profit": f"${expected_growth}",
+            "expected_roi": f"{expected_roi}%",
+            "note": "Deterministic projection using EV of each bet sequentially.",
+        },
+        "monte_carlo_results": {
+            "simulations_run": num_simulations,
+            "average_final_bankroll": f"${avg_final}",
+            "median_final_bankroll": f"${median_final}",
+            "percentiles": {
+                "p5_worst_realistic": f"${p5}",
+                "p25": f"${p25}",
+                "p50_median": f"${median_final}",
+                "p75": f"${p75}",
+                "p95_best_realistic": f"${p95}",
+            },
+            "worst_case": f"${worst_case}",
+            "best_case": f"${best_case}",
+            "profitable_simulations": f"{win_rate}%",
+            "risk_of_ruin": f"{round(bust_count / n * 100, 2)}%",
+            "ruin_note": "Ruin = bankroll drops below 1% of starting value.",
+        },
+        "drawdown_analysis": {
+            "avg_max_drawdown": f"{avg_drawdown}%",
+            "median_max_drawdown": f"{median_drawdown}%",
+            "worst_max_drawdown": f"{worst_drawdown_sim}%",
+            "drawdown_note": "Max drawdown = largest peak-to-trough decline during the simulation.",
+        },
+        "per_game_breakdown": game_list,
+        "bet_plan": bet_plan,
+        "kelly_comparison": {
+            "note": "Comparing Kelly fractions. Higher fractions grow faster but with more variance and drawdown risk.",
+            "fractions": [],
+        },
+        "context": (
+            f"Bankroll simulation: {len(bet_slate)} +EV bets across "
+            f"{len(game_summaries)} games. "
+            f"Using {kelly_fraction}x Kelly on ${bankroll} bankroll. "
+            f"Expected profit: ${expected_growth} ({expected_roi}% ROI). "
+            f"Monte Carlo ({num_simulations} sims): median ${median_final}, "
+            f"win rate {win_rate}%, risk of ruin {round(bust_count / n * 100, 2)}%, "
+            f"avg max drawdown {avg_drawdown}%."
+        ),
+    }
+
+    # ── Quick comparison of different Kelly fractions ─────────────────────
+    for frac, label in [(0.25, "Quarter Kelly"), (0.5, "Half Kelly"), (1.0, "Full Kelly")]:
+        sim_results: list[float] = []
+        for _ in range(min(500, num_simulations)):
+            sim_b = bankroll
+            for bet in bet_slate:
+                if sim_b <= 0:
+                    break
+                fk = (bet["full_kelly_pct"] / 100.0) * frac
+                fk = min(fk, max_bet_pct / 100.0)
+                w = fk * sim_b
+                w = min(w, sim_b)
+                if random.random() < bet["fair_prob"]:
+                    sim_b += w * bet["net_payout_per_dollar"]
+                else:
+                    sim_b -= w
+            sim_results.append(round(sim_b, 2))
+        sim_results.sort()
+        sn = len(sim_results)
+        result["kelly_comparison"]["fractions"].append({
+            "fraction": frac,
+            "label": label,
+            "avg_final": f"${round(mean(sim_results), 2)}",
+            "median_final": f"${sim_results[sn // 2]}",
+            "p5": f"${sim_results[int(sn * 0.05)]}",
+            "p95": f"${sim_results[int(sn * 0.95)]}",
+            "profitable_pct": f"{round(sum(1 for x in sim_results if x > bankroll) / sn * 100, 1)}%",
+        })
+
+    _cache.set_analysis(filename, cache_key, result)
+    return json.dumps(result, indent=2)
+
+
 @mcp.tool()
 def get_market_entropy(game_id: Optional[str] = None, filename: Optional[str] = None) -> str:
     """Measure market efficiency via Shannon entropy of implied probabilities across books.
@@ -7687,6 +8063,315 @@ def get_poisson_score_predictions(
             "tail probabilities."
         ),
         "context": overall_context,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _cache.set_analysis(filename, cache_key, result)
+    return json.dumps(result, indent=2)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TOOL — Information Flow Analysis via Timestamps
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _compute_information_flow(
+    by_game: dict[str, list[dict]],
+) -> dict:
+    """Analyze last_updated timestamps across sportsbooks to infer information
+    flow — which books move first (market leaders) and which follow (laggers).
+
+    Returns per-game update order, aggregate leader scores, and exploitable
+    windows where slow followers haven't caught up.
+    """
+    # --- Per-game analysis ---------------------------------------------------
+    game_analyses = {}
+
+    for game_id, records in by_game.items():
+        # Parse timestamps for each book
+        book_times: list[dict] = []
+        for r in records:
+            ts = _parse_ts_safe(r.get("last_updated"))
+            if ts is None:
+                continue
+            book_times.append({
+                "sportsbook": r.get("sportsbook", "Unknown"),
+                "ts": ts,
+                "record": r,
+            })
+
+        if len(book_times) < 2:
+            continue
+
+        # Sort by timestamp ascending (earliest update first = leader)
+        book_times.sort(key=lambda x: x["ts"])
+
+        earliest_ts = book_times[0]["ts"]
+        latest_ts = book_times[-1]["ts"]
+        total_span_seconds = (latest_ts - earliest_ts).total_seconds()
+        total_span_minutes = total_span_seconds / 60
+
+        update_order = []
+        for rank, bt in enumerate(book_times, start=1):
+            lag_seconds = (bt["ts"] - earliest_ts).total_seconds()
+            lag_minutes = lag_seconds / 60
+            update_order.append({
+                "rank": rank,
+                "sportsbook": bt["sportsbook"],
+                "last_updated": bt["ts"].isoformat(),
+                "lag_from_leader_seconds": round(lag_seconds, 1),
+                "lag_from_leader_minutes": round(lag_minutes, 1),
+            })
+
+        leader = book_times[0]["sportsbook"]
+        laggards = [bt["sportsbook"] for bt in book_times if (bt["ts"] - earliest_ts).total_seconds() > 60]
+
+        game_analyses[game_id] = {
+            "game_id": game_id,
+            "sport": records[0].get("sport"),
+            "home_team": records[0].get("home_team"),
+            "away_team": records[0].get("away_team"),
+            "leader": leader,
+            "leader_updated_at": earliest_ts.isoformat(),
+            "total_span_minutes": round(total_span_minutes, 1),
+            "books_analyzed": len(book_times),
+            "update_order": update_order,
+            "laggards": laggards,
+        }
+
+    # --- Aggregate: score each book across all games -------------------------
+    book_stats: dict[str, dict] = {}
+
+    for ga in game_analyses.values():
+        for entry in ga["update_order"]:
+            book = entry["sportsbook"]
+            if book not in book_stats:
+                book_stats[book] = {
+                    "first_count": 0,
+                    "last_count": 0,
+                    "total_games": 0,
+                    "sum_rank": 0,
+                    "lags_seconds": [],
+                }
+            stats = book_stats[book]
+            stats["total_games"] += 1
+            stats["sum_rank"] += entry["rank"]
+            stats["lags_seconds"].append(entry["lag_from_leader_seconds"])
+            if entry["rank"] == 1:
+                stats["first_count"] += 1
+            if entry["rank"] == ga["books_analyzed"]:
+                stats["last_count"] += 1
+
+    # Build ranked sportsbook list
+    book_rankings = []
+    for book, stats in book_stats.items():
+        n = stats["total_games"]
+        avg_rank = stats["sum_rank"] / n if n else 0
+        avg_lag = sum(stats["lags_seconds"]) / n if n else 0
+        max_lag = max(stats["lags_seconds"]) if stats["lags_seconds"] else 0
+        leader_pct = (stats["first_count"] / n * 100) if n else 0
+        laggard_pct = (stats["last_count"] / n * 100) if n else 0
+
+        # Leader score: 0-100 where 100 = always first with no lag
+        # Weighted: 60% leader frequency, 40% inverse average rank
+        max_possible_rank = max(ga["books_analyzed"] for ga in game_analyses.values()) if game_analyses else 1
+        rank_component = max(0, (1 - (avg_rank - 1) / max(max_possible_rank - 1, 1))) * 100
+        leader_score = round(leader_pct * 0.6 + rank_component * 0.4, 1)
+
+        book_rankings.append({
+            "sportsbook": book,
+            "leader_score": leader_score,
+            "leader_pct": round(leader_pct, 1),
+            "laggard_pct": round(laggard_pct, 1),
+            "avg_rank": round(avg_rank, 2),
+            "avg_lag_seconds": round(avg_lag, 1),
+            "avg_lag_minutes": round(avg_lag / 60, 1),
+            "max_lag_seconds": round(max_lag, 1),
+            "max_lag_minutes": round(max_lag / 60, 1),
+            "first_count": stats["first_count"],
+            "last_count": stats["last_count"],
+            "games_analyzed": n,
+        })
+
+    book_rankings.sort(key=lambda x: x["leader_score"], reverse=True)
+
+    # --- Exploitable windows: games where laggards differ significantly ------
+    exploitable_windows = []
+    for ga in game_analyses.values():
+        if ga["total_span_minutes"] < 1:
+            continue  # All books roughly in sync — nothing to exploit
+
+        game_records = {r.get("sportsbook"): r for r in by_game[ga["game_id"]]}
+        leader_record = game_records.get(ga["leader"])
+        if not leader_record:
+            continue
+
+        for laggard in ga["laggards"]:
+            laggard_record = game_records.get(laggard)
+            if not laggard_record:
+                continue
+
+            lag_entry = next(
+                (e for e in ga["update_order"] if e["sportsbook"] == laggard), None
+            )
+            lag_minutes = lag_entry["lag_from_leader_minutes"] if lag_entry else 0
+
+            # Compare markets to detect stale pricing
+            diffs = []
+            for mkt_type in ("spread", "moneyline", "total"):
+                leader_mkt = leader_record.get("markets", {}).get(mkt_type, {})
+                laggard_mkt = laggard_record.get("markets", {}).get(mkt_type, {})
+                if not leader_mkt or not laggard_mkt:
+                    continue
+
+                if mkt_type in ("spread", "moneyline"):
+                    keys = ["home_odds", "away_odds"]
+                    line_key = "spread" if mkt_type == "spread" else None
+                else:
+                    keys = ["over_odds", "under_odds"]
+                    line_key = "total"
+
+                for k in keys:
+                    l_val = leader_mkt.get(k)
+                    g_val = laggard_mkt.get(k)
+                    if l_val is not None and g_val is not None:
+                        l_prob = implied_probability(l_val)
+                        g_prob = implied_probability(g_val)
+                        diff_pct = abs(l_prob - g_prob) * 100
+                        if diff_pct > 1.0:  # >1% implied prob difference
+                            diffs.append({
+                                "market": mkt_type,
+                                "odds_field": k,
+                                "leader_odds": l_val,
+                                "laggard_odds": g_val,
+                                "leader_implied_prob": round(l_prob * 100, 2),
+                                "laggard_implied_prob": round(g_prob * 100, 2),
+                                "implied_prob_diff_pct": round(diff_pct, 2),
+                            })
+
+                # Check line differences (spread/total line value)
+                if line_key:
+                    l_line = leader_mkt.get(line_key)
+                    g_line = laggard_mkt.get(line_key)
+                    if l_line is not None and g_line is not None and l_line != g_line:
+                        diffs.append({
+                            "market": mkt_type,
+                            "field": f"{line_key}_line",
+                            "leader_line": l_line,
+                            "laggard_line": g_line,
+                            "line_diff": round(abs(l_line - g_line), 1),
+                        })
+
+            if diffs:
+                exploitable_windows.append({
+                    "game_id": ga["game_id"],
+                    "sport": ga.get("sport"),
+                    "home_team": ga.get("home_team"),
+                    "away_team": ga.get("away_team"),
+                    "leader": ga["leader"],
+                    "laggard": laggard,
+                    "lag_minutes": lag_minutes,
+                    "pricing_differences": diffs,
+                    "context": (
+                        f"{laggard} is {lag_minutes:.1f} min behind {ga['leader']} "
+                        f"for {ga.get('away_team')} @ {ga.get('home_team')} — "
+                        f"{len(diffs)} market(s) show stale pricing that may be exploitable."
+                    ),
+                })
+
+    exploitable_windows.sort(key=lambda w: w["lag_minutes"], reverse=True)
+
+    return {
+        "game_analyses": game_analyses,
+        "book_rankings": book_rankings,
+        "exploitable_windows": exploitable_windows,
+    }
+
+
+@mcp.tool()
+def get_information_flow(
+    game_id: Optional[str] = None,
+    filename: Optional[str] = None,
+) -> str:
+    """Map information flow across sportsbooks using last_updated timestamps.
+
+    Determines which sportsbook updates first (market leader / sharpest) and
+    which follow with a delay (laggards).  The leader is typically the sharpest
+    book — its line moves first in response to new information.  Laggards that
+    haven't yet caught up create exploitable windows where their stale odds
+    may offer value.
+
+    Analysis includes:
+    - **Update order per game**: Chronological ranking of when each book last
+      refreshed its odds, with lag from the leader in seconds/minutes.
+    - **Aggregate leader scores**: Across all games, which books move first most
+      often (0-100 composite score; 100 = always first).
+    - **Exploitable windows**: Games where a laggard's odds differ meaningfully
+      from the leader's — indicating stale pricing ripe for +EV bets.
+
+    Use this to:
+    1. Identify the sharpest book(s) in the current data snapshot.
+    2. Find slow-to-update books whose stale lines can be beaten.
+    3. Quantify how large the delay windows are in minutes/seconds.
+
+    Args:
+        game_id: Optional — limit analysis to a specific game.
+        filename: Data file to load. Optional.
+
+    Returns update order per game, aggregate sportsbook leader rankings,
+    and exploitable laggard windows with pricing differences.
+    """
+    cache_key = f"info_flow:{game_id or 'all'}"
+    cached = _cache.get_analysis(filename, cache_key)
+    if cached is not None:
+        return json.dumps(cached, indent=2)
+
+    odds = _load_odds(filename)
+    by_game = _cache.load_by_game(filename)
+
+    if game_id:
+        by_game = {k: v for k, v in by_game.items() if k == game_id}
+
+    flow = _compute_information_flow(by_game)
+
+    # Build per-game list for output
+    games_list = list(flow["game_analyses"].values())
+    games_list.sort(key=lambda g: g["total_span_minutes"], reverse=True)
+
+    result = {
+        "information_flow": {
+            "games": games_list,
+            "games_analyzed": len(games_list),
+        },
+        "sportsbook_leader_rankings": flow["book_rankings"],
+        "exploitable_windows": flow["exploitable_windows"],
+        "exploitable_count": len(flow["exploitable_windows"]),
+        "methodology": (
+            "Timestamps (last_updated) from each sportsbook are compared per game "
+            "to establish a chronological update order.  The book that updates first "
+            "is the market leader — typically the sharpest, as sharp action drives "
+            "price discovery.  Books that update later are followers/laggards.  "
+            "When a laggard's odds diverge from the leader's by >1% implied "
+            "probability, that gap is flagged as an exploitable window — the "
+            "laggard hasn't yet adjusted to the leader's new information.  "
+            "Leader scores (0-100) aggregate each book's first-mover frequency "
+            "and average rank across all games."
+        ),
+        "context": (
+            f"Analyzed {len(games_list)} game(s) across {len(flow['book_rankings'])} sportsbooks. "
+            + (
+                f"Top leader: {flow['book_rankings'][0]['sportsbook']} "
+                f"(score {flow['book_rankings'][0]['leader_score']}, "
+                f"first in {flow['book_rankings'][0]['leader_pct']}% of games). "
+                if flow["book_rankings"]
+                else "No sportsbook data available. "
+            )
+            + f"Found {len(flow['exploitable_windows'])} exploitable laggard window(s)."
+            + (
+                f" Largest gap: {flow['exploitable_windows'][0]['context']}"
+                if flow["exploitable_windows"]
+                else ""
+            )
+        ),
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
     _cache.set_analysis(filename, cache_key, result)
