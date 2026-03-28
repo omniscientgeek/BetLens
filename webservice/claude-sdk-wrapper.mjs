@@ -19,7 +19,7 @@
  */
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { readFileSync } from 'fs';
-import readline from 'readline';
+// readline import removed — raw stdin chunks used instead to avoid 64KB line limit
 
 // Ensure stdout writes UTF-8 on all platforms (prevents emoji mojibake on Windows)
 if (typeof process.stdout.setDefaultEncoding === 'function') {
@@ -40,16 +40,17 @@ function sendResult(obj) {
   process.stdout.write(JSON.stringify(obj) + '\n');
 }
 
-// Read all of stdin as a single JSON payload
-const rl = readline.createInterface({ input: process.stdin, terminal: false });
-const lines = [];
+// Read all of stdin as raw chunks (avoids readline's 64KB line-length limit
+// which causes "Separator is not found, and chunk exceed the limit" when the
+// JSON payload is large, e.g. during analyze phases with big prompts).
+const chunks = [];
 
-rl.on('line', (line) => lines.push(line));
+process.stdin.on('data', (chunk) => chunks.push(chunk));
 
-rl.on('close', async () => {
+process.stdin.on('end', async () => {
   let command;
   try {
-    command = JSON.parse(lines.join('\n'));
+    command = JSON.parse(Buffer.concat(chunks).toString('utf-8'));
   } catch (err) {
     sendResult({ type: 'error', message: `Invalid JSON input: ${err.message}` });
     process.exit(1);
@@ -80,7 +81,7 @@ async function handleQuery(command) {
   const options = {
     cwd: resolvedCwd,
     settingSources: [],          // Don't load user/project settings — we inject MCP config directly
-    maxTurns: mcpEnabled ? (max_turns || 10) : (max_turns || 1),
+    ...(max_turns ? { maxTurns: max_turns } : mcpEnabled ? {} : { maxTurns: 1 }),
     permissionMode: mcpEnabled ? 'bypassPermissions' : 'default',
   };
 
