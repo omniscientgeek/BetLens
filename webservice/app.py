@@ -1495,10 +1495,9 @@ async def generate_devnotes_md(project_id: int = Query(default=10)):
 
     md_content = "\n".join(lines)
 
-    # Write to devNotesData/
-    os.makedirs(DEV_NOTES_DIR, exist_ok=True)
+    # Write to repo root
     md_filename = "devnotes_combined.MD"
-    md_path = os.path.join(DEV_NOTES_DIR, md_filename)
+    md_path = os.path.join(REPO_DIR, md_filename)
 
     import aiofiles
     async with aiofiles.open(md_path, "w", encoding="utf-8") as f:
@@ -1519,7 +1518,7 @@ async def generate_devnotes_md(project_id: int = Query(default=10)):
 @app.get("/api/download-devnotes-md")
 async def download_devnotes_md():
     """Serve the combined devnotes MD file for download."""
-    md_path = os.path.join(DEV_NOTES_DIR, "devnotes_combined.MD")
+    md_path = os.path.join(REPO_DIR, "devnotes_combined.MD")
     if not os.path.isfile(md_path):
         return JSONResponse({"error": "File not found. Generate it first."}, status_code=404)
     return FileResponse(md_path, filename="devnotes_combined.MD", media_type="text/markdown")
