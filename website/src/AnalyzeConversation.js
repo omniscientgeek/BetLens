@@ -147,7 +147,7 @@ function AnalyzeConversation({ analyzeResult, streaming, defaultExpanded }) {
             {aiMeta.usage?.input_tokens && ` \u00B7 ${aiMeta.usage.input_tokens} in / ${aiMeta.usage.output_tokens} out`}
           </span>
         )}
-        {!isStreaming && toolCalls.length > 0 && (
+        {toolCalls.length > 0 && (
           <span className="ac-tool-count">{toolCalls.length} tool call{toolCalls.length !== 1 ? "s" : ""}</span>
         )}
         {isStreaming && responseLen > 0 && (
@@ -208,26 +208,26 @@ function AnalyzeConversation({ analyzeResult, streaming, defaultExpanded }) {
             </CollapsibleSection>
           )}
 
-          {/* Tool Calls — shown after streaming completes */}
-          {!isStreaming && (
-            <CollapsibleSection
-              title="Tool Calls"
-              badge={toolCalls.length > 0 ? `${toolCalls.length}` : "none"}
-              defaultOpen={toolCalls.length > 0}
-            >
-              {toolCalls.length === 0 ? (
-                <p className="ac-no-data">
-                  No tool calls were made during this analysis.
-                </p>
-              ) : (
-                <div className="ac-tool-calls-list">
-                  {toolCalls.map((call, i) => (
-                    <ToolCallCard key={call.id || i} call={call} index={i} />
-                  ))}
-                </div>
-              )}
-            </CollapsibleSection>
-          )}
+          {/* Tool Calls — shown during streaming and after completion */}
+          <CollapsibleSection
+            title={isStreaming && toolCalls.length > 0 ? "Tool Calls (Live)" : "Tool Calls"}
+            badge={toolCalls.length > 0 ? `${toolCalls.length}` : (isStreaming ? "waiting..." : "none")}
+            defaultOpen={toolCalls.length > 0 || isStreaming}
+          >
+            {toolCalls.length === 0 ? (
+              <p className="ac-no-data">
+                {isStreaming
+                  ? "Waiting for tool calls..."
+                  : "No tool calls were made during this analysis."}
+              </p>
+            ) : (
+              <div className="ac-tool-calls-list">
+                {toolCalls.map((call, i) => (
+                  <ToolCallCard key={call.id || i} call={call} index={i} />
+                ))}
+              </div>
+            )}
+          </CollapsibleSection>
 
           {/* Full Assistant Response — shown after streaming completes */}
           {!isStreaming && (

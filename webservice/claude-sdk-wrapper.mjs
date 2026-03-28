@@ -107,10 +107,10 @@ async function handleQuery(command) {
     options.systemPrompt = system_prompt;
   }
 
-  // Set up timeout
-  const timeoutMs = (timeout_seconds || 120) * 1000;
+  // Set up timeout — generous default for large CoT analyze calls
+  const timeoutMs = (timeout_seconds || 300) * 1000;
   const timeoutPromise = new Promise((_, reject) =>
-    setTimeout(() => reject(new Error(`Claude SDK query timed out after ${timeout_seconds || 120}s`)), timeoutMs)
+    setTimeout(() => reject(new Error(`Claude SDK query timed out after ${timeout_seconds || 300}s`)), timeoutMs)
   );
 
   const queryPromise = (async () => {
@@ -136,25 +136,29 @@ async function handleQuery(command) {
       if (message.type === 'assistant' && message.message?.content) {
         for (const item of message.message.content) {
           if (item.type === 'text' && item.text) {
-            // Emit incremental chunk so the parent process can stream to the UI
-            const delta = item.text.slice(resultText.length);
-            if (delta) {
-              process.stdout.write(JSON.stringify({ type: 'chunk', text: delta }) + '\n');
+            // Each assistant turn has its own text block — emit the full text
+            // as a chunk (resultText is overwritten per turn, not accumulated)
+            const text = item.text;
+            if (text) {
+              process.stdout.write(JSON.stringify({ type: 'chunk', text }) + '\n');
             }
-            resultText = item.text;
+            resultText = text;
           }
-          // Capture tool_use blocks (MCP tool calls)
+          // Capture tool_use blocks (MCP tool calls) and emit live event
           if (item.type === 'tool_use') {
-            toolCalls.push({
+            const toolCall = {
               id: item.id,
               name: item.name,
               input: item.input,
-            });
+            };
+            toolCalls.push(toolCall);
+            // Emit tool_call event so the UI can show it in real-time
+            process.stdout.write(JSON.stringify({ type: 'tool_call', tool_call: toolCall }) + '\n');
           }
         }
       }
 
-      // Capture tool results
+      // Capture tool results and emit live event
       if (message.type === 'tool_result' || (message.type === 'user' && message.message?.content)) {
         const content = message.message?.content || [];
         for (const item of (Array.isArray(content) ? content : [])) {
@@ -163,6 +167,13 @@ async function handleQuery(command) {
             if (matching) {
               matching.result = typeof item.content === 'string' ? item.content : JSON.stringify(item.content);
               matching.is_error = item.is_error || false;
+              // Emit tool_result event so the UI can show results in real-time
+              process.stdout.write(JSON.stringify({
+                type: 'tool_result',
+                tool_use_id: item.tool_use_id,
+                result: matching.result,
+                is_error: matching.is_error,
+              }) + '\n');
             }
           }
         }

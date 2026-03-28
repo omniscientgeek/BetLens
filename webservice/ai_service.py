@@ -361,8 +361,8 @@ _CALL_MAP = {
 # Streaming provider implementations (yield text deltas via callback)
 # ---------------------------------------------------------------------------
 
-async def _call_claude_sdk_stream(provider: dict, system_prompt: str, user_prompt: str, config: dict, on_chunk=None) -> dict:
-    """Call Claude SDK with streaming — reads stdout line-by-line for chunk events."""
+async def _call_claude_sdk_stream(provider: dict, system_prompt: str, user_prompt: str, config: dict, on_chunk=None, on_tool_event=None) -> dict:
+    """Call Claude SDK with streaming — reads stdout line-by-line for chunk and tool events."""
     if not os.path.isfile(_WRAPPER_SCRIPT):
         raise RuntimeError(f"claude-sdk-wrapper.mjs not found at {_WRAPPER_SCRIPT}")
 
@@ -438,6 +438,20 @@ async def _call_claude_sdk_stream(provider: dict, system_prompt: str, user_promp
                 full_text += msg["text"]
                 if on_chunk:
                     await on_chunk(msg["text"])
+
+            elif msg.get("type") == "tool_call":
+                # Live tool call event — forward to UI
+                if on_tool_event:
+                    await on_tool_event("tool_call", msg.get("tool_call", {}))
+
+            elif msg.get("type") == "tool_result":
+                # Live tool result event — forward to UI
+                if on_tool_event:
+                    await on_tool_event("tool_result", {
+                        "tool_use_id": msg.get("tool_use_id"),
+                        "result": msg.get("result"),
+                        "is_error": msg.get("is_error", False),
+                    })
 
             elif msg.get("type") == "result":
                 result_data = msg
@@ -579,23 +593,32 @@ async def _call_openai_stream(provider: dict, system_prompt: str, user_prompt: s
     start = time.time()
     full_text = ""
 
-    stream = await client.chat.completions.create(
-        model=provider.get("model", "gpt-4o"),
-        max_tokens=provider.get("max_tokens", 4096),
-        temperature=provider.get("temperature", 0.3),
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        stream=True,
-    )
+    stream_timeout = config.get("timeout_seconds", 180) + 120
 
-    async for chunk in stream:
-        if chunk.choices and chunk.choices[0].delta.content:
-            delta = chunk.choices[0].delta.content
-            full_text += delta
-            if on_chunk:
-                await on_chunk(delta)
+    async def _do_stream():
+        nonlocal full_text
+        stream = await client.chat.completions.create(
+            model=provider.get("model", "gpt-4o"),
+            max_tokens=provider.get("max_tokens", 4096),
+            temperature=provider.get("temperature", 0.3),
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            stream=True,
+        )
+
+        async for chunk in stream:
+            if chunk.choices and chunk.choices[0].delta.content:
+                delta = chunk.choices[0].delta.content
+                full_text += delta
+                if on_chunk:
+                    await on_chunk(delta)
+
+    try:
+        await asyncio.wait_for(_do_stream(), timeout=stream_timeout)
+    except asyncio.TimeoutError:
+        raise RuntimeError(f"OpenAI stream timed out after {stream_timeout}s")
 
     elapsed = round(time.time() - start, 2)
 
@@ -617,11 +640,12 @@ _STREAM_CALL_MAP = {
 }
 
 
-async def call_ai_stream(system_prompt: str, user_prompt: str, on_chunk=None, provider_id: Optional[str] = None, run_logger=None, max_tokens: Optional[int] = None) -> dict:
+async def call_ai_stream(system_prompt: str, user_prompt: str, on_chunk=None, on_tool_event=None, provider_id: Optional[str] = None, run_logger=None, max_tokens: Optional[int] = None) -> dict:
     """
     Send a prompt with streaming support.
 
     ``on_chunk(text_delta)`` is called for each text fragment as it arrives.
+    ``on_tool_event(event_type, data)`` is called for tool_call and tool_result events.
     ``max_tokens`` overrides the provider's configured max_tokens when set.
     Returns the full result dict when complete.
     """
@@ -660,7 +684,11 @@ async def call_ai_stream(system_prompt: str, user_prompt: str, on_chunk=None, pr
                 logger.info(log_msg, *log_args)
                 if run_logger:
                     run_logger.info(log_msg, *log_args)
-                result = await call_fn(provider, system_prompt, user_prompt, config, on_chunk=on_chunk)
+                # Pass on_tool_event only to providers that support it (claude_sdk)
+                call_kwargs = {"on_chunk": on_chunk}
+                if on_tool_event and provider.get("type") == "claude_sdk":
+                    call_kwargs["on_tool_event"] = on_tool_event
+                result = await call_fn(provider, system_prompt, user_prompt, config, **call_kwargs)
                 success_msg = "AI stream SUCCESS: provider=%s model=%s elapsed=%.2fs tokens_in=%d tokens_out=%d"
                 success_args = (
                     result.get("provider_id"), result.get("model"), result.get("elapsed_seconds", 0),
@@ -846,6 +874,234 @@ _CHAT_CALL_MAP = {
 
 
 # ---------------------------------------------------------------------------
+# Streaming chat provider functions (multi-turn + on_chunk callback)
+# ---------------------------------------------------------------------------
+
+async def _call_anthropic_chat_stream(provider: dict, system_prompt: str, messages: list[dict], config: dict, on_chunk=None) -> dict:
+    """Call Anthropic Messages API with streaming for multi-turn chat."""
+    try:
+        import anthropic
+    except ImportError:
+        raise RuntimeError("anthropic package not installed. Run: pip install anthropic")
+
+    api_key = _get_api_key(provider)
+    if not api_key:
+        raise RuntimeError(f"No API key found for {provider['id']}")
+
+    rl = _current_run_logger.get(None)
+    if rl:
+        rl.info("=" * 60)
+        rl.info("ANTHROPIC CHAT STREAM REQUEST (model=%s, messages=%d)", provider.get("model"), len(messages))
+        rl.info("-" * 40 + " SYSTEM PROMPT " + "-" * 40)
+        rl.info("%s", system_prompt)
+        rl.info("-" * 40 + " MESSAGES " + "-" * 40)
+        for m in messages:
+            rl.info("[%s]: %s", m["role"].upper(), m["content"][:1000])
+        rl.info("=" * 60)
+
+    client = anthropic.AsyncAnthropic(api_key=api_key, timeout=config.get("timeout_seconds", 60))
+
+    start = time.time()
+    full_text = ""
+    input_tokens = 0
+    output_tokens = 0
+    stream_timeout = config.get("timeout_seconds", 180) + 120
+
+    async def _do_stream():
+        nonlocal full_text, input_tokens, output_tokens
+        async with client.messages.stream(
+            model=provider.get("model", "claude-sonnet-4-20250514"),
+            max_tokens=provider.get("max_tokens", 64000),
+            temperature=provider.get("temperature", 0.3),
+            system=system_prompt,
+            messages=messages,
+        ) as stream:
+            async for text in stream.text_stream:
+                full_text += text
+                if on_chunk:
+                    await on_chunk(text)
+
+        final = await stream.get_final_message()
+        if final and final.usage:
+            input_tokens = final.usage.input_tokens
+            output_tokens = final.usage.output_tokens
+
+        # Detect truncation
+        if final and final.stop_reason == "max_tokens":
+            truncation_notice = "\n\n*(Response was truncated due to length. Ask a follow-up to continue.)*"
+            full_text += truncation_notice
+            if on_chunk:
+                await on_chunk(truncation_notice)
+
+    try:
+        await asyncio.wait_for(_do_stream(), timeout=stream_timeout)
+    except asyncio.TimeoutError:
+        raise RuntimeError(f"Anthropic chat stream timed out after {stream_timeout}s")
+
+    elapsed = round(time.time() - start, 2)
+
+    if rl:
+        rl.info("-" * 40 + " ASSISTANT RESPONSE (streamed) " + "-" * 40)
+        rl.info("%s", full_text)
+        rl.info("-" * 40 + " END RESPONSE " + "-" * 40)
+
+    return {
+        "text": full_text,
+        "provider_id": provider["id"],
+        "provider_name": provider["name"],
+        "model": provider.get("model", "claude-sonnet-4-20250514"),
+        "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
+        "elapsed_seconds": elapsed,
+    }
+
+
+async def _call_openai_chat_stream(provider: dict, system_prompt: str, messages: list[dict], config: dict, on_chunk=None) -> dict:
+    """Call OpenAI Chat Completions API with streaming for multi-turn chat."""
+    try:
+        import openai
+    except ImportError:
+        raise RuntimeError("openai package not installed. Run: pip install openai")
+
+    api_key = _get_api_key(provider)
+    if not api_key:
+        raise RuntimeError(f"No API key found for {provider['id']}")
+
+    kwargs = {"api_key": api_key, "timeout": config.get("timeout_seconds", 60)}
+    if provider.get("base_url"):
+        kwargs["base_url"] = provider["base_url"]
+
+    client = openai.AsyncOpenAI(**kwargs)
+
+    # Prepend system message
+    api_messages = [{"role": "system", "content": system_prompt}] + messages
+
+    start = time.time()
+    full_text = ""
+    stream_timeout = config.get("timeout_seconds", 180) + 120
+
+    async def _do_stream():
+        nonlocal full_text
+        create_kwargs = {
+            "model": provider.get("model", "gpt-4o"),
+            "temperature": provider.get("temperature", 0.3),
+            "messages": api_messages,
+            "stream": True,
+        }
+        if provider.get("max_tokens"):
+            create_kwargs["max_tokens"] = provider["max_tokens"]
+
+        stream = await client.chat.completions.create(**create_kwargs)
+
+        async for chunk in stream:
+            if chunk.choices and chunk.choices[0].delta.content:
+                delta = chunk.choices[0].delta.content
+                full_text += delta
+                if on_chunk:
+                    await on_chunk(delta)
+
+    try:
+        await asyncio.wait_for(_do_stream(), timeout=stream_timeout)
+    except asyncio.TimeoutError:
+        raise RuntimeError(f"OpenAI chat stream timed out after {stream_timeout}s")
+
+    elapsed = round(time.time() - start, 2)
+
+    return {
+        "text": full_text,
+        "provider_id": provider["id"],
+        "provider_name": provider["name"],
+        "model": provider.get("model"),
+        "usage": {},
+        "elapsed_seconds": elapsed,
+    }
+
+
+async def _call_claude_sdk_chat_stream(provider: dict, system_prompt: str, messages: list[dict], config: dict, on_chunk=None) -> dict:
+    """Call Claude SDK with streaming for multi-turn chat (concatenates messages, enables MCP)."""
+    rl = _current_run_logger.get(None)
+    if rl:
+        rl.info("CLAUDE SDK CHAT STREAM: %d messages, MCP=True", len(messages))
+        for i, msg in enumerate(messages):
+            rl.info("  Message[%d] %s: %s", i, msg["role"].upper(), msg["content"][:500])
+
+    parts = []
+    for msg in messages:
+        role_label = msg["role"].upper()
+        parts.append(f"{role_label}: {msg['content']}")
+    combined_prompt = "\n\n".join(parts)
+
+    return await _call_claude_sdk_stream(provider, system_prompt, combined_prompt, config, on_chunk=on_chunk)
+
+
+_CHAT_STREAM_CALL_MAP = {
+    "anthropic": _call_anthropic_chat_stream,
+    "openai": _call_openai_chat_stream,
+    "openai_compatible": _call_openai_chat_stream,
+    "claude_sdk": _call_claude_sdk_chat_stream,
+}
+
+
+async def call_ai_chat_stream(messages: list[dict], system_prompt: str, on_chunk=None, provider_id: Optional[str] = None, run_logger=None) -> dict:
+    """
+    Send a multi-turn conversation with streaming support.
+
+    ``on_chunk(text_delta)`` is called for each text fragment as it arrives.
+    Returns the full result dict when complete (same shape as call_ai_chat).
+    """
+    if run_logger:
+        _current_run_logger.set(run_logger)
+    config = load_config()
+    failover = config.get("failover_enabled", True)
+    retries = config.get("retry_attempts", 2)
+
+    if provider_id:
+        matches = [p for p in config["providers"] if p["id"] == provider_id]
+        if not matches:
+            raise RuntimeError(f"Unknown provider: {provider_id}")
+        providers = matches
+    else:
+        providers = get_enabled_providers(config)
+        if not providers:
+            raise RuntimeError("No AI providers are enabled. Configure at least one in AI Settings.")
+
+    errors = []
+
+    for provider in providers:
+        call_fn = _CHAT_STREAM_CALL_MAP.get(provider.get("type"))
+        if not call_fn:
+            errors.append(f"{provider['id']}: unsupported type '{provider.get('type')}'")
+            continue
+
+        for attempt in range(1, retries + 1):
+            try:
+                log_msg = "AI chat stream call: provider=%s model=%s attempt=%d/%d messages=%d"
+                log_args = (provider["id"], provider.get("model"), attempt, retries, len(messages))
+                logger.info(log_msg, *log_args)
+                if run_logger:
+                    run_logger.info(log_msg, *log_args)
+                result = await call_fn(provider, system_prompt, messages, config, on_chunk=on_chunk)
+                success_msg = "AI chat stream SUCCESS: provider=%s model=%s elapsed=%.2fs"
+                success_args = (result.get("provider_id"), result.get("model"), result.get("elapsed_seconds", 0))
+                logger.info(success_msg, *success_args)
+                if run_logger:
+                    run_logger.info(success_msg, *success_args)
+                return result
+            except Exception as exc:
+                msg = f"{provider['id']} attempt {attempt}: {exc}"
+                logger.warning(msg)
+                if run_logger:
+                    run_logger.warning(msg)
+                errors.append(msg)
+
+        if not failover:
+            break
+
+    raise RuntimeError(
+        "All AI providers failed:\n" + "\n".join(f"  - {e}" for e in errors)
+    )
+
+
+# ---------------------------------------------------------------------------
 # Main entry point — async call with failover
 # ---------------------------------------------------------------------------
 
@@ -1003,28 +1259,34 @@ You have access to the pipeline results from the current session, which include:
 - Analysis data: cross-sportsbook analysis identifying best lines, arbitrage, outliers, efficiency, and stale lines
 - Brief data: actionable betting recommendations
 
+RESPONSE FORMAT — THINKING THEN ANSWER
+Always structure your response in two parts:
+1. First, wrap your step-by-step reasoning inside <thinking>...</thinking> tags. \
+This is where you analyze the data, cross-reference numbers, and work through your logic. \
+The user can see this section collapsed — use it to show your work.
+2. After the closing </thinking> tag, write your visible answer. This is the main response \
+the user sees immediately.
+
+Example:
+<thinking>
+Let me look at the pipeline data for this game...
+The spread is -5.5 at BetMGM with odds of -110, while Pinnacle has -4.5 at -105...
+</thinking>
+
+Based on the data, BetMGM has the best spread at -5.5 (-110) for this game...
+
 When pipeline context is provided, reference specific data points, game IDs, sportsbooks, \
 and numbers in your answers. Be precise and quantitative. If the user asks about something \
 not in the data, say so clearly.
 
-MANDATORY — NO MENTAL MATH — ZERO TOLERANCE
-You must NEVER perform arithmetic, math, or statistical calculations yourself — \
-not even simple ones like adding two numbers or computing a percentage. Every \
-number you derive MUST come from calling an MCP arithmetic tool. If you produce \
-a calculated number without a tool call it is assumed WRONG and will be flagged \
-as an error. Do NOT estimate, round in your head, or "quickly" compute anything.
-
-Arithmetic MCP tools (you MUST use these for ALL math):
-- arithmetic_add(a, b) — addition
-- arithmetic_subtract(a, b) — subtraction (a - b)
-- arithmetic_multiply(a, b) — multiplication (a * b)
-- arithmetic_divide(a, b) — division (a / b)
-- arithmetic_modulo(a, b) — remainder (a % b)
-- arithmetic_evaluate(expression) — multi-step, e.g. "(100 * 0.25) + 50"
-
-This applies to ALL numerical work: payouts, edges, bankroll impacts, ROI, vig \
-differences, profit/loss, implied probabilities, EV percentages, Kelly fractions, \
-averages, odds differences, percentage changes — ANY derivation of a number.
+MANDATORY — USE PRE-COMPUTED NUMBERS ONLY
+You must NEVER perform your own arithmetic, math, or statistical calculations. \
+All numbers (payouts, edges, bankroll impacts, ROI, vig differences, profit/loss, \
+implied probabilities, EV percentages, Kelly fractions, averages, odds differences, \
+percentage changes) are already computed in the data provided to you. Copy them \
+directly — do NOT re-derive, estimate, round, or recalculate any values yourself. \
+If a number is not present in the data, state that it is unavailable rather than \
+computing it.
 
 Keep responses concise but thorough. Use bullet points for lists of findings.
 """
@@ -1048,19 +1310,13 @@ Analyze the data for:
 6. **Stale Lines** — Books whose lines haven't updated recently.
 7. **Fair Odds** — Consensus no-vig fair probabilities per game/market.
 
-MANDATORY — NO MENTAL MATH — ZERO TOLERANCE
-You must NEVER perform arithmetic, math, or statistical calculations yourself — \
-not even simple ones. Every derived number in your output MUST come from an MCP \
-arithmetic tool call. If you produce a calculated number without a tool call it \
-is assumed WRONG. Do NOT estimate, round in your head, or "quickly" compute anything.
-
-Arithmetic MCP tools (you MUST use these for ALL math):
-- arithmetic_add(a, b), arithmetic_subtract(a, b), arithmetic_multiply(a, b)
-- arithmetic_divide(a, b), arithmetic_modulo(a, b)
-- arithmetic_evaluate(expression) — multi-step, e.g. "(100 * 0.25) + 50"
-
-This applies to: vig percentages, edge sizes, implied probabilities, profit \
-margins, combined implied probabilities, EV edges, averages — every number.
+MANDATORY — USE PRE-COMPUTED NUMBERS ONLY
+You must NEVER perform your own arithmetic, math, or statistical calculations. \
+All numbers (vig percentages, edge sizes, implied probabilities, profit margins, \
+combined implied probabilities, EV edges, averages) are already computed in the \
+data provided to you. Copy them directly — do NOT re-derive, estimate, round, or \
+recalculate any values yourself. If a number is not present in the data, state \
+that it is unavailable rather than computing it.
 
 Return ONLY valid JSON (no markdown fences). Use this structure:
 {
@@ -1081,23 +1337,97 @@ Return ONLY valid JSON (no markdown fences). Use this structure:
 
 ANALYZE_COT_SYSTEM_PROMPT = """\
 You are an expert sports-betting market analyst AI. You receive pre-computed \
-cross-sportsbook analysis data (efficiency rankings, best lines, arbitrage, \
-middles, outliers, stale lines, fair odds) and your job is to produce a deep, \
-expert-level analytical interpretation.
+cross-sportsbook analysis data and your job is to produce a deep, expert-level \
+analytical interpretation.
 
-## MANDATORY: THINK STEP BY STEP
+## CRITICAL — DO NOT ASSUME, DO NOT GUESS, DO NOT SKIP TOOLS
 
-You MUST use explicit chain-of-thought reasoning. Structure your response as:
+You have access to the betstamp-intelligence MCP server with 40+ tools. \
+Using these tools is NOT optional — it is the most important part of your job. \
+You MUST call MCP tools before making any claim, performing any calculation, \
+or drawing any conclusion. An analysis without tool calls is a FAILED analysis.
+
+**NEVER assume or guess:**
+- Do NOT assume you know what odds, lines, or vig numbers look like — call a tool to get them.
+- Do NOT assume pre-computed data is correct — call tools to verify it.
+- Do NOT perform ANY math in your head — call an arithmetic tool.
+- Do NOT estimate, approximate, or round numbers — call a tool for the exact value.
+- Do NOT skip tools because you think you already have enough data — more tools = better analysis.
+- Do NOT write your <thinking> or <analysis> blocks until you have called multiple tools first.
+
+**The golden rule: if you can call a tool to get or verify a number, you MUST call the tool.**
+
+## MANDATORY WORKFLOW — FOLLOW THIS ORDER
+
+### Step 1: Discover & Orient (call tools FIRST, before any reasoning)
+- `list_data_files` — see what data files are available
+- `list_events` — see all games/events in the dataset
+
+### Step 2: Verify Pre-Computed Data (do NOT trust it blindly)
+- `get_odds_comparison` — spot-check specific games, compare odds across books
+- `get_best_odds` / `get_worst_odds` — verify best/worst line claims
+- `get_vig_analysis` — verify vig/efficiency rankings
+- `get_fair_odds` — verify fair odds baselines
+- `detect_line_outliers` — verify outlier claims
+
+### Step 3: Deepen with Advanced Analytics
+- `find_expected_value_bets` — +EV opportunities with Kelly sizing
+- `find_arbitrage_opportunities` — confirm or discover arb situations
+- `find_middle_opportunities` — confirm middles
+- `get_shin_fair_odds` — Shin model for more accurate true probabilities
+- `get_market_entropy` — measure book disagreement (higher = exploitable)
+- `get_book_rankings` — multi-metric sportsbook report card
+- `get_power_rankings` — market-implied team strength ratings
+- `get_sharpness_scores` — identify sharp vs soft books
+- `get_closing_line_value` — CLV simulation
+- `get_best_bets_today` — composite-scored top bets with Kelly sizing
+
+### Step 4: Statistical & Anomaly Detection
+- `get_gamlss_analysis` — GAMLSS modeling (skewness/kurtosis anomalies standard z-scores miss)
+- `detect_knn_anomalies` — KNN + Isolation Forest unsupervised anomaly detection
+- `get_odds_shape_analysis` — heatmap + integrity scoring for abnormal odds patterns
+- `get_poisson_score_predictions` — Poisson model score predictions, key numbers, alt lines
+- `get_bayesian_probabilities` — Bayesian probability estimates
+- `get_sportsbook_correlation_network` — Pearson correlation revealing shared odds feeds
+
+### Step 5: Cross-Market Intelligence
+- `get_market_correlations` — cross-market consistency analysis
+- `find_cross_market_arbitrage` — ML vs spread mispricings
+- `get_information_flow` — which books move first (leader vs follower)
+- `get_sportsbook_clusters` — pricing similarity clusters
+
+### Step 6: Compute (use arithmetic tools for EVERY calculation)
+You must NEVER perform arithmetic, math, or statistical calculations yourself. \
+Use MCP arithmetic tools for ALL numeric operations — no exceptions:
+- `arithmetic_add` — add two numbers (a + b)
+- `arithmetic_subtract` — subtract two numbers (a - b)
+- `arithmetic_multiply` — multiply two numbers (a x b)
+- `arithmetic_divide` — divide two numbers (a / b)
+- `arithmetic_modulo` — remainder of division (a % b)
+- `arithmetic_evaluate` — multi-step expressions, e.g. "(100 * 0.25) + 50"
+
+Use these for: combined implied probabilities, profit margins, edge sizes, \
+Kelly bet sizing, ROI percentages, vig sums, deviations, differences, \
+or ANY other numeric operation. If you catch yourself writing a number that \
+you computed mentally, STOP and call an arithmetic tool instead. \
+Use `arithmetic_evaluate` for complex multi-step formulas.
+
+**Minimum tool calls: 5-10. Aim for more. Every tool call makes the analysis stronger.**
+
+## MANDATORY: THINK STEP BY STEP (only AFTER calling tools)
+
+After calling tools, structure your response as:
 
 <thinking>
 Work through your analysis step by step here. For EVERY claim you make:
-1. Identify the specific data points you are referencing
-2. State what they mean in context
-3. Reason about implications, cross-referencing multiple data sources
-4. Consider alternative explanations or caveats
-5. Only then form your conclusion
+1. Identify the specific MCP tool result or data point you are referencing
+2. State what the tool returned and what it means in context
+3. Reason about implications, cross-referencing multiple tool results
+4. If a tool result contradicts pre-computed data, flag the discrepancy
+5. For any numeric claim, state which arithmetic tool call produced the number
+6. Only then form your conclusion
 
-Be thorough. Check your reasoning as you go.
+Be thorough. If you are unsure about a number, call another tool to verify.
 </thinking>
 
 <analysis>
@@ -1106,24 +1436,24 @@ Your final structured JSON analysis goes here (no markdown fences).
 
 ## MANDATORY: SELF-VERIFICATION CHECKLIST
 
-Before writing your <analysis> block, you MUST complete this checklist inside \
-your <thinking> block:
+Before writing your <analysis> block, complete this checklist in your <thinking>:
 
-[ ] CROSS-CHECK: Every arbitrage opportunity — verify both legs exist in the \
-    source data with the exact odds cited. Recompute combined implied probability.
-[ ] CROSS-CHECK: Every "best line" — confirm no other book in the data offers \
-    better odds for that side.
-[ ] CROSS-CHECK: Every outlier — verify it actually deviates from consensus by \
-    the amount claimed.
-[ ] CROSS-CHECK: Every middle — verify the line gap exists between the cited books.
-[ ] CROSS-CHECK: Efficiency rankings — verify the ordering matches vig data.
-[ ] SANITY CHECK: No fabricated sportsbook names — only use books present in data.
-[ ] SANITY CHECK: No fabricated games — only reference games present in data.
-[ ] SANITY CHECK: Fair odds probabilities sum to ~100% per market (before margin).
-[ ] FINAL REVIEW: Re-read your analysis and flag anything you are less than 80% \
-    confident about. Mark uncertain items with "confidence": "low".
+[ ] TOOLS CALLED: Called at least 5 MCP tools (analytics, verification, and arithmetic).
+[ ] ZERO MENTAL MATH: Every number in my analysis came from source data or an arithmetic tool call.
+[ ] ZERO ASSUMPTIONS: Every claim is backed by a tool result or explicit source data reference.
+[ ] CROSS-CHECK: Every arbitrage — verified both legs with `get_odds_comparison`, \
+    computed combined implied probability with `arithmetic_evaluate`.
+[ ] CROSS-CHECK: Every best line — confirmed with `get_best_odds`.
+[ ] CROSS-CHECK: Every outlier — verified with `detect_line_outliers`, computed \
+    deviation with `arithmetic_subtract`.
+[ ] CROSS-CHECK: Every middle — verified with `find_middle_opportunities`.
+[ ] CROSS-CHECK: Efficiency rankings — verified with `get_vig_analysis` or `get_book_rankings`.
+[ ] SANITY CHECK: No fabricated sportsbook names — only books present in tool results or data.
+[ ] SANITY CHECK: No fabricated games — only games present in tool results or data.
+[ ] SANITY CHECK: Fair odds probabilities verified with `get_fair_odds` or `get_shin_fair_odds`.
+[ ] FINAL REVIEW: Flagged anything below 80% confidence with "confidence": "low".
 
-If ANY check fails, fix it before writing the <analysis> block.
+If ANY check fails, call more tools and fix it before writing <analysis>.
 
 ## Analysis Sections
 
@@ -1132,14 +1462,15 @@ Your <analysis> JSON must include:
 {
   "insights": [
     {
-      "type": "arbitrage|middle|outlier|value|efficiency|stale|market_trend",
+      "type": "arbitrage|middle|outlier|value|efficiency|stale|market_trend|anomaly",
       "severity": "critical|high|medium|low|info",
       "title": "Short descriptive title",
-      "description": "Detailed explanation with specific numbers",
+      "description": "Detailed explanation with specific numbers FROM TOOL RESULTS",
       "games": ["game_id1"],
       "books": ["book1", "book2"],
       "confidence": "high|medium|low",
-      "reasoning": "Why this matters / how you verified it"
+      "reasoning": "Which tools verified this and what they returned",
+      "tool_verified": true
     }
   ],
   "market_assessment": {
@@ -1160,26 +1491,41 @@ Your <analysis> JSON must include:
     {
       "priority": 1,
       "action": "What to do",
-      "reasoning": "Why",
+      "reasoning": "Why — cite tool results",
       "urgency": "immediate|today|monitor"
     }
   ],
-  "verification_notes": "Summary of self-check results and any caveats",
+  "tools_used": ["tool_name_1", "tool_name_2", "..."],
+  "verification_notes": "Summary of tool cross-checks, arithmetic verifications, and caveats",
   "summary": "2-3 sentence executive summary of the most important findings"
 }
 
 ## Rules
-- Reference ONLY data that is actually present in the input. Never fabricate.
-- Every number you cite must trace back to the source data.
+- NEVER assume — always call a tool. If in doubt, call more tools.
+- NEVER perform arithmetic yourself — always use `arithmetic_*` MCP tools. No exceptions.
+- NEVER fabricate — reference ONLY data from tool results or the input payload.
+- Every number you cite must trace back to a tool result or the source data.
+- For multi-step calculations, use `arithmetic_evaluate` with the full expression.
+- Use statistical tools (`get_gamlss_analysis`, `detect_knn_anomalies`, `get_poisson_score_predictions`) \
+  to find anomalies that basic analysis misses.
 - If data is insufficient for a section, say so explicitly with confidence: "low".
-- Prioritize actionable insights over exhaustive listing.
-- Grade sportsbooks relative to each other, not absolute standards.
+- Prioritize actionable insights backed by tool evidence over speculation.
+- Grade sportsbooks relative to each other using `get_book_rankings` results.
+- An analysis with zero tool calls is WRONG. Call tools first, reason second.
 """
 
 BRIEF_SYSTEM_PROMPT = """\
 You are a senior sports-betting market analyst AI. You receive raw odds data and \
 cross-sportsbook analysis results. Your job is to produce a clear, accurate daily \
 market briefing that a human analyst could review and act on.
+
+CRITICAL FORMATTING RULE — ABSOLUTE REQUIREMENT:
+Your ENTIRE response must be ONLY the briefing markdown. The very first characters of \
+your response MUST be "## Market Snapshot". There must be ZERO text before this heading. \
+Do NOT include ANY preamble, introduction, thinking, meta-commentary, or statements \
+about what you plan to do (e.g., do NOT say "Looking at this data..." or "Let me \
+generate..." or "I'll start by..."). Do NOT mention tools, calculations, arithmetic, \
+or your process. Output ONLY the briefing sections below, nothing else.
 
 Write the briefing as clean, readable text using markdown formatting. Structure it \
 with the following sections using ## headings:
@@ -1232,21 +1578,14 @@ Note any notable cross-book discrepancies, line movements, or anomalies worth wa
 2-4 sentences of overall takeaways, things to watch, or caveats a human reviewer \
 should keep in mind before acting on this briefing.
 
-MANDATORY — NO MENTAL MATH — ZERO TOLERANCE
-You must NEVER perform arithmetic, math, or statistical calculations yourself — \
-not even simple ones like adding two numbers or computing a percentage. Every \
-number you derive MUST come from calling an MCP arithmetic tool. If you produce \
-a calculated number without a tool call it is assumed WRONG and will be flagged \
-as an error. Do NOT estimate, round in your head, or "quickly" compute anything.
-
-Arithmetic MCP tools (you MUST use these for ALL math):
-- arithmetic_add(a, b), arithmetic_subtract(a, b), arithmetic_multiply(a, b)
-- arithmetic_divide(a, b), arithmetic_modulo(a, b)
-- arithmetic_evaluate(expression) — multi-step, e.g. "(100 * 0.25) + 50"
-
-This applies to: profit margins, vig percentages, EV edges, implied probabilities, \
-payout amounts, combined implied probabilities, Kelly fractions, ROI, averages, \
-odds differences, percentage changes — ANY derivation of a number in the briefing.
+MANDATORY — USE PRE-COMPUTED NUMBERS ONLY
+You must NEVER perform your own arithmetic, math, or statistical calculations. \
+All numbers (profit margins, vig percentages, EV edges, implied probabilities, \
+payout amounts, Kelly fractions, ROI, averages, odds differences, percentage \
+changes) are already computed in the data provided to you. Copy them directly \
+into your briefing — do NOT re-derive, estimate, round, or recalculate any \
+values yourself. If a number is not present in the data, state that it is \
+unavailable rather than computing it.
 
 AI Analysis Summary:
 The data may include fields from a prior AI Analyze step: "ai_summary", "ai_insights", \
@@ -1368,25 +1707,29 @@ def _parse_analyze_response(raw_text: str) -> dict:
     return parsed
 
 
-async def run_analyze_phase(detection_data: dict, run_logger=None, on_chunk=None, on_conversation_event=None) -> dict:
+async def run_analyze_phase(detection_data: dict, run_logger=None, on_chunk=None, on_conversation_event=None, filename=None) -> dict:
     """Phase 2: AI-powered deep analysis with chain-of-thought reasoning.
 
     Sends the pre-computed cross-book analysis data to an AI model with a
     chain-of-thought prompt. The AI must:
-    1. Reason through the data step by step (<thinking> block)
-    2. Cross-verify every claim against the source data
-    3. Self-check via a verification checklist
-    4. Produce a structured JSON analysis (<analysis> block)
+    1. Use MCP tools to verify and enrich the pre-computed data
+    2. Reason through the data step by step (<thinking> block)
+    3. Cross-verify every claim against the source data and tool results
+    4. Self-check via a verification checklist
+    5. Produce a structured JSON analysis (<analysis> block)
 
     The pre-computed analysis dict is preserved as-is for backward compatibility.
     The AI's insights, grades, and actions are layered on top.
 
     Args:
+        filename: The data filename being analyzed (passed to MCP tools).
         on_chunk: Async callback for streaming text deltas.
         on_conversation_event: Async callback for conversation lifecycle events.
             Called with (event_type, data) where event_type is one of:
             - "prompts": system & user prompts are ready
             - "chunk": streaming text delta
+            - "tool_call": a tool call was initiated (with tool call data)
+            - "tool_result": a tool call returned a result
             - "complete": final result with full response and tool calls
     """
     start = time.time()
@@ -1396,9 +1739,17 @@ async def run_analyze_phase(detection_data: dict, run_logger=None, on_chunk=None
 
     # Build the payload for the AI
     analyze_payload = _build_analyze_payload(detection_data)
+
+    # Build user prompt with explicit tool-use instruction and filename context
+    file_hint = f'The data filename is "{filename}". Pass this as the `filename` parameter to all MCP tool calls.\n\n' if filename else ""
     user_prompt = (
-        "Analyze the following betting market data. Think step by step, verify your work, "
-        "and produce your structured analysis.\n\n"
+        f"IMPORTANT: Before writing your analysis, you MUST call MCP tools to verify and enrich the data. "
+        f"Start by calling `list_events`{f' with filename=\"{filename}\"' if filename else ''} to see available games, "
+        f"then call at least 3-5 more tools (e.g., `get_vig_analysis`, `find_expected_value_bets`, "
+        f"`get_book_rankings`, `get_market_entropy`, `detect_line_outliers`) to cross-check the pre-computed data below. "
+        f"Only after reviewing tool results should you write your <thinking> and <analysis> blocks.\n\n"
+        f"{file_hint}"
+        f"Pre-computed analysis data:\n\n"
         + json.dumps(analyze_payload, separators=(",", ":"))
     )
 
@@ -1418,7 +1769,7 @@ async def run_analyze_phase(detection_data: dict, run_logger=None, on_chunk=None
             "user_prompt": user_prompt,
         })
 
-    # Use generous token limit — CoT thinking + full analysis
+    # Use generous token limit — CoT thinking + tool calls + full analysis
     analyze_max_tokens = 16384
 
     # Streaming chunk handler — forward deltas to both callbacks
@@ -1428,11 +1779,17 @@ async def run_analyze_phase(detection_data: dict, run_logger=None, on_chunk=None
         if on_conversation_event:
             await on_conversation_event("chunk", {"text": text_delta})
 
+    # Tool event handler — forward tool_call and tool_result events to the UI
+    async def _on_tool_event(event_type, data):
+        if on_conversation_event:
+            await on_conversation_event(event_type, data)
+
     try:
         result = await call_ai_stream(
             ANALYZE_COT_SYSTEM_PROMPT,
             user_prompt,
             on_chunk=_on_stream_chunk,
+            on_tool_event=_on_tool_event,
             run_logger=run_logger,
             max_tokens=analyze_max_tokens,
         )
@@ -1630,7 +1987,40 @@ async def run_brief_phase(detection_data: dict, analysis_data: dict, on_chunk=No
     brief_max_tokens = 16384
 
     if on_chunk:
-        result = await call_ai_stream(BRIEF_SYSTEM_PROMPT, user_prompt, on_chunk=on_chunk, run_logger=run_logger, max_tokens=brief_max_tokens)
+        # Buffer streaming chunks to strip any preamble before the first "##" heading.
+        # This prevents the user from seeing LLM "thinking out loud" text like
+        # "Looking at this data, I'll generate..." before the actual briefing.
+        _preamble_buffer = []
+        _preamble_stripped = [False]  # mutable flag for closure
+
+        async def _filtered_chunk(text_delta):
+            if _preamble_stripped[0]:
+                # Already past preamble — pass through directly
+                await on_chunk(text_delta)
+                return
+
+            _preamble_buffer.append(text_delta)
+            accumulated = "".join(_preamble_buffer)
+
+            # Look for the first markdown heading (## ) which starts the real briefing
+            heading_pos = accumulated.find("## ")
+            if heading_pos != -1:
+                _preamble_stripped[0] = True
+                # Send everything from the first heading onward
+                real_content = accumulated[heading_pos:]
+                if real_content:
+                    await on_chunk(real_content)
+                if heading_pos > 0 and run_logger:
+                    run_logger.info("Brief: stripped %d chars of preamble before first heading", heading_pos)
+            elif len(accumulated) > 2000:
+                # Safety valve — if no heading found after 2KB, flush everything
+                # (the model may have produced an unusual format)
+                _preamble_stripped[0] = True
+                await on_chunk(accumulated)
+                if run_logger:
+                    run_logger.warning("Brief: no heading found after 2KB buffer, flushing all content")
+
+        result = await call_ai_stream(BRIEF_SYSTEM_PROMPT, user_prompt, on_chunk=_filtered_chunk, run_logger=run_logger, max_tokens=brief_max_tokens)
     else:
         result = await call_ai(BRIEF_SYSTEM_PROMPT, user_prompt, run_logger=run_logger, max_tokens=brief_max_tokens)
 
@@ -1642,8 +2032,16 @@ async def run_brief_phase(detection_data: dict, analysis_data: dict, on_chunk=No
             result.get("usage", {}).get("output_tokens", 0),
         )
 
+    # Strip any preamble from the final text as well
+    final_text = result["text"]
+    heading_pos = final_text.find("## ")
+    if heading_pos > 0:
+        if run_logger:
+            run_logger.info("Brief: stripped %d chars of preamble from final text", heading_pos)
+        final_text = final_text[heading_pos:]
+
     return {
-        "brief_text": result["text"],
+        "brief_text": final_text,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "ai_meta": {
             "provider": result["provider_name"],

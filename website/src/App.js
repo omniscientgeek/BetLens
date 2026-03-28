@@ -15,6 +15,24 @@ const SOCKET_URL = "";
 const PHASE_LABELS = { detect: "Detect", analyze: "Analyze", brief: "Brief" };
 const PHASE_NAMES = ["detect", "analyze", "brief"];
 
+// Retry-enabled fetch: retries on network errors / 5xx with exponential backoff
+async function fetchWithRetry(url, options = {}, maxRetries = 3) {
+  let lastError;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const res = await fetch(url, options);
+      if (res.ok || res.status < 500) return res; // success or client error (no retry)
+      lastError = new Error(`HTTP ${res.status}`);
+    } catch (err) {
+      lastError = err;
+    }
+    if (attempt < maxRetries) {
+      await new Promise((r) => setTimeout(r, 1000 * Math.pow(2, attempt))); // 1s, 2s, 4s
+    }
+  }
+  throw lastError;
+}
+
 // Session persistence helpers — survive refresh, cleared on tab close
 const SESSION_PREFIX = "betstamp_";
 function sessionGet(key, fallback = null) {
@@ -70,6 +88,11 @@ function BetLens() {
   const [pipelineError, setPipelineError] = useState(null);
   const socketRef = useRef(null);
 
+  // Reconnection tracking
+  const [reconnecting, setReconnecting] = useState(false);
+  const reconnectAttemptsRef = useRef(0);
+  const MAX_RECONNECT_RESTARTS = 3; // max times we'll auto-restart the pipeline
+
   // Pipeline results (used by BriefPanel and ChatPanel)
   const [pipelineResults, setPipelineResults] = useState(() => sessionGet("pipelineResults", null));
 
@@ -113,9 +136,9 @@ function BetLens() {
   useEffect(() => { sessionSet("pipelineComplete", pipelineComplete); }, [pipelineComplete]);
   useEffect(() => { sessionSet("pipelineResults", pipelineResults); }, [pipelineResults]);
 
-  // Fetch available JSON files on mount
+  // Fetch available JSON files on mount (with retry)
   useEffect(() => {
-    fetch(`${API_BASE}/files`)
+    fetchWithRetry(`${API_BASE}/files`)
       .then((res) => res.json())
       .then((data) => setFiles(data.files || []))
       .catch((err) => setError("Failed to load file list: " + err.message));
@@ -161,7 +184,7 @@ function BetLens() {
 
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/files/${filename}`);
+      const res = await fetchWithRetry(`${API_BASE}/files/${filename}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       setFileData(data);
@@ -173,17 +196,32 @@ function BetLens() {
     setLoading(false);
 
     // Start WebSocket connection for processing pipeline
-    // Disable auto-reconnect — if the connection drops mid-pipeline (e.g.
-    // phone lock), we don't want to restart from scratch.
+    // Auto-reconnect is enabled — on reconnect we resume the pipeline
+    // from where it left off (completed phases are cached server-side).
+    reconnectAttemptsRef.current = 0;
     const socket = io(SOCKET_URL, {
       transports: ["websocket", "polling"],
-      reconnection: false,
+      reconnection: true,
+      reconnectionAttempts: 15,
+      reconnectionDelay: 2000,
+      reconnectionDelayMax: 30000,
     });
     socketRef.current = socket;
 
-    socket.once("connect", () => {
-      setPipelineStartTime(Date.now());
-      socket.emit("start_processing", { filename });
+    socket.on("connect", () => {
+      const isReconnect = reconnectAttemptsRef.current > 0;
+      setReconnecting(false);
+
+      if (isReconnect) {
+        // Reconnected — clear only streaming state; keep completed phase results.
+        // Server will replay completed phases and resume live streaming.
+        setStreamingBrief("");
+        setPipelineError(null);
+        socket.emit("start_processing", { filename, resume: true });
+      } else {
+        setPipelineStartTime(Date.now());
+        socket.emit("start_processing", { filename });
+      }
     });
 
     socket.on("phase_update", (data) => {
@@ -218,6 +256,24 @@ function BetLens() {
           if (!prev) return prev;
           return { ...prev, assistant_response: (prev.assistant_response || "") + (eventData.text || "") };
         });
+      } else if (event === "tool_call") {
+        // Live tool call event — append to tool_calls array during streaming
+        setAnalyzeConversation((prev) => {
+          if (!prev) return prev;
+          const existing = prev.tool_calls || [];
+          return { ...prev, tool_calls: [...existing, eventData] };
+        });
+      } else if (event === "tool_result") {
+        // Live tool result event — attach result to matching tool call
+        setAnalyzeConversation((prev) => {
+          if (!prev) return prev;
+          const updated = (prev.tool_calls || []).map((tc) =>
+            tc.id === eventData.tool_use_id
+              ? { ...tc, result: eventData.result, is_error: eventData.is_error || false }
+              : tc
+          );
+          return { ...prev, tool_calls: updated };
+        });
       } else if (event === "complete") {
         setAnalyzeConversation((prev) => ({
           ...(prev || {}),
@@ -235,13 +291,22 @@ function BetLens() {
       }
     });
 
-    // Receive verification results (arrives after brief phase, before processing_complete)
+    // Receive verification results (arrives after analyze/brief phase, before processing_complete)
     socket.on("verification_update", (data) => {
       if (data.verification) {
+        const phase = data.phase || "brief";
         setPhaseResults((prev) => ({
           ...prev,
-          brief: { ...prev.brief, verification: data.verification },
+          [phase]: { ...prev[phase], verification: data.verification },
         }));
+      }
+    });
+
+    // Heartbeat from server — reset any "stale" timers / keep UI alive
+    socket.on("heartbeat", (data) => {
+      // Update pipeline status so user sees the phase is still active
+      if (data.phase) {
+        setPipeline((prev) => prev ? { ...prev, phase: data.phase, status: "in_progress" } : prev);
       }
     });
 
@@ -257,6 +322,36 @@ function BetLens() {
     socket.on("processing_error", (data) => {
       setPipelineError(data.error);
       socket.disconnect();
+      socketRef.current = null;
+    });
+
+    // Handle unexpected disconnects — attempt auto-reconnect + pipeline restart
+    socket.on("disconnect", (reason) => {
+      // Ignore intentional disconnects (we call socket.disconnect() on complete/error)
+      if (reason === "io client disconnect") return;
+
+      reconnectAttemptsRef.current += 1;
+
+      if (reconnectAttemptsRef.current <= MAX_RECONNECT_RESTARTS) {
+        // Socket.IO will auto-reconnect; show "reconnecting" state instead of error
+        setReconnecting(true);
+        setPipelineError(null);
+      } else {
+        // Exhausted auto-restart attempts — give up and show error
+        setPipelineError(
+          `Connection lost (${reason}) after ${reconnectAttemptsRef.current} reconnection attempts. Please try again.`
+        );
+        socket.disconnect();
+        socketRef.current = null;
+      }
+    });
+
+    // If Socket.IO itself gives up reconnecting (all attempts exhausted)
+    socket.io.on("reconnect_failed", () => {
+      setReconnecting(false);
+      setPipelineError(
+        "Unable to reconnect to the server. Please check your connection and try again."
+      );
       socketRef.current = null;
     });
   };
@@ -448,6 +543,17 @@ function BetLens() {
           <div className="pipeline-timer">
             {formatElapsed(elapsedSeconds)}
           </div>
+        </div>
+      )}
+
+      {/* Reconnecting banner */}
+      {reconnecting && (
+        <div className="reconnecting-banner">
+          <span className="reconnecting-spinner" />
+          Connection lost — reconnecting and resuming analysis
+          <span className="reconnecting-attempt">
+            (attempt {reconnectAttemptsRef.current} of {MAX_RECONNECT_RESTARTS})
+          </span>
         </div>
       )}
 
