@@ -1054,6 +1054,9 @@
 .git-stat-bar-claude {
   background: linear-gradient(90deg, var(--accent-coral), #ff7a8f);
 }
+.git-stat-bar-autosync {
+  background: linear-gradient(90deg, #a78bfa, #c4b5fd);
+}
 .git-stat-bar-user {
   background: linear-gradient(90deg, var(--accent-cyan), #33ddff);
 }

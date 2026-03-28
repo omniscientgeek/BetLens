@@ -205,6 +205,23 @@ function DevNotes() {
                 ({gitStats.summary.claude_commits} commits)
               </span>
             </div>
+            {gitStats.summary.autosync_commits > 0 && (
+              <div className="git-stat-row">
+                <span className="git-stat-label">AutoSync</span>
+                <div className="git-stat-bar-track">
+                  <div
+                    className="git-stat-bar-fill git-stat-bar-autosync"
+                    style={{ width: `${gitStats.summary.autosync_percentage}%` }}
+                  />
+                </div>
+                <span className="git-stat-value">
+                  {gitStats.summary.autosync_percentage}%
+                </span>
+                <span className="git-stat-count">
+                  ({gitStats.summary.autosync_commits} commits)
+                </span>
+              </div>
+            )}
             <div className="git-stat-row">
               <span className="git-stat-label">User</span>
               <div className="git-stat-bar-track">

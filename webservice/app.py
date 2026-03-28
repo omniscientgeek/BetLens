@@ -1100,6 +1100,8 @@ async def list_conversations(project_id: int = Query(...)):
         import aiofiles
         async with aiofiles.open(save_path, "w", encoding="utf-8") as f:
             await f.write(json.dumps(result, indent=2))
+        # Auto-commit the saved devnotes data
+        await _auto_commit_devnotes(f"Auto-sync devnotes for project {project_id}")
     except Exception:
         pass  # Don't fail the response if saving fails
 
@@ -1194,6 +1196,59 @@ async def get_notes():
 REPO_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 GIT_STATS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "devNotesData"))
 
+# Auto-commit identity — shows as a separate contributor in git stats
+AUTOSYNC_AUTHOR = "BetStamp AutoSync"
+AUTOSYNC_EMAIL = "autosync@betstamp.app"
+
+
+async def _auto_commit_devnotes(message: str = "Auto-sync devNotesData"):
+    """Stage and commit only devNotesData/ files using the AutoSync identity.
+
+    This ensures auto-generated data commits appear as a distinct contributor
+    separate from both Claude and the user in git contribution stats.
+    """
+    try:
+        # Stage only devNotesData/ files
+        add_proc = await asyncio.create_subprocess_exec(
+            "git", "add", "devNotesData/",
+            cwd=REPO_DIR,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await add_proc.communicate()
+        if add_proc.returncode != 0:
+            return
+
+        # Check if there are staged changes to commit
+        diff_proc = await asyncio.create_subprocess_exec(
+            "git", "diff", "--cached", "--quiet", "devNotesData/",
+            cwd=REPO_DIR,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await diff_proc.communicate()
+        if diff_proc.returncode == 0:
+            # returncode 0 means no diff — nothing to commit
+            return
+
+        # Commit with the AutoSync identity
+        commit_proc = await asyncio.create_subprocess_exec(
+            "git", "commit",
+            "--author", f"{AUTOSYNC_AUTHOR} <{AUTOSYNC_EMAIL}>",
+            "-m", message,
+            "--", "devNotesData/",
+            cwd=REPO_DIR,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await commit_proc.communicate()
+        if commit_proc.returncode == 0:
+            logger.info("AutoSync committed devNotesData: %s", stdout.decode().strip())
+        else:
+            logger.warning("AutoSync commit failed: %s", stderr.decode().strip())
+    except Exception as e:
+        logger.warning("AutoSync commit error: %s", e)
+
 
 async def _analyze_git_history():
     """Analyze git commit history and classify commits as Claude or User authored."""
@@ -1236,8 +1291,9 @@ async def _analyze_git_history():
 
         full_message = f"{subject}\n{body}"
 
-        # Determine if Claude authored/co-authored this commit
-        is_claude = any(p.search(full_message) for p in claude_patterns)
+        # Classify commit: autosync, claude, or user
+        is_autosync = (author_name == AUTOSYNC_AUTHOR or author_email == AUTOSYNC_EMAIL)
+        is_claude = (not is_autosync) and any(p.search(full_message) for p in claude_patterns)
 
         commits.append({
             "hash": commit_hash[:8],
@@ -1246,17 +1302,21 @@ async def _analyze_git_history():
             "date": date,
             "subject": subject,
             "is_claude": is_claude,
+            "is_autosync": is_autosync,
         })
 
     total = len(commits)
     claude_count = sum(1 for c in commits if c["is_claude"])
-    user_count = total - claude_count
+    autosync_count = sum(1 for c in commits if c["is_autosync"])
+    user_count = total - claude_count - autosync_count
 
     summary = {
         "total_commits": total,
         "claude_commits": claude_count,
+        "autosync_commits": autosync_count,
         "user_commits": user_count,
         "claude_percentage": round((claude_count / total) * 100, 1) if total > 0 else 0,
+        "autosync_percentage": round((autosync_count / total) * 100, 1) if total > 0 else 0,
         "user_percentage": round((user_count / total) * 100, 1) if total > 0 else 0,
         "generated_at": datetime.now().isoformat(),
     }
@@ -1279,6 +1339,8 @@ async def get_git_stats():
         import aiofiles
         async with aiofiles.open(save_path, "w", encoding="utf-8") as f:
             await f.write(json.dumps(stats, indent=2))
+        # Auto-commit the saved git stats data
+        await _auto_commit_devnotes("Auto-sync git stats")
     except Exception:
         pass
 
