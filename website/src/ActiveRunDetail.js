@@ -139,22 +139,67 @@ export default function ActiveRunDetail({ filename, onBack, backLabel }) {
       )}
 
       {/* Audit Analyze */}
-      {pr.analyze?.verification && (
-        <div className="verification-card">
-          <div className="verification-card-header">
-            <span className="verification-card-icon">🛡</span>
-            <h3>Audit Analyze</h3>
-            {pr.analyze.verification.fix_attempts > 0 && (
-              <span className="fix-badge fix-badge--complete">
-                {pr.analyze.verification.overall_verdict === "pass"
-                  ? `Fixed in ${pr.analyze.verification.fix_attempts} attempt${pr.analyze.verification.fix_attempts > 1 ? "s" : ""}`
-                  : `${pr.analyze.verification.fix_attempts} fix attempt${pr.analyze.verification.fix_attempts > 1 ? "s" : ""} (${pr.analyze.verification.overall_verdict})`}
-              </span>
-            )}
-          </div>
-          <VerificationBadge verification={pr.analyze.verification} streaming={false} />
-        </div>
-      )}
+      {(() => {
+        const analyzeV = pr.analyze?.verification;
+        const analyzeHistory = analyzeV?.fix_history || [];
+
+        if (analyzeHistory.length > 0) {
+          return (
+            <div className="audit-timeline">
+              <div className="audit-timeline-header">
+                <span className="audit-timeline-icon">{"\u{1F6E1}"}</span>
+                <h3>Audit Analyze Timeline</h3>
+                <span className="audit-timeline-count">
+                  {analyzeHistory.length} audit{analyzeHistory.length !== 1 ? "s" : ""}
+                </span>
+              </div>
+              {analyzeHistory.map((h, idx) => {
+                const isLatest = idx === analyzeHistory.length - 1;
+                const isPassed = h.verdict === "pass";
+                const issueCount = Object.values(h.verification?.agents || {}).reduce(
+                  (sum, a) => sum + (a.issues?.length || 0), 0
+                );
+                return (
+                  <div key={idx} className={`audit-block audit-block--${h.verdict} ${isLatest ? "audit-block--latest" : "audit-block--historical"}`}>
+                    <div className="audit-block-header">
+                      <span className={`audit-block-indicator audit-block-indicator--${h.verdict}`}>
+                        {isPassed ? "\u2705" : h.verdict === "warn" ? "\u26A0\uFE0F" : "\u274C"}
+                      </span>
+                      <span className="audit-block-title">
+                        {h.attempt === 0 ? "Initial Audit" : `Re-audit after Fix #${h.attempt}`}
+                      </span>
+                      <span className={`audit-block-verdict verdict--${h.verdict}`}>
+                        {h.verdict.toUpperCase()}
+                      </span>
+                      {issueCount > 0 && (
+                        <span className="audit-block-issues">
+                          {issueCount} issue{issueCount !== 1 ? "s" : ""}
+                        </span>
+                      )}
+                      {isLatest && <span className="audit-block-latest-tag">Latest</span>}
+                    </div>
+                    <VerificationBadge verification={h.verification} />
+                  </div>
+                );
+              })}
+            </div>
+          );
+        }
+
+        if (analyzeV) {
+          return (
+            <div className="verification-card">
+              <div className="verification-card-header">
+                <span className="verification-card-icon">{"\u{1F6E1}"}</span>
+                <h3>Audit Analyze</h3>
+              </div>
+              <VerificationBadge verification={analyzeV} streaming={false} />
+            </div>
+          );
+        }
+
+        return null;
+      })()}
 
       {/* Brief Panel */}
       {pr.brief && !pr.brief.error && (
@@ -165,22 +210,67 @@ export default function ActiveRunDetail({ filename, onBack, backLabel }) {
       )}
 
       {/* Audit Brief */}
-      {pr.brief?.verification && (
-        <div className="verification-card">
-          <div className="verification-card-header">
-            <span className="verification-card-icon">🛡</span>
-            <h3>Audit Brief</h3>
-            {pr.brief.verification.fix_attempts > 0 && (
-              <span className="fix-badge fix-badge--complete">
-                {pr.brief.verification.overall_verdict === "pass"
-                  ? `Fixed in ${pr.brief.verification.fix_attempts} attempt${pr.brief.verification.fix_attempts > 1 ? "s" : ""}`
-                  : `${pr.brief.verification.fix_attempts} fix attempt${pr.brief.verification.fix_attempts > 1 ? "s" : ""} (${pr.brief.verification.overall_verdict})`}
-              </span>
-            )}
-          </div>
-          <VerificationBadge verification={pr.brief.verification} streaming={false} />
-        </div>
-      )}
+      {(() => {
+        const briefV = pr.brief?.verification;
+        const briefHistory = briefV?.fix_history || [];
+
+        if (briefHistory.length > 0) {
+          return (
+            <div className="audit-timeline">
+              <div className="audit-timeline-header">
+                <span className="audit-timeline-icon">{"\u{1F6E1}"}</span>
+                <h3>Audit Brief Timeline</h3>
+                <span className="audit-timeline-count">
+                  {briefHistory.length} audit{briefHistory.length !== 1 ? "s" : ""}
+                </span>
+              </div>
+              {briefHistory.map((h, idx) => {
+                const isLatest = idx === briefHistory.length - 1;
+                const isPassed = h.verdict === "pass";
+                const issueCount = Object.values(h.verification?.agents || {}).reduce(
+                  (sum, a) => sum + (a.issues?.length || 0), 0
+                );
+                return (
+                  <div key={idx} className={`audit-block audit-block--${h.verdict} ${isLatest ? "audit-block--latest" : "audit-block--historical"}`}>
+                    <div className="audit-block-header">
+                      <span className={`audit-block-indicator audit-block-indicator--${h.verdict}`}>
+                        {isPassed ? "\u2705" : h.verdict === "warn" ? "\u26A0\uFE0F" : "\u274C"}
+                      </span>
+                      <span className="audit-block-title">
+                        {h.attempt === 0 ? "Initial Audit" : `Re-audit after Fix #${h.attempt}`}
+                      </span>
+                      <span className={`audit-block-verdict verdict--${h.verdict}`}>
+                        {h.verdict.toUpperCase()}
+                      </span>
+                      {issueCount > 0 && (
+                        <span className="audit-block-issues">
+                          {issueCount} issue{issueCount !== 1 ? "s" : ""}
+                        </span>
+                      )}
+                      {isLatest && <span className="audit-block-latest-tag">Latest</span>}
+                    </div>
+                    <VerificationBadge verification={h.verification} />
+                  </div>
+                );
+              })}
+            </div>
+          );
+        }
+
+        if (briefV) {
+          return (
+            <div className="verification-card">
+              <div className="verification-card-header">
+                <span className="verification-card-icon">{"\u{1F6E1}"}</span>
+                <h3>Audit Brief</h3>
+              </div>
+              <VerificationBadge verification={briefV} streaming={false} />
+            </div>
+          );
+        }
+
+        return null;
+      })()}
 
       {/* Currently running phase indicator */}
       {data.status === "running" && (

@@ -42,13 +42,15 @@ const PHASE_LABELS = {
 /* ------------------------------------------------------------------ */
 function parseRunMeta(filename) {
   // betlens_results_2026-03-28_013024.json  or  sample_2026-03-28_013024.json
+  // Timestamps in filenames are server local time (generated via datetime.now())
   const match = filename.match(/(\d{4}-\d{2}-\d{2})_(\d{2})(\d{2})(\d{2})\.json$/);
   if (match) {
     const [, date, hh, mm, ss] = match;
+    const dateTime = new Date(`${date}T${hh}:${mm}:${ss}`);
     return {
-      date,
-      time: `${hh}:${mm}:${ss}`,
-      dateTime: new Date(`${date}T${hh}:${mm}:${ss}`),
+      date: dateTime.toLocaleDateString(),
+      time: dateTime.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+      dateTime,
     };
   }
   return { date: null, time: null, dateTime: null };
@@ -278,94 +280,184 @@ function RunDetail({ filename, onBack }) {
       </div>
 
       {/* Analyze Conversation */}
-      {pr.analyze && (
-        <AnalyzeConversation
-          analyzeResult={pr.analyze}
-          streaming={false}
-          defaultExpanded={false}
-          title="Analysis Conversation"
-        />
-      )}
+      {pr.analyze && (() => {
+        const analyzeV = pr.analyze?.verification;
+        const analyzeIsDraft = analyzeV && analyzeV.overall_verdict !== "pass";
+        return (
+          <div className={`draft-wrapper ${analyzeIsDraft ? "draft-wrapper--draft" : analyzeV ? "draft-wrapper--verified" : ""}`}>
+            {analyzeIsDraft && (
+              <div className="draft-badge">
+                <span className="draft-badge-icon">{"\u26A0\uFE0F"}</span>
+                <span>DRAFT — Analysis did not pass all audits</span>
+              </div>
+            )}
+            {!analyzeIsDraft && analyzeV && (
+              <div className="verified-badge">
+                <span className="verified-badge-icon">{"\u2705"}</span>
+                <span>VERIFIED — Analysis passed all audits</span>
+              </div>
+            )}
+            <AnalyzeConversation
+              analyzeResult={pr.analyze}
+              streaming={false}
+              defaultExpanded={false}
+              title="Analysis Conversation"
+            />
+          </div>
+        );
+      })()}
 
       {/* Audit Analyze */}
-      {pr.analyze?.verification && (
-        <div className="verification-card">
-          <div className="verification-card-header">
-            <span className="verification-card-icon">🛡</span>
-            <h3>Audit Analyze</h3>
-            {pr.analyze.verification.fix_attempts > 0 && (
-              <span className="fix-badge fix-badge--complete">
-                {pr.analyze.verification.overall_verdict === "pass"
-                  ? `Fixed in ${pr.analyze.verification.fix_attempts} attempt${pr.analyze.verification.fix_attempts > 1 ? "s" : ""}`
-                  : `${pr.analyze.verification.fix_attempts} fix attempt${pr.analyze.verification.fix_attempts > 1 ? "s" : ""} (${pr.analyze.verification.overall_verdict})`}
-              </span>
-            )}
-          </div>
-          <VerificationBadge verification={pr.analyze.verification} streaming={false} />
-          {pr.analyze.verification.fix_history?.length > 1 && (
-            <details className="fix-history">
-              <summary>Fix History ({pr.analyze.verification.fix_history.length} attempts)</summary>
-              <div className="fix-history-list">
-                {pr.analyze.verification.fix_history.map((h, idx) => (
-                  <div key={idx} className={`fix-history-item fix-history-item--${h.verdict}`}>
-                    <span className="fix-history-attempt">Attempt {h.attempt}</span>
-                    <span className={`fix-history-verdict verdict--${h.verdict}`}>{h.verdict}</span>
-                    <span className="fix-history-issues">
-                      {Object.values(h.verification?.agents || {}).reduce(
-                        (sum, a) => sum + (a.issues?.length || 0), 0
-                      )} issues
-                    </span>
-                  </div>
-                ))}
+      {(() => {
+        const analyzeV = pr.analyze?.verification;
+        const analyzeHistory = analyzeV?.fix_history || [];
+
+        if (analyzeHistory.length > 0) {
+          return (
+            <div className="audit-timeline">
+              <div className="audit-timeline-header">
+                <span className="audit-timeline-icon">{"\u{1F6E1}"}</span>
+                <h3>Audit Analyze Timeline</h3>
+                <span className="audit-timeline-count">
+                  {analyzeHistory.length} audit{analyzeHistory.length !== 1 ? "s" : ""}
+                </span>
               </div>
-            </details>
-          )}
-        </div>
-      )}
+              {analyzeHistory.map((h, idx) => {
+                const isLatest = idx === analyzeHistory.length - 1;
+                const isPassed = h.verdict === "pass";
+                const issueCount = Object.values(h.verification?.agents || {}).reduce(
+                  (sum, a) => sum + (a.issues?.length || 0), 0
+                );
+                return (
+                  <div key={idx} className={`audit-block audit-block--${h.verdict} ${isLatest ? "audit-block--latest" : "audit-block--historical"}`}>
+                    <div className="audit-block-header">
+                      <span className={`audit-block-indicator audit-block-indicator--${h.verdict}`}>
+                        {isPassed ? "\u2705" : h.verdict === "warn" ? "\u26A0\uFE0F" : "\u274C"}
+                      </span>
+                      <span className="audit-block-title">
+                        {h.attempt === 0 ? "Initial Audit" : `Re-audit after Fix #${h.attempt}`}
+                      </span>
+                      <span className={`audit-block-verdict verdict--${h.verdict}`}>
+                        {h.verdict.toUpperCase()}
+                      </span>
+                      {issueCount > 0 && (
+                        <span className="audit-block-issues">
+                          {issueCount} issue{issueCount !== 1 ? "s" : ""}
+                        </span>
+                      )}
+                      {isLatest && <span className="audit-block-latest-tag">Latest</span>}
+                    </div>
+                    <VerificationBadge verification={h.verification} />
+                  </div>
+                );
+              })}
+            </div>
+          );
+        }
+
+        if (analyzeV) {
+          return (
+            <div className="verification-card">
+              <div className="verification-card-header">
+                <span className="verification-card-icon">{"\u{1F6E1}"}</span>
+                <h3>Audit Analyze</h3>
+              </div>
+              <VerificationBadge verification={analyzeV} streaming={false} />
+            </div>
+          );
+        }
+
+        return null;
+      })()}
 
       {/* Brief Panel */}
-      {pr.brief && !pr.brief.error && (
-        <BriefPanel briefResult={pr.brief} isInterim={false} />
-      )}
+      {pr.brief && !pr.brief.error && (() => {
+        const briefV = pr.brief?.verification;
+        const briefIsDraft = briefV && briefV.overall_verdict !== "pass";
+        return (
+          <div className={`draft-wrapper ${briefIsDraft ? "draft-wrapper--draft" : briefV ? "draft-wrapper--verified" : ""}`}>
+            {briefIsDraft && (
+              <div className="draft-badge">
+                <span className="draft-badge-icon">{"\u26A0\uFE0F"}</span>
+                <span>DRAFT — Brief did not pass all audits</span>
+              </div>
+            )}
+            {!briefIsDraft && briefV && (
+              <div className="verified-badge">
+                <span className="verified-badge-icon">{"\u2705"}</span>
+                <span>VERIFIED — Brief passed all audits</span>
+              </div>
+            )}
+            <BriefPanel briefResult={pr.brief} isInterim={false} />
+          </div>
+        );
+      })()}
       {pr.brief?.error && (
         <div className="error">Brief generation failed: {pr.brief.error}</div>
       )}
 
       {/* Audit Brief */}
-      {pr.brief?.verification && (
-        <div className="verification-card">
-          <div className="verification-card-header">
-            <span className="verification-card-icon">🛡</span>
-            <h3>Audit Brief</h3>
-            {pr.brief.verification.fix_attempts > 0 && (
-              <span className="fix-badge fix-badge--complete">
-                {pr.brief.verification.overall_verdict === "pass"
-                  ? `Fixed in ${pr.brief.verification.fix_attempts} attempt${pr.brief.verification.fix_attempts > 1 ? "s" : ""}`
-                  : `${pr.brief.verification.fix_attempts} fix attempt${pr.brief.verification.fix_attempts > 1 ? "s" : ""} (${pr.brief.verification.overall_verdict})`}
-              </span>
-            )}
-          </div>
-          <VerificationBadge verification={pr.brief.verification} streaming={false} />
-          {pr.brief.verification.fix_history?.length > 1 && (
-            <details className="fix-history">
-              <summary>Fix History ({pr.brief.verification.fix_history.length} attempts)</summary>
-              <div className="fix-history-list">
-                {pr.brief.verification.fix_history.map((h, idx) => (
-                  <div key={idx} className={`fix-history-item fix-history-item--${h.verdict}`}>
-                    <span className="fix-history-attempt">Attempt {h.attempt}</span>
-                    <span className={`fix-history-verdict verdict--${h.verdict}`}>{h.verdict}</span>
-                    <span className="fix-history-issues">
-                      {Object.values(h.verification?.agents || {}).reduce(
-                        (sum, a) => sum + (a.issues?.length || 0), 0
-                      )} issues
-                    </span>
-                  </div>
-                ))}
+      {(() => {
+        const briefV = pr.brief?.verification;
+        const briefHistory = briefV?.fix_history || [];
+
+        if (briefHistory.length > 0) {
+          return (
+            <div className="audit-timeline">
+              <div className="audit-timeline-header">
+                <span className="audit-timeline-icon">{"\u{1F6E1}"}</span>
+                <h3>Audit Brief Timeline</h3>
+                <span className="audit-timeline-count">
+                  {briefHistory.length} audit{briefHistory.length !== 1 ? "s" : ""}
+                </span>
               </div>
-            </details>
-          )}
-        </div>
-      )}
+              {briefHistory.map((h, idx) => {
+                const isLatest = idx === briefHistory.length - 1;
+                const isPassed = h.verdict === "pass";
+                const issueCount = Object.values(h.verification?.agents || {}).reduce(
+                  (sum, a) => sum + (a.issues?.length || 0), 0
+                );
+                return (
+                  <div key={idx} className={`audit-block audit-block--${h.verdict} ${isLatest ? "audit-block--latest" : "audit-block--historical"}`}>
+                    <div className="audit-block-header">
+                      <span className={`audit-block-indicator audit-block-indicator--${h.verdict}`}>
+                        {isPassed ? "\u2705" : h.verdict === "warn" ? "\u26A0\uFE0F" : "\u274C"}
+                      </span>
+                      <span className="audit-block-title">
+                        {h.attempt === 0 ? "Initial Audit" : `Re-audit after Fix #${h.attempt}`}
+                      </span>
+                      <span className={`audit-block-verdict verdict--${h.verdict}`}>
+                        {h.verdict.toUpperCase()}
+                      </span>
+                      {issueCount > 0 && (
+                        <span className="audit-block-issues">
+                          {issueCount} issue{issueCount !== 1 ? "s" : ""}
+                        </span>
+                      )}
+                      {isLatest && <span className="audit-block-latest-tag">Latest</span>}
+                    </div>
+                    <VerificationBadge verification={h.verification} />
+                  </div>
+                );
+              })}
+            </div>
+          );
+        }
+
+        if (briefV) {
+          return (
+            <div className="verification-card">
+              <div className="verification-card-header">
+                <span className="verification-card-icon">{"\u{1F6E1}"}</span>
+                <h3>Audit Brief</h3>
+              </div>
+              <VerificationBadge verification={briefV} streaming={false} />
+            </div>
+          );
+        }
+
+        return null;
+      })()}
     </div>
   );
 }
