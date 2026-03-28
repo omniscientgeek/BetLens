@@ -4,6 +4,8 @@ import { io } from "socket.io-client";
 import DevNotes from "./DevNotes";
 import AISettings from "./AISettings";
 import PastRuns from "./PastRuns";
+import TestRunner from "./TestRunner";
+import "./TestRunner.css";
 import ActiveRunDetail from "./ActiveRunDetail";
 import ChatPanel from "./ChatPanel";
 import BriefPanel, { VerificationBadge } from "./BriefPanel";
@@ -42,6 +44,7 @@ function Navigation() {
     { path: "/", label: "BetLens", icon: "◎" },
     { path: "/past-runs", label: "History", icon: "▤" },
     { path: "/devnotes", label: "Notes", icon: "◆" },
+    { path: "/tests", label: "Tests", icon: "⬡" },
     { path: "/ai-settings", label: "Settings", icon: "⚙" },
   ];
 
@@ -1455,6 +1458,7 @@ const PAGE_TITLES = {
   "/": "BetLens",
   "/past-runs": "History",
   "/devnotes": "Notes",
+  "/tests": "Tests",
   "/ai-settings": "Settings",
 };
 
@@ -1478,6 +1482,7 @@ function AppContent() {
           <Route path="/" element={<BetLens />} />
           <Route path="/past-runs" element={<PastRuns />} />
           <Route path="/devnotes" element={<DevNotes />} />
+          <Route path="/tests" element={<TestRunner />} />
           <Route path="/ai-settings" element={<AISettings />} />
         </Routes>
       </main>

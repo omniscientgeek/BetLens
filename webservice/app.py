@@ -1888,6 +1888,114 @@ async def get_run_log(run_id: str):
     return PlainTextResponse(content)
 
 
+# ---------------------------------------------------------------------------
+# Test runner endpoint — execute pytest and return structured results
+# ---------------------------------------------------------------------------
+
+@app.post("/api/tests/run")
+async def run_tests():
+    """Execute the MCP server unit test suite and return structured results."""
+    import time as _time
+    import tempfile
+
+    test_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "mcp-server", "tests"))
+    if not os.path.isdir(test_dir):
+        return JSONResponse({"error": "Test directory not found", "path": test_dir}, status_code=404)
+
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+    # Use a temp file for the JSON report
+    report_fd, report_path = tempfile.mkstemp(suffix=".json", prefix="pytest_report_")
+    os.close(report_fd)
+
+    start = _time.monotonic()
+    try:
+        proc = subprocess.run(
+            [
+                "python", "-m", "pytest", test_dir,
+                "-v", "--tb=short", "--no-header",
+                "--json-report",
+                f"--json-report-file={report_path}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            cwd=project_root,
+        )
+    except subprocess.TimeoutExpired:
+        os.unlink(report_path)
+        return JSONResponse({"error": "Tests timed out after 120 seconds"}, status_code=504)
+    except FileNotFoundError:
+        os.unlink(report_path)
+        return JSONResponse({"error": "Python or pytest not found on PATH"}, status_code=500)
+
+    elapsed = round(_time.monotonic() - start, 3)
+    full_output = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
+
+    # Try JSON report first (requires pytest-json-report plugin)
+    try:
+        with open(report_path, "r", encoding="utf-8") as f:
+            report = json.load(f)
+        tests = []
+        for t in report.get("tests", []):
+            longrepr = ""
+            call_info = t.get("call") or {}
+            if isinstance(call_info, dict):
+                longrepr = call_info.get("longrepr", "")
+            tests.append({
+                "nodeid": t.get("nodeid", ""),
+                "outcome": t.get("outcome", "unknown"),
+                "duration": round(t.get("duration", 0), 4),
+                "longrepr": longrepr,
+            })
+        os.unlink(report_path)
+
+        failed_count = sum(1 for t in tests if t["outcome"] in ("failed", "error"))
+        return JSONResponse({
+            "tests": tests,
+            "summary": report.get("summary", {}),
+            "duration": report.get("duration", elapsed),
+            "exit_code": proc.returncode,
+            "stdout": full_output if failed_count > 0 else None,
+        })
+    except (json.JSONDecodeError, ValueError, FileNotFoundError):
+        pass
+
+    # Clean up temp file on fallback path
+    try:
+        os.unlink(report_path)
+    except OSError:
+        pass
+
+    # Fallback: parse raw pytest verbose output
+    tests = []
+    for line in full_output.splitlines():
+        stripped = line.strip()
+        if "::" in stripped:
+            for status_word, outcome in [("PASSED", "passed"), ("FAILED", "failed"), ("ERROR", "error"), ("SKIPPED", "skipped")]:
+                if status_word in stripped:
+                    nodeid = stripped.split(status_word)[0].strip()
+                    tests.append({
+                        "nodeid": nodeid,
+                        "outcome": outcome,
+                        "duration": None,
+                        "longrepr": "",
+                    })
+                    break
+
+    passed = sum(1 for t in tests if t["outcome"] == "passed")
+    failed = sum(1 for t in tests if t["outcome"] == "failed")
+    errors = sum(1 for t in tests if t["outcome"] == "error")
+
+    return JSONResponse({
+        "tests": tests,
+        "summary": {"passed": passed, "failed": failed, "error": errors, "total": len(tests)},
+        "duration": elapsed,
+        "exit_code": proc.returncode,
+        "stdout": full_output if (failed + errors > 0 or not tests) else None,
+    })
+
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8191))
