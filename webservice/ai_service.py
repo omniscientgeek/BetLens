@@ -1542,6 +1542,22 @@ Your <analysis> JSON must include:
 - Prioritize actionable insights backed by tool evidence over speculation.
 - Grade sportsbooks relative to each other using `get_book_rankings` results.
 - An analysis with zero tool calls is WRONG. Call tools first, reason second.
+
+## CRITICAL: EXACT QUOTING — ZERO TOLERANCE FOR NUMBER DRIFT
+When you report numbers from MCP tool results in your analysis, you MUST copy them \
+EXACTLY as returned by the tool. Do NOT round, adjust, paraphrase, or approximate \
+any numerical value. Specific rules:
+- EV edge percentages: copy the exact value (e.g., if tool says 8.396%, write 8.396%, NOT 7.04% or ~8.4%)
+- Arbitrage profit percentages: copy the exact value (e.g., if tool says 7.513%, write 7.513%, NOT 8.12%)
+- Kelly sizing percentages: copy the exact value from get_kelly_sizing() or get_best_bets_today()
+- Odds values: copy the exact American odds number (e.g., +165, -121, NOT "around +165")
+- Vig percentages: copy the exact value from get_vig_analysis()
+- NEVER report a +EV opportunity, arbitrage, or middle that does not appear in the tool results. \
+  If a tool does not return a bet as +EV, it is NOT +EV — do not invent it.
+- If you find yourself writing a number that you are "pretty sure" is right but did not \
+  come directly from a tool result, STOP and call the tool again to get the exact number.
+- Include Kelly Criterion bet sizing (quarter-Kelly) for every recommended bet. \
+  Call get_kelly_sizing() or get_best_bets_today() to obtain this data.
 """
 
 BRIEF_SYSTEM_PROMPT = """\
@@ -1570,7 +1586,10 @@ List up to 5 of the best value bets you can identify, ranked by confidence. For 
 state the game, market (spread/moneyline/total), the specific side and line, which \
 sportsbook has the best odds, the odds themselves, and why this is a value play \
 (reference fair odds, vig, or consensus). Rate confidence as HIGH, MEDIUM, or LOW \
-with a brief justification.
+with a brief justification. \
+For each value bet, include Kelly Criterion sizing guidance (quarter-Kelly recommended \
+bet size as a percentage of bankroll) from the data. If Kelly sizing data is not \
+available for a bet, state that explicitly.
 
 ## Best Line Shopping
 For key games, show which sportsbook offers the best odds on each side. Highlight \
@@ -1580,7 +1599,8 @@ American odds). This tells the reader where to place each bet for maximum value.
 ## Arbitrage Opportunities
 List any genuine arbitrage opportunities across sportsbooks. For each, specify both \
 legs (side, book, odds), the combined implied probability, and the estimated profit \
-percentage. If none exist, say so clearly.
+percentage. Quote profit percentages exactly as they appear in the data — do not \
+round, adjust, or recalculate them. If none exist, say so clearly.
 
 ## Middle Opportunities
 List any middle opportunities where spread or total lines differ across sportsbooks \
@@ -1595,7 +1615,11 @@ carry unusually high vig. Name the sportsbook, game, and explain the concern.
 ## Fair Odds & Expected Value
 Summarize the consensus no-vig fair probabilities for each game. Highlight any \
 sportsbook lines that offer positive expected value (+EV) against the consensus \
-fair odds. Include the EV edge percentage and the relevant fair probability.
+fair odds. Include the EV edge percentage and the relevant fair probability. \
+CRITICAL: Only report +EV opportunities that are explicitly present in the data. \
+Do NOT interpolate, extrapolate, or invent +EV bets. If a specific bet/book/odds \
+combination does not appear in the EV data, do NOT mention it as a +EV opportunity. \
+Quote EV edge percentages exactly as they appear in the data — do not round or adjust.
 
 ## Sportsbook Rankings
 Rank all sportsbooks in the data by average vig percentage. For each, note whether \
@@ -1627,10 +1651,19 @@ missing or empty, fall back to the raw detection data as before.
 
 Guidelines:
 - Be precise with numbers. Always cite specific odds, lines, and books.
-- Only include value bets where a quantifiable edge exists.
+- Only include value bets where a quantifiable edge exists IN THE DATA. \
+  Do NOT invent, interpolate, or extrapolate +EV opportunities that are not \
+  explicitly present in the provided data. If a bet does not appear in the EV data, \
+  it is NOT a +EV bet — do not mention it as one.
+- Quote all percentages (EV edges, arbitrage profit, vig) EXACTLY as they appear \
+  in the data. Do NOT round, adjust, or recalculate any numerical values.
 - Only flag genuine arbitrage — do not fabricate opportunities.
 - If data is insufficient for any section, state that clearly rather than guessing.
 - Write for a professional audience. Be concise but thorough.
+- Include Kelly Criterion sizing (quarter-Kelly % of bankroll) for every recommended bet. \
+  If sizing data is not available, state that explicitly.
+- For any bet at a sportsbook with stale lines (>60 minutes old), include an explicit \
+  staleness warning so the reader knows the odds may have moved.
 """
 
 

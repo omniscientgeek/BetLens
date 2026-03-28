@@ -244,14 +244,25 @@ INSTRUCTIONS:
 1. Read the analysis text carefully and identify ALL factual claims — specific \
 odds values, arbitrage profit percentages, EV percentages, sportsbook rankings, \
 stale line times, middle opportunities, fair odds, and any other verifiable numbers.
-2. For EACH claim, you MUST call the appropriate MCP tool to verify the data. \
+2. PRIORITY ORDER — check these claim types FIRST (most likely to contain errors):
+   a. +EV opportunity claims (edge percentages, which book, which side) — these are \
+      the most common source of fabrication and number drift. ALWAYS verify with \
+      find_expected_value_bets() and get_best_bets_today().
+   b. Arbitrage profit percentages — verify exact profit % with find_arbitrage_opportunities().
+   c. Kelly sizing claims — verify with get_kelly_sizing().
+   d. Then verify all remaining claims (odds, vig, rankings, staleness, etc.).
+3. For EACH claim, you MUST call the appropriate MCP tool to verify the data. \
 Do NOT skip any claim without tool verification.
-3. Compare the tool results against the claims in the text EXACTLY — check specific \
+4. Compare the tool results against the claims in the text EXACTLY — check specific \
 numbers, percentages, sportsbook names, and directions (favorite/underdog).
-4. Use the arithmetic tools to independently recompute ALL derived values (e.g., \
+5. FABRICATION CHECK: For every +EV bet mentioned in the analysis, confirm it exists \
+in the find_expected_value_bets() output. If a +EV opportunity is claimed but does \
+NOT appear in the tool results, flag it as severity "error" with finding "Fabricated \
++EV opportunity — not present in MCP tool results."
+6. Use the arithmetic tools to independently recompute ALL derived values (e.g., \
 call arithmetic_subtract(sum_of_implied_probs, 1.0) then arithmetic_multiply(result, 100) \
 to verify vig). NEVER do this math yourself.
-5. Report any discrepancies, citing the exact MCP tool output as evidence.
+7. Report any discrepancies, citing the exact MCP tool output as evidence.
 
 ACCURACY THRESHOLDS:
 - Odds: off by more than 3 points = error, 1-3 points = warning
@@ -311,12 +322,15 @@ arithmetic_evaluate for ALL numerical work.
 
 VERIFICATION CHECKLIST (use MCP tools for each):
 1. **Bankroll management** — Call get_kelly_sizing() to verify that recommended bet \
-sizes are proportional to actual edges. Flag if the analysis suggests sizing that \
-exceeds Kelly optimal, or if it recommends bets without specifying sizing for edges \
-under 2%.
+sizes are proportional to actual edges. Flag as "error" if the analysis suggests sizing \
+that exceeds Kelly optimal. Flag as "warning" if ANY recommended bet lacks Kelly sizing \
+guidance (quarter-Kelly percentage of bankroll). The analysis MUST include sizing for \
+every bet recommendation.
 2. **Risk assessment** — Call find_expected_value_bets() to check actual EV edges. \
 If cited edges are under 1%, verify that appropriate caution is included. Call \
-detect_stale_lines() to check if any recommended bets rely on stale data.
+detect_stale_lines() to check if any recommended bets rely on stale data. Flag as \
+"warning" if any recommended bet is at a sportsbook with stale lines (>60 minutes) \
+without an explicit staleness caveat in the analysis.
 3. **Diversification** — Call get_odds_comparison() for each recommended game to \
 check if multiple bets on the same game are truly independent or correlated. Flag \
 if opposite sides of the same market are recommended without explaining it as arb.
@@ -460,6 +474,11 @@ async def _run_factual_agent(
                 "Fact-check the following betting analysis by querying MCP tools "
                 "to verify EVERY factual claim made — do NOT skip any. Check every "
                 "verifiable number, odds value, percentage, ranking, and data point.\n\n"
+                "PRIORITY: Start by verifying ALL +EV claims and arbitrage profit "
+                "percentages FIRST — these are the most error-prone. Call "
+                "find_expected_value_bets() and find_arbitrage_opportunities() before "
+                "anything else. Flag any +EV opportunity that does not exist in the "
+                "tool results as a fabrication error.\n\n"
                 "=== AI-GENERATED ANALYSIS TO FACT-CHECK ===\n"
                 f"{text_to_verify}"
             ),
