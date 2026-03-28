@@ -1,11 +1,10 @@
-// API configuration — reads from build-time env vars (REACT_APP_*) with fallbacks
-export const API_BASE =
-  process.env.REACT_APP_API_BASE ||
-  "";
+// API configuration — reads from build-time env vars (REACT_APP_*)
+// Fallback to "/api" (relative) so the request goes through the same origin,
+// which works behind a reverse-proxy in production and with CRA's proxy in dev.
+export const API_BASE = process.env.REACT_APP_API_BASE || "/api";
 
 export const SOCKET_URL =
-  process.env.REACT_APP_SOCKET_URL ||
-  "";
+  process.env.REACT_APP_SOCKET_URL || window.location.origin;
 
 // Retry-enabled fetch: retries on network errors / 5xx with exponential backoff
 export async function fetchWithRetry(url, options = {}, maxRetries = 3) {

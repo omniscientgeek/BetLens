@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { VerificationBadge } from "./BriefPanel";
-
-const API_BASE = "";
+import { API_BASE } from "./api";
 
 // Session persistence helpers
 const SESSION_PREFIX = "betstamp_";

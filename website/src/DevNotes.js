@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from "react";
-
-const API_BASE = "";
+import { API_BASE } from "./api";
 const PROJECT_ID = 10;
 
 function DevNotes() {

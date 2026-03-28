@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from "react";
-
-const API_BASE = "";
+import { API_BASE } from "./api";
 
 const TYPE_LABELS = {
   anthropic: "Anthropic",
