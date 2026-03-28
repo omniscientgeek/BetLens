@@ -1862,7 +1862,7 @@
 
 
 /* ================================================================== */
-/*  Sub-Agent Verification Card (standalone)                            */
+/*  Audit Card (standalone)                                              */
 /* ================================================================== */
 
 .verification-card {
@@ -1903,6 +1903,21 @@
   border-radius: 0;
   margin: 0;
   box-shadow: none;
+}
+
+.verification-card-pending {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-md) var(--space-lg);
+  color: var(--text-secondary);
+  font-size: 0.92rem;
+}
+
+.verification-card-pending .pipeline-step-spinner {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
 }
 
 @media (max-width: 640px) {

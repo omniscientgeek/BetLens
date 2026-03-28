@@ -242,10 +242,7 @@ function AnalyzeConversation({ analyzeResult, streaming, defaultExpanded, title 
             </CollapsibleSection>
           )}
 
-          {/* Audit Analyze — shown after audit agents complete */}
-          {!isStreaming && analyzeResult.verification && (
-            <VerificationBadge verification={analyzeResult.verification} />
-          )}
+          {/* Audit Analyze verification is now rendered as a standalone card in App.js */}
         </div>
       )}
     </div>

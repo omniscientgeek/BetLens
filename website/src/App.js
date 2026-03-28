@@ -713,6 +713,24 @@ function BetLens() {
         />
       )}
 
+      {/* Audit Analyze — show during processing once verification arrives */}
+      {!pipelineComplete && !pipelineError && pipeline && pipeline.phaseIndex >= 2 && (
+        <div className="verification-card">
+          <div className="verification-card-header">
+            <span className="verification-card-icon">🛡</span>
+            <h3>Audit Analyze</h3>
+          </div>
+          {phaseResults.analyze?.verification ? (
+            <VerificationBadge verification={phaseResults.analyze.verification} />
+          ) : (
+            <div className="verification-card-pending">
+              <span className="pipeline-step-spinner" />
+              <span>Auditing analysis…</span>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Show streaming brief text as it arrives during the brief phase */}
       {!pipelineComplete && !pipelineError && streamingBrief && (
         <BriefPanel
@@ -723,6 +741,24 @@ function BetLens() {
           }}
           isInterim={true}
         />
+      )}
+
+      {/* Audit Brief — show during processing once verification arrives */}
+      {!pipelineComplete && !pipelineError && pipeline && pipeline.phaseIndex >= 4 && (
+        <div className="verification-card">
+          <div className="verification-card-header">
+            <span className="verification-card-icon">🛡</span>
+            <h3>Audit Brief</h3>
+          </div>
+          {phaseResults.brief?.verification ? (
+            <VerificationBadge verification={phaseResults.brief.verification} />
+          ) : (
+            <div className="verification-card-pending">
+              <span className="pipeline-step-spinner" />
+              <span>Auditing brief…</span>
+            </div>
+          )}
+        </div>
       )}
 
       {pipelineComplete && (
@@ -752,6 +788,18 @@ function BetLens() {
           {pipelineResults?.analyze && (
             <AnalyzeConversation analyzeResult={pipelineResults.analyze} />
           )}
+
+          {/* Audit Analyze — standalone card */}
+          {pipelineResults?.analyze?.verification && (
+            <div className="verification-card">
+              <div className="verification-card-header">
+                <span className="verification-card-icon">🛡</span>
+                <h3>Audit Analyze</h3>
+              </div>
+              <VerificationBadge verification={pipelineResults.analyze.verification} />
+            </div>
+          )}
+
           {pipelineResults?.brief && !pipelineResults.brief.error && (
             <BriefPanel briefResult={pipelineResults.brief} />
           )}

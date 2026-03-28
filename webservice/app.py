@@ -76,7 +76,9 @@ socket_app = socketio.ASGIApp(sio, other_asgi_app=app)
 PHASES = [
     {"name": "detect", "label": "Detecting patterns"},
     {"name": "analyze", "label": "Analyzing structure"},
+    {"name": "audit_analyze", "label": "Auditing analysis"},
     {"name": "brief", "label": "Generating brief"},
+    {"name": "audit_brief", "label": "Auditing brief"},
 ]
 
 
@@ -161,7 +163,7 @@ async def _emit_phase(state, filename, phase, i, status, result=None, run_id=Non
 
 
 async def run_processing_pipeline(filename: str, state: PipelineState):
-    """Execute the 3-phase pipeline, emitting status updates via WebSocket.
+    """Execute the 5-phase pipeline, emitting status updates via WebSocket.
 
     The pipeline runs to completion even if the client disconnects mid-way.
     Completed phase results are cached in *state* so a reconnecting client
@@ -248,42 +250,6 @@ async def run_processing_pipeline(filename: str, state: PipelineState):
                     logger.info("PIPELINE Phase %d: %s completed in %.2fs", i, phase["name"], elapsed)
                     await _emit_phase(state, filename, phase, i, "complete", result=analysis, run_id=run_id)
 
-                    # --- Verification: run 3 agents in parallel to double-check the analysis ---
-                    analyze_text = (analysis.get("conversation") or {}).get("assistant_response", "")
-                    if analyze_text:
-                        try:
-                            run_logger.info("Starting verification agents for analysis...")
-                            source_data = json.dumps(
-                                pipeline_results.get("detect", {}),
-                                separators=(",", ":"),
-                                default=str,
-                            )
-
-                            verification = await run_verification(
-                                text_to_verify=analyze_text,
-                                source_data=source_data,
-                                run_logger=run_logger,
-                            )
-                            analysis["verification"] = verification
-                            pipeline_results["analyze"] = analysis
-
-                            verification_payload = {
-                                "filename": filename,
-                                "phase": "analyze",
-                                "verification": verification,
-                                "run_id": run_id,
-                            }
-                            state.replay_events.append({"type": "verification_update", "payload": verification_payload})
-                            await _safe_emit(state, "verification_update", verification_payload)
-                            run_logger.info(
-                                "Analysis verification complete: overall=%s elapsed=%.2fs",
-                                verification["overall_verdict"],
-                                verification["elapsed_seconds"],
-                            )
-                        except Exception as vex:
-                            run_logger.error("Analysis verification FAILED (non-blocking): %s", vex)
-                            logger.error("PIPELINE Analysis verification FAILED: %s", vex)
-
                 except Exception as exc:
                     # Graceful degradation: report the error but continue pipeline
                     run_logger.error("Analyze phase FAILED: %s", exc)
@@ -291,6 +257,50 @@ async def run_processing_pipeline(filename: str, state: PipelineState):
                     err_result = {"error": str(exc), "ai_meta": None}
                     pipeline_results["analyze"] = err_result
                     await _emit_phase(state, filename, phase, i, "error", result=err_result, run_id=run_id)
+
+            elif phase["name"] == "audit_analyze":
+                # --- Audit: run 3 verification agents to double-check the analysis ---
+                analysis = pipeline_results.get("analyze", {})
+                analyze_text = (analysis.get("conversation") or {}).get("assistant_response", "")
+                if analyze_text and not analysis.get("error"):
+                    try:
+                        run_logger.info("Starting audit agents for analysis...")
+                        source_data = json.dumps(
+                            pipeline_results.get("detect", {}),
+                            separators=(",", ":"),
+                            default=str,
+                        )
+
+                        verification = await run_verification(
+                            text_to_verify=analyze_text,
+                            source_data=source_data,
+                            run_logger=run_logger,
+                        )
+                        analysis["verification"] = verification
+                        pipeline_results["analyze"] = analysis
+
+                        verification_payload = {
+                            "filename": filename,
+                            "phase": "analyze",
+                            "verification": verification,
+                            "run_id": run_id,
+                        }
+                        state.replay_events.append({"type": "verification_update", "payload": verification_payload})
+                        await _safe_emit(state, "verification_update", verification_payload)
+                        run_logger.info(
+                            "Analysis audit complete: overall=%s elapsed=%.2fs",
+                            verification["overall_verdict"],
+                            verification["elapsed_seconds"],
+                        )
+                        await _emit_phase(state, filename, phase, i, "complete", run_id=run_id)
+                    except Exception as vex:
+                        run_logger.error("Analysis audit FAILED (non-blocking): %s", vex)
+                        logger.error("PIPELINE Analysis audit FAILED: %s", vex)
+                        await _emit_phase(state, filename, phase, i, "error", run_id=run_id)
+                else:
+                    # No analysis text to audit — skip
+                    run_logger.info("Skipping audit_analyze — no analysis text available")
+                    await _emit_phase(state, filename, phase, i, "complete", run_id=run_id)
 
             elif phase["name"] == "brief":
                 # --- AI-powered actionable briefing (streamed to client) ---
@@ -336,9 +346,19 @@ async def run_processing_pipeline(filename: str, state: PipelineState):
                     logger.info("PIPELINE Phase %d: %s completed in %.2fs", i, phase["name"], elapsed)
                     await _emit_phase(state, filename, phase, i, "complete", result=brief, run_id=run_id)
 
-                    # --- Verification: run 3 agents in parallel to double-check the brief ---
+                except Exception as exc:
+                    run_logger.error("Brief phase FAILED: %s", exc)
+                    logger.error("PIPELINE Brief phase FAILED: %s", exc)
+                    err_result = {"error": str(exc), "ai_meta": None}
+                    pipeline_results["brief"] = err_result
+                    await _emit_phase(state, filename, phase, i, "error", result=err_result, run_id=run_id)
+
+            elif phase["name"] == "audit_brief":
+                # --- Audit: run 3 verification agents to double-check the brief ---
+                brief = pipeline_results.get("brief", {})
+                if brief.get("brief_text") and not brief.get("error"):
                     try:
-                        run_logger.info("Starting verification agents for brief...")
+                        run_logger.info("Starting audit agents for brief...")
                         source_data = json.dumps(
                             _build_brief_payload(
                                 pipeline_results.get("detect", {}),
@@ -364,19 +384,19 @@ async def run_processing_pipeline(filename: str, state: PipelineState):
                         state.replay_events.append({"type": "verification_update", "payload": verification_payload})
                         await _safe_emit(state, "verification_update", verification_payload)
                         run_logger.info(
-                            "Verification complete: overall=%s elapsed=%.2fs",
+                            "Brief audit complete: overall=%s elapsed=%.2fs",
                             verification["overall_verdict"],
                             verification["elapsed_seconds"],
                         )
+                        await _emit_phase(state, filename, phase, i, "complete", run_id=run_id)
                     except Exception as vex:
-                        run_logger.error("Verification FAILED (non-blocking): %s", vex)
-                        logger.error("PIPELINE Verification FAILED: %s", vex)
-                except Exception as exc:
-                    run_logger.error("Brief phase FAILED: %s", exc)
-                    logger.error("PIPELINE Brief phase FAILED: %s", exc)
-                    err_result = {"error": str(exc), "ai_meta": None}
-                    pipeline_results["brief"] = err_result
-                    await _emit_phase(state, filename, phase, i, "error", result=err_result, run_id=run_id)
+                        run_logger.error("Brief audit FAILED (non-blocking): %s", vex)
+                        logger.error("PIPELINE Brief audit FAILED: %s", vex)
+                        await _emit_phase(state, filename, phase, i, "error", run_id=run_id)
+                else:
+                    # No brief text to audit — skip
+                    run_logger.info("Skipping audit_brief — no brief text available")
+                    await _emit_phase(state, filename, phase, i, "complete", run_id=run_id)
 
             else:
                 # Unknown phase — placeholder
