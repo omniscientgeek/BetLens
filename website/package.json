@@ -26,6 +26,7 @@
       "react-app/jest"
     ]
   },
+  "proxy": "https://bet-stamp-betstamp-api-api.proxy.omniscientgeek.com",
   "browserslist": {
     "production": [
       ">0.2%",
