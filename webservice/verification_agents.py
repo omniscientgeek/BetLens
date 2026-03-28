@@ -83,7 +83,9 @@ def _parse_agent_response(raw_text: str, agent_name: str) -> dict:
             pass
 
     # Fallback: couldn't parse structured response
-    logger.warning("Could not parse JSON from %s agent response, using fallback", agent_name)
+    logger.warning(
+        "Could not parse JSON from %s agent response, using fallback", agent_name
+    )
     return {
         "verdict": "warn",
         "confidence": 0.5,
@@ -98,6 +100,17 @@ def _parse_agent_response(raw_text: str, agent_name: str) -> dict:
     }
 
 
+def _truncate_tool_results(tool_calls: list, max_result_len: int = 8000) -> list:
+    """Truncate tool call results to keep payload sizes reasonable."""
+    truncated = []
+    for tc in tool_calls:
+        entry = {**tc}
+        if isinstance(entry.get("result"), str) and len(entry["result"]) > max_result_len:
+            entry["result"] = entry["result"][:max_result_len] + "\n... [truncated]"
+        truncated.append(entry)
+    return truncated
+
+
 # ---------------------------------------------------------------------------
 # System prompts for each verification agent
 # ---------------------------------------------------------------------------
@@ -110,8 +123,9 @@ data that was used to produce it.
 Your job is to verify LOGICAL CONSISTENCY by cross-referencing claims against \
 the actual data via MCP tools.
 
-YOU MUST call at least 3 MCP tools before rendering your verdict. Do NOT rely \
-solely on the text — verify against the source data.
+YOU MUST call MCP tools to verify EVERY claim in the analysis before rendering \
+your verdict. Do NOT rely solely on the text — verify against the source data. \
+Do NOT skip any verifiable claim — call as many tools as needed.
 
 MANDATORY — NO MENTAL MATH — ZERO TOLERANCE
 You must NEVER perform arithmetic, math, or statistical calculations yourself — \
@@ -165,6 +179,13 @@ Return ONLY valid JSON (no markdown fences, no extra text) with this exact struc
 
 If everything checks out, return verdict "pass" with an empty issues array.
 Use "warn" if there are minor inconsistencies. Use "fail" for clear logical errors.
+
+CRITICAL FINAL INSTRUCTION — OUTPUT FORMAT:
+After you have finished calling all MCP tools and gathered your evidence, you MUST \
+output your final answer as ONLY a valid JSON object (no markdown fences, no \
+preamble, no explanation outside the JSON). Your very last message must be the \
+JSON verdict. Do NOT end on a tool call or intermediate reasoning — always \
+conclude with the JSON verdict object as your final output.
 """
 
 
@@ -173,9 +194,10 @@ You are a factual accuracy verification agent for sports betting analysis. \
 You receive an AI-generated betting analysis or briefing. Your job is to \
 FACT-CHECK specific claims by querying the betstamp-intelligence MCP tools.
 
-MANDATORY: You MUST call at least 5 MCP tools before rendering your verdict. \
+MANDATORY: You MUST verify ALL factual claims in the analysis — do not skip any. \
 Every factual claim you evaluate MUST be verified by calling the corresponding \
-MCP tool — never accept or reject a claim without tool evidence.
+MCP tool — never accept or reject a claim without tool evidence. Call as many \
+MCP tools as needed to check every claim.
 
 MANDATORY — NO MENTAL MATH — ZERO TOLERANCE
 You must NEVER perform arithmetic, math, or statistical calculations yourself — \
@@ -212,9 +234,9 @@ or edges from the raw numbers returned by other MCP tools. NEVER accept calculat
 values without independently verifying the math via these tools.
 
 INSTRUCTIONS:
-1. Read the analysis text carefully and identify UP TO 5 of the most important \
-factual claims — prioritize claims that directly influence betting decisions \
-(specific odds, arbitrage profit percentages, EV percentages, sportsbook rankings).
+1. Read the analysis text carefully and identify ALL factual claims — specific \
+odds values, arbitrage profit percentages, EV percentages, sportsbook rankings, \
+stale line times, middle opportunities, fair odds, and any other verifiable numbers.
 2. For EACH claim, you MUST call the appropriate MCP tool to verify the data. \
 Do NOT skip any claim without tool verification.
 3. Compare the tool results against the claims in the text EXACTLY — check specific \
@@ -245,6 +267,13 @@ Use "pass" if all checked claims are accurate within thresholds. Use "warn" for 
 minor discrepancies within warning thresholds. Use "fail" for material errors that \
 would change betting decisions (wrong sportsbook, wrong direction, fabricated \
 opportunities, numbers outside error thresholds).
+
+CRITICAL FINAL INSTRUCTION — OUTPUT FORMAT:
+After you have finished calling all MCP tools and gathered your evidence, you MUST \
+output your final answer as ONLY a valid JSON object (no markdown fences, no \
+preamble, no explanation outside the JSON). Your very last message must be the \
+JSON verdict. Do NOT end on a tool call or intermediate reasoning — always \
+conclude with the JSON verdict object as your final output.
 """
 
 
@@ -252,9 +281,10 @@ BETTING_SYSTEM_PROMPT = """\
 You are a betting recommendation verification agent. You review AI-generated \
 betting analysis and recommendations for sound betting principles.
 
-MANDATORY: You MUST call at least 3 MCP tools to verify the betting quality of \
-recommendations against actual data. Do NOT evaluate recommendations in a vacuum — \
-cross-reference them against real edge sizes, Kelly sizing, and market data.
+MANDATORY: You MUST call MCP tools to verify EVERY recommendation and claim in \
+the analysis against actual data. Do NOT evaluate recommendations in a vacuum — \
+cross-reference ALL of them against real edge sizes, Kelly sizing, and market data. \
+Do NOT skip any verifiable recommendation — call as many tools as needed.
 
 MANDATORY — NO MENTAL MATH — ZERO TOLERANCE
 You must NEVER perform arithmetic, math, or statistical calculations yourself — \
@@ -321,6 +351,13 @@ Use "pass" if recommendations follow sound betting principles and are backed by 
 Use "warn" for minor concerns (e.g., missing risk disclaimers, sizing not specified). \
 Use "fail" for dangerous advice (e.g., encouraging chasing losses, no value basis, \
 guaranteed profit claims for non-arb bets, recommending bets on stale lines without caveat).
+
+CRITICAL FINAL INSTRUCTION — OUTPUT FORMAT:
+After you have finished calling all MCP tools and gathered your evidence, you MUST \
+output your final answer as ONLY a valid JSON object (no markdown fences, no \
+preamble, no explanation outside the JSON). Your very last message must be the \
+JSON verdict. Do NOT end on a tool call or intermediate reasoning — always \
+conclude with the JSON verdict object as your final output.
 """
 
 
@@ -341,8 +378,8 @@ async def _run_reasoning_agent(
             "role": "user",
             "content": (
                 "Verify the logical consistency of this betting analysis by "
-                "cross-referencing claims against the actual data via MCP tools. "
-                "You MUST call at least 3 MCP tools before rendering your verdict.\n\n"
+                "cross-referencing ALL claims against the actual data via MCP tools. "
+                "You MUST verify EVERY verifiable claim — call as many MCP tools as needed.\n\n"
                 "=== AI-GENERATED ANALYSIS TO VERIFY ===\n"
                 f"{text_to_verify}"
             ),
@@ -376,6 +413,12 @@ async def _run_reasoning_agent(
             "elapsed_seconds": elapsed,
             "usage": result.get("usage", {}),
         },
+        "conversation": {
+            "system_prompt": REASONING_SYSTEM_PROMPT,
+            "user_prompt": messages[0]["content"],
+            "assistant_response": result["text"],
+            "tool_calls": _truncate_tool_results(result.get("tool_calls", [])),
+        },
     }
 
 
@@ -391,8 +434,8 @@ async def _run_factual_agent(
             "role": "user",
             "content": (
                 "Fact-check the following betting analysis by querying MCP tools "
-                "to verify the specific claims made. Check up to 5 of the most "
-                "important factual claims.\n\n"
+                "to verify EVERY factual claim made — do NOT skip any. Check every "
+                "verifiable number, odds value, percentage, ranking, and data point.\n\n"
                 "=== AI-GENERATED ANALYSIS TO FACT-CHECK ===\n"
                 f"{text_to_verify}"
             ),
@@ -426,6 +469,12 @@ async def _run_factual_agent(
             "elapsed_seconds": elapsed,
             "usage": result.get("usage", {}),
         },
+        "conversation": {
+            "system_prompt": FACTUAL_SYSTEM_PROMPT,
+            "user_prompt": messages[0]["content"],
+            "assistant_response": result["text"],
+            "tool_calls": _truncate_tool_results(result.get("tool_calls", [])),
+        },
     }
 
 
@@ -440,9 +489,9 @@ async def _run_betting_agent(
         {
             "role": "user",
             "content": (
-                "Review the following betting analysis and recommendations for "
-                "sound betting principles. You MUST call at least 3 MCP tools to "
-                "verify recommendations against actual data before rendering your verdict.\n\n"
+                "Review the following betting analysis and ALL recommendations for "
+                "sound betting principles. You MUST verify EVERY recommendation against "
+                "actual data via MCP tools — do NOT skip any.\n\n"
                 "=== AI-GENERATED ANALYSIS TO REVIEW ===\n"
                 f"{text_to_verify}"
             ),
@@ -475,6 +524,12 @@ async def _run_betting_agent(
             "model": result["model"],
             "elapsed_seconds": elapsed,
             "usage": result.get("usage", {}),
+        },
+        "conversation": {
+            "system_prompt": BETTING_SYSTEM_PROMPT,
+            "user_prompt": messages[0]["content"],
+            "assistant_response": result["text"],
+            "tool_calls": _truncate_tool_results(result.get("tool_calls", [])),
         },
     }
 
@@ -552,6 +607,19 @@ async def run_verification(
                 "  [%s] verdict=%s confidence=%.2f issues=%d",
                 name, a["verdict"], a["confidence"], len(a.get("issues", [])),
             )
+            # Log the agent's summary / verdict reasoning
+            summary = a.get("summary", "")
+            if summary:
+                run_logger.info("  [%s] summary: %s", name, summary)
+            # Log each issue found by the agent
+            for issue in a.get("issues", []):
+                run_logger.info(
+                    "  [%s]   • (%s) %s — %s",
+                    name,
+                    issue.get("severity", "?"),
+                    issue.get("claim", ""),
+                    issue.get("finding", ""),
+                )
         run_logger.info("=" * 60)
 
     return {
