@@ -109,6 +109,10 @@ function BetLens() {
   const [pipelineStartTime, setPipelineStartTime] = useState(null);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
 
+  // Save state
+  const [saving, setSaving] = useState(false);
+  const [saveStatus, setSaveStatus] = useState(null); // { ok, message }
+
   // Debug mode
   const [debugMode, setDebugMode] = useState(
     () => localStorage.getItem("betstamp_debug") === "true"
@@ -119,6 +123,59 @@ function BetLens() {
     const next = !debugMode;
     setDebugMode(next);
     localStorage.setItem("betstamp_debug", String(next));
+  };
+
+  // Save pipeline results to server + trigger JSON download
+  const handleSaveResults = async () => {
+    if (!pipelineResults || !selectedFile) return;
+    setSaving(true);
+    setSaveStatus(null);
+
+    try {
+      // 1. Save to server
+      const res = await fetchWithRetry(`${API_BASE}/save-results`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          filename: selectedFile,
+          pipelineResults,
+          fileData: fileData,
+        }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: "Save failed" }));
+        throw new Error(err.error || `HTTP ${res.status}`);
+      }
+
+      const result = await res.json();
+
+      // 2. Also trigger a browser download of the JSON
+      const blob = new Blob(
+        [JSON.stringify({
+          source_file: selectedFile,
+          saved_at: new Date().toISOString(),
+          pipeline_results: pipelineResults,
+        }, null, 2)],
+        { type: "application/json" }
+      );
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = result.filename || `${selectedFile.replace(".json", "")}_results.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      setSaveStatus({ ok: true, message: `Saved as ${result.filename}` });
+    } catch (err) {
+      setSaveStatus({ ok: false, message: err.message });
+    } finally {
+      setSaving(false);
+      // Clear status after a few seconds
+      setTimeout(() => setSaveStatus(null), 5000);
+    }
   };
 
   // Tick the elapsed timer every second while the pipeline is running
@@ -167,6 +224,8 @@ function BetLens() {
     setRunId(null);
     setPipelineStartTime(null);
     setElapsedSeconds(0);
+    setSaving(false);
+    setSaveStatus(null);
 
     if (!filename) {
       sessionRemove("selectedFile");
@@ -490,6 +549,15 @@ function BetLens() {
             </option>
           ))}
         </select>
+        {selectedFile && (pipeline || pipelineComplete || pipelineError) && (
+          <button
+            className="regenerate-btn"
+            onClick={() => handleFileSelect(selectedFile)}
+            title="Re-run the analysis pipeline for this file"
+          >
+            Regenerate
+          </button>
+        )}
         <button
           className={`debug-toggle ${debugMode ? "debug-toggle--on" : ""}`}
           onClick={toggleDebug}
@@ -580,7 +648,22 @@ function BetLens() {
 
       {pipelineComplete && (
         <>
-          <div className="pipeline-done">Processing complete in {formatElapsed(elapsedSeconds)}</div>
+          <div className="pipeline-done">
+            Processing complete in {formatElapsed(elapsedSeconds)}
+            <button
+              className="save-results-btn"
+              onClick={handleSaveResults}
+              disabled={saving || !pipelineResults}
+              title="Save analysis results to server and download as JSON"
+            >
+              {saving ? "Saving..." : "Save Results"}
+            </button>
+            {saveStatus && (
+              <span className={`save-status ${saveStatus.ok ? "save-status--ok" : "save-status--err"}`}>
+                {saveStatus.message}
+              </span>
+            )}
+          </div>
           {pipelineResults?.brief?.error && (
             <div className="error">Brief generation failed: {pipelineResults.brief.error}</div>
           )}

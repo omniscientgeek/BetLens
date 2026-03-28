@@ -81,6 +81,22 @@
   border-color: #e94560;
 }
 
+/* Regenerate Button */
+.regenerate-btn {
+  background: #e94560;
+  color: #fff;
+  border: none;
+  padding: 6px 16px;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 600;
+  transition: background 0.2s;
+}
+.regenerate-btn:hover {
+  background: #c73350;
+}
+
 /* Debug Toggle & Log Link */
 .debug-toggle {
   background: transparent;
@@ -458,6 +474,41 @@
   border-radius: 6px;
   font-weight: 600;
   font-size: 0.95rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.save-results-btn {
+  padding: 6px 16px;
+  background: #155724;
+  color: #fff;
+  border: none;
+  border-radius: 5px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, opacity 0.15s;
+}
+.save-results-btn:hover:not(:disabled) {
+  background: #0d3d17;
+}
+.save-results-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.save-status {
+  font-size: 0.82rem;
+  font-weight: 500;
+}
+.save-status--ok {
+  color: #0d3d17;
+}
+.save-status--err {
+  color: #a94442;
 }
 
 /* ================================================================== */
@@ -2372,6 +2423,24 @@
   margin-top: 6px;
   font-size: 0.7rem;
   color: #888;
+}
+
+/* Sub-agent conversation panels nested inside verification badge */
+.vb-agent .ac-container {
+  margin: 8px 0 4px;
+  font-size: 0.85rem;
+  border-color: #3a3a5a;
+}
+.vb-agent .ac-container .ac-expand-btn {
+  padding: 8px 12px;
+  font-size: 0.8rem;
+}
+.vb-agent .ac-container .ac-body {
+  padding: 8px 12px;
+}
+.vb-agent .ac-container .ac-code-block {
+  max-height: 300px;
+  font-size: 0.75rem;
 }
 
 /* Verification badge inside chat messages */
