@@ -1,6 +1,42 @@
 {
   "commits": [
     {
+      "hash": "8cd7ab64",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 16:08:58 -0600",
+      "subject": "Add download link for combined devnotes MD and rename output to devnotes_combined.MD",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "e534486d",
+      "author": "BetStamp AutoSync",
+      "email": "autosync@betstamp.app",
+      "date": "2026-03-28 16:08:43 -0600",
+      "subject": "Auto-sync git stats",
+      "is_claude": false,
+      "is_autosync": true
+    },
+    {
+      "hash": "25310c6f",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 16:03:54 -0600",
+      "subject": "Update devlog with circular reference fix and performance gains, align README diagrams",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "63774a41",
+      "author": "BetStamp AutoSync",
+      "email": "autosync@betstamp.app",
+      "date": "2026-03-28 16:03:25 -0600",
+      "subject": "Auto-sync combined devnotes MD for project 10",
+      "is_claude": false,
+      "is_autosync": true
+    },
+    {
       "hash": "7b3b43e2",
       "author": "BetStamp AutoSync",
       "email": "autosync@betstamp.app",
@@ -929,13 +965,13 @@
     }
   ],
   "summary": {
-    "total_commits": 103,
-    "claude_commits": 94,
-    "autosync_commits": 7,
+    "total_commits": 107,
+    "claude_commits": 96,
+    "autosync_commits": 9,
     "user_commits": 2,
-    "claude_percentage": 91.3,
-    "autosync_percentage": 6.8,
+    "claude_percentage": 89.7,
+    "autosync_percentage": 8.4,
     "user_percentage": 1.9,
-    "generated_at": "2026-03-28T16:03:24.684559"
+    "generated_at": "2026-03-28T16:09:40.665128"
   }
 }
