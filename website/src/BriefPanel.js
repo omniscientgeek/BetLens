@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
+import AnalyzeConversation from "./AnalyzeConversation";
 
 /* ------------------------------------------------------------------ */
 /*  Section heading icons based on content                             */
@@ -228,6 +229,19 @@ function VerificationBadge({ verification }) {
   const { overall_verdict, agents, elapsed_seconds } = verification;
   const cfg = VERDICT_CONFIG[overall_verdict] || VERDICT_CONFIG.error;
 
+  // Compute overall failure percentage across all agents
+  let overallTotal = 0;
+  let overallFailed = 0;
+  if (agents) {
+    Object.values(agents).forEach((a) => {
+      if (a.checks_total > 0) {
+        overallTotal += a.checks_total;
+        overallFailed += a.checks_failed || 0;
+      }
+    });
+  }
+  const overallFailPct = overallTotal > 0 ? ((overallFailed / overallTotal) * 100).toFixed(0) : null;
+
   return (
     <div className={`vb-container ${cfg.className}`}>
       <button
@@ -237,11 +251,23 @@ function VerificationBadge({ verification }) {
       >
         <span className="vb-icon">{cfg.icon}</span>
         <span className="vb-label">{cfg.label}</span>
+        {overallFailPct !== null && (
+          <span className={`vb-fail-pct ${overallFailed === 0 ? "vb-fail-pct--zero" : "vb-fail-pct--nonzero"}`}>
+            {overallFailed === 0 ? "0% failed" : `${overallFailPct}% failed`}
+          </span>
+        )}
         <span className="vb-agents-mini">
           {agents && Object.entries(agents).map(([name, a]) => {
             const ac = VERDICT_CONFIG[a.verdict] || VERDICT_CONFIG.error;
+            const agentFailPct = a.checks_total > 0
+              ? ((a.checks_failed || 0) / a.checks_total * 100).toFixed(0)
+              : null;
             return (
-              <span key={name} className="vb-agent-dot" title={`${AGENT_LABELS[name]}: ${a.verdict}`}>
+              <span
+                key={name}
+                className="vb-agent-dot"
+                title={`${AGENT_LABELS[name]}: ${a.verdict}${agentFailPct !== null ? ` (${agentFailPct}% failed)` : ""}`}
+              >
                 {ac.icon}
               </span>
             );
@@ -257,12 +283,20 @@ function VerificationBadge({ verification }) {
         <div className="vb-details">
           {Object.entries(agents).map(([name, agent]) => {
             const ac = VERDICT_CONFIG[agent.verdict] || VERDICT_CONFIG.error;
+            const agentTotal = agent.checks_total || 0;
+            const agentFailed = agent.checks_failed || 0;
+            const agentFailPct = agentTotal > 0 ? ((agentFailed / agentTotal) * 100).toFixed(0) : null;
             return (
               <div key={name} className={`vb-agent ${ac.className}`}>
                 <div className="vb-agent-header">
                   <span className="vb-agent-icon">{ac.icon}</span>
                   <span className="vb-agent-name">{AGENT_LABELS[name] || name}</span>
                   <span className="vb-agent-verdict">{agent.verdict.toUpperCase()}</span>
+                  {agentFailPct !== null && (
+                    <span className={`vb-agent-fail-pct ${agentFailed === 0 ? "vb-agent-fail-pct--zero" : "vb-agent-fail-pct--nonzero"}`}>
+                      {agentFailed}/{agentTotal} failed ({agentFailPct}%)
+                    </span>
+                  )}
                   {agent.confidence != null && (
                     <span className="vb-agent-confidence">
                       {(agent.confidence * 100).toFixed(0)}% confidence
@@ -291,6 +325,12 @@ function VerificationBadge({ verification }) {
                   <div className="vb-agent-meta">
                     {agent.ai_meta.provider} &middot; {agent.ai_meta.model} &middot; {agent.ai_meta.elapsed_seconds?.toFixed(1)}s
                   </div>
+                )}
+                {agent.conversation && (
+                  <AnalyzeConversation
+                    analyzeResult={{ conversation: agent.conversation, ai_meta: agent.ai_meta }}
+                    title={`${AGENT_LABELS[name] || name} Agent Conversation`}
+                  />
                 )}
               </div>
             );
