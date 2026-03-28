@@ -84,7 +84,7 @@ PHASES = [
 ]
 
 # Self-healing: max fix+re-audit attempts before accepting a non-pass verdict
-MAX_FIX_ATTEMPTS = 3
+MAX_FIX_ATTEMPTS = 2
 
 
 @dataclasses.dataclass
@@ -433,9 +433,11 @@ async def run_processing_pipeline(filename: str, state: PipelineState):
                                 "text": current_text,
                             })
 
-                            # If pass, or we've hit max retries, stop the loop
-                            if overall == "pass" or fix_attempt >= MAX_FIX_ATTEMPTS:
-                                if overall != "pass" and fix_attempt >= MAX_FIX_ATTEMPTS:
+                            # Only rerun on "fail" — "warn" is accepted without
+                            # burning another fix cycle (cosmetic issues aren't
+                            # worth the latency / potential agent oscillation).
+                            if overall != "fail" or fix_attempt >= MAX_FIX_ATTEMPTS:
+                                if overall == "fail" and fix_attempt >= MAX_FIX_ATTEMPTS:
                                     run_logger.warning(
                                         "Analysis audit still %s after %d fix attempts — accepting result",
                                         overall, fix_attempt,
@@ -680,9 +682,11 @@ async def run_processing_pipeline(filename: str, state: PipelineState):
                                 "text": current_brief_text,
                             })
 
-                            # If pass, or we've hit max retries, stop the loop
-                            if overall == "pass" or fix_attempt >= MAX_FIX_ATTEMPTS:
-                                if overall != "pass" and fix_attempt >= MAX_FIX_ATTEMPTS:
+                            # Only rerun on "fail" — "warn" is accepted without
+                            # burning another fix cycle (cosmetic issues aren't
+                            # worth the latency / potential agent oscillation).
+                            if overall != "fail" or fix_attempt >= MAX_FIX_ATTEMPTS:
+                                if overall == "fail" and fix_attempt >= MAX_FIX_ATTEMPTS:
                                     run_logger.warning(
                                         "Brief audit still %s after %d fix attempts — accepting result",
                                         overall, fix_attempt,

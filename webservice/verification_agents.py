@@ -136,6 +136,15 @@ round in your head, or "quickly" compute anything. Use: arithmetic_add, \
 arithmetic_subtract, arithmetic_multiply, arithmetic_divide, arithmetic_modulo, \
 arithmetic_evaluate for ALL numerical work.
 
+NOTE ON FAIR ODDS SOURCES:
+- get_fair_odds(game_id) returns CONSENSUS-based fair odds (averaged across all books \
+after vig removal). This is the canonical "fair odds" baseline used throughout the system.
+- get_odds_comparison(game_id) includes Pinnacle-specific sharp_fair_prob fields, which \
+may differ slightly from consensus. When the analysis cites "fair odds" or "fair \
+probabilities", verify against get_fair_odds() (consensus), NOT Pinnacle-specific fields.
+- Do NOT flag a discrepancy between consensus fair odds and Pinnacle fair odds as an error \
+— they are different methodologies and both are valid depending on context.
+
 VERIFICATION CHECKLIST (use MCP tools for each):
 1. **Mathematical consistency** — Call get_fair_odds() or get_vig_analysis() to verify \
 that stated vig percentages, implied probabilities, and fair odds are internally consistent \
@@ -240,6 +249,14 @@ You MUST use these to recompute any claimed percentages, profit margins, payouts
 or edges from the raw numbers returned by other MCP tools. NEVER accept calculated \
 values without independently verifying the math via these tools.
 
+NOTE ON FAIR ODDS SOURCES:
+- get_fair_odds(game_id) returns CONSENSUS-based fair odds (averaged across all books \
+after vig removal). This is the canonical "fair odds" baseline.
+- get_odds_comparison(game_id) includes Pinnacle-specific sharp_fair_prob fields, which \
+differ from consensus. When checking "fair odds" claims, use get_fair_odds() (consensus) \
+as the reference, NOT Pinnacle sharp fields — unless the text explicitly says "Pinnacle \
+fair odds".
+
 INSTRUCTIONS:
 1. Read the analysis text carefully and identify ALL factual claims — specific \
 odds values, arbitrage profit percentages, EV percentages, sportsbook rankings, \
@@ -328,9 +345,11 @@ guidance (quarter-Kelly percentage of bankroll). The analysis MUST include sizin
 every bet recommendation.
 2. **Risk assessment** — Call find_expected_value_bets() to check actual EV edges. \
 If cited edges are under 1%, verify that appropriate caution is included. Call \
-detect_stale_lines() to check if any recommended bets rely on stale data. Flag as \
-"warning" if any recommended bet is at a sportsbook with stale lines (>60 minutes) \
-without an explicit staleness caveat in the analysis.
+detect_stale_lines() to check if any recommended bets rely on stale data. ONLY flag \
+staleness if the line is >60 minutes stale AND the analysis includes NO staleness caveat \
+at all. If the analysis mentions staleness or includes any caveat (even brief), that is \
+sufficient — do NOT flag for "weak" or "insufficient" caveat language. Lines under 60 \
+minutes stale should NOT be flagged for staleness.
 3. **Diversification** — Call get_odds_comparison() for each recommended game to \
 check if multiple bets on the same game are truly independent or correlated. Flag \
 if opposite sides of the same market are recommended without explaining it as arb.
