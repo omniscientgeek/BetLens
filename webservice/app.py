@@ -6,6 +6,7 @@ import time
 import asyncio
 import logging
 import subprocess
+import dataclasses
 from datetime import datetime
 
 from logging_config import setup_logging, create_run_logger, close_run_logger, RUNS_LOG_DIR
@@ -17,6 +18,7 @@ from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import StreamingResponse
 import socketio
 
 from detect import run_detection
@@ -27,6 +29,7 @@ from ai_service import (
     run_analyze_phase,
     run_brief_phase,
     call_ai_chat,
+    call_ai_chat_stream,
     CHAT_SYSTEM_PROMPT,
     _build_brief_payload,
 )
@@ -62,8 +65,8 @@ app.add_middleware(
 sio = socketio.AsyncServer(
     async_mode="asgi",
     cors_allowed_origins="*",
-    ping_timeout=300,
-    ping_interval=60,
+    ping_timeout=600,
+    ping_interval=30,
 )
 socket_app = socketio.ASGIApp(sio, other_asgi_app=app)
 
@@ -77,8 +80,68 @@ PHASES = [
 ]
 
 
-async def _emit_phase(sid, filename, phase, i, status, result=None, run_id=None):
-    """Helper to emit a phase_update event."""
+@dataclasses.dataclass
+class PipelineState:
+    """Tracks a pipeline's lifecycle independently of any WebSocket session.
+
+    Keyed by filename in ``_pipeline_cache``.  The ``attached_sid`` field
+    points to the *currently connected* socket — when a client disconnects
+    it becomes ``None``, but the pipeline keeps running.  A reconnecting
+    client re-attaches by setting ``attached_sid`` to its new sid.
+    """
+    run_id: str
+    filename: str
+    current_phase: int        # index into PHASES; len(PHASES) = done
+    status: str               # "running" | "complete" | "error"
+    results: dict             # {"detect": {…}, "analyze": {…}, "brief": {…}}
+    replay_events: list       # completion-level events for instant replay on reconnect
+    task: asyncio.Task | None
+    attached_sid: str | None  # currently connected socket (None = disconnected)
+    created_at: float
+    error: str | None = None
+
+
+# Pipeline cache — keyed by filename so reconnecting clients resume the same run
+_pipeline_cache: dict[str, PipelineState] = {}
+PIPELINE_CACHE_TTL = 1800  # 30 minutes
+
+
+def _is_cache_expired(state: PipelineState) -> bool:
+    return time.time() - state.created_at > PIPELINE_CACHE_TTL
+
+
+async def _replay_completed_phases(sid: str, state: PipelineState):
+    """Send completion-level events for all already-finished phases to *sid*.
+
+    This gives a reconnecting client instant catch-up without replaying
+    hundreds of streaming chunks.
+    """
+    for event in state.replay_events:
+        await sio.emit(event["type"], event["payload"], to=sid)
+
+
+async def _replay_completed_pipeline(sid: str, state: PipelineState):
+    """Pipeline already done — replay every phase result + processing_complete."""
+    await _replay_completed_phases(sid, state)
+    await sio.emit("processing_complete", {
+        "filename": state.filename,
+        "results": state.results,
+        "run_id": state.run_id,
+    }, to=sid)
+
+
+async def _safe_emit(state: PipelineState, event: str, payload: dict):
+    """Emit to the attached client if one exists; silently skip otherwise."""
+    sid = state.attached_sid
+    if sid:
+        try:
+            await sio.emit(event, payload, to=sid)
+        except Exception:
+            pass  # Client may have just disconnected — non-fatal
+
+
+async def _emit_phase(state, filename, phase, i, status, result=None, run_id=None):
+    """Helper to emit a phase_update event and record completions for replay."""
     payload = {
         "filename": filename,
         "phase": phase["name"],
@@ -91,23 +154,37 @@ async def _emit_phase(sid, filename, phase, i, status, result=None, run_id=None)
         payload["result"] = result
     if run_id is not None:
         payload["run_id"] = run_id
-    await sio.emit("phase_update", payload, to=sid)
+    # Record completion events so reconnecting clients get instant catch-up
+    if status in ("complete", "error"):
+        state.replay_events.append({"type": "phase_update", "payload": payload})
+    await _safe_emit(state, "phase_update", payload)
 
 
-async def run_processing_pipeline(filename, sid):
-    """Execute the 3-phase pipeline, emitting status updates via WebSocket."""
-    run_id = uuid.uuid4().hex[:8]
+async def run_processing_pipeline(filename: str, state: PipelineState):
+    """Execute the 3-phase pipeline, emitting status updates via WebSocket.
+
+    The pipeline runs to completion even if the client disconnects mid-way.
+    Completed phase results are cached in *state* so a reconnecting client
+    can resume instantly instead of re-running expensive AI calls.
+    """
+    run_id = state.run_id
     run_logger, run_handler = create_run_logger(run_id)
-    run_logger.info("PIPELINE run_id=%s file=%s sid=%s", run_id, filename, sid)
-    logger.info("PIPELINE Starting pipeline for %s (sid=%s, run_id=%s)", filename, sid, run_id)
+    run_logger.info("PIPELINE run_id=%s file=%s sid=%s", run_id, filename, state.attached_sid)
+    logger.info("PIPELINE Starting pipeline for %s (run_id=%s)", filename, run_id)
     try:
-        pipeline_results = {}
+        pipeline_results = state.results  # may already have completed phases on resume
 
         for i, phase in enumerate(PHASES):
+            # Skip phases that already completed (e.g. after a restart/resume)
+            if phase["name"] in pipeline_results:
+                run_logger.info("Phase %d: %s -> already cached, skipping", i, phase["name"])
+                continue
+
+            state.current_phase = i
             run_logger.info("Phase %d: %s -> in_progress", i, phase["name"])
             logger.info("PIPELINE Phase %d: %s -> in_progress", i, phase["name"])
             phase_start = time.time()
-            await _emit_phase(sid, filename, phase, i, "in_progress", run_id=run_id)
+            await _emit_phase(state, filename, phase, i, "in_progress", run_id=run_id)
 
             if phase["name"] == "detect":
                 # --- Real detection: compute probabilities, vig, fair odds ---
@@ -116,54 +193,148 @@ async def run_processing_pipeline(filename, sid):
                 elapsed = time.time() - phase_start
                 run_logger.info("Phase %d: %s completed in %.2fs", i, phase["name"], elapsed)
                 logger.info("PIPELINE Phase %d: %s completed in %.2fs", i, phase["name"], elapsed)
-                await _emit_phase(sid, filename, phase, i, "complete", result=detection, run_id=run_id)
+                await _emit_phase(state, filename, phase, i, "complete", result=detection, run_id=run_id)
             elif phase["name"] == "analyze":
                 # --- AI-powered cross-sportsbook analysis (streamed) ---
                 try:
+                    # Heartbeat task keeps the WebSocket alive during long AI calls
+                    heartbeat_active = True
+
+                    async def _heartbeat():
+                        while heartbeat_active:
+                            await asyncio.sleep(10)
+                            if heartbeat_active:
+                                try:
+                                    elapsed = int(time.time() - phase_start)
+                                    await _safe_emit(state, "heartbeat", {
+                                        "phase": "analyze",
+                                        "elapsed": elapsed,
+                                        "run_id": run_id,
+                                    })
+                                except Exception:
+                                    pass
+
+                    heartbeat_task = asyncio.create_task(_heartbeat())
+
                     async def on_analyze_conversation(event_type, data):
                         """Emit analyze conversation events to the frontend in real-time."""
-                        await sio.emit("analyze_conversation", {
+                        payload = {
                             "event": event_type,
                             "data": data,
                             "filename": filename,
                             "run_id": run_id,
-                        }, to=sid)
+                        }
+                        # Save the "complete" event for replay on reconnect
+                        if event_type == "complete":
+                            state.replay_events.append({"type": "analyze_conversation", "payload": payload})
+                        await _safe_emit(state, "analyze_conversation", payload)
 
-                    analysis = await run_analyze_phase(
-                        pipeline_results.get("detect", {}),
-                        run_logger=run_logger,
-                        on_conversation_event=on_analyze_conversation,
-                    )
+                    try:
+                        analysis = await asyncio.wait_for(
+                            run_analyze_phase(
+                                pipeline_results.get("detect", {}),
+                                run_logger=run_logger,
+                                on_conversation_event=on_analyze_conversation,
+                                filename=filename,
+                            ),
+                            timeout=600,  # 10-minute hard ceiling
+                        )
+                    finally:
+                        heartbeat_active = False
+                        heartbeat_task.cancel()
                     pipeline_results["analyze"] = analysis
                     elapsed = time.time() - phase_start
                     run_logger.info("Phase %d: %s completed in %.2fs", i, phase["name"], elapsed)
                     logger.info("PIPELINE Phase %d: %s completed in %.2fs", i, phase["name"], elapsed)
-                    await _emit_phase(sid, filename, phase, i, "complete", result=analysis, run_id=run_id)
+                    await _emit_phase(state, filename, phase, i, "complete", result=analysis, run_id=run_id)
+
+                    # --- Verification: run 3 agents in parallel to double-check the analysis ---
+                    analyze_text = (analysis.get("conversation") or {}).get("assistant_response", "")
+                    if analyze_text:
+                        try:
+                            run_logger.info("Starting verification agents for analysis...")
+                            source_data = json.dumps(
+                                pipeline_results.get("detect", {}),
+                                separators=(",", ":"),
+                                default=str,
+                            )
+
+                            verification = await run_verification(
+                                text_to_verify=analyze_text,
+                                source_data=source_data,
+                                run_logger=run_logger,
+                            )
+                            analysis["verification"] = verification
+                            pipeline_results["analyze"] = analysis
+
+                            verification_payload = {
+                                "filename": filename,
+                                "phase": "analyze",
+                                "verification": verification,
+                                "run_id": run_id,
+                            }
+                            state.replay_events.append({"type": "verification_update", "payload": verification_payload})
+                            await _safe_emit(state, "verification_update", verification_payload)
+                            run_logger.info(
+                                "Analysis verification complete: overall=%s elapsed=%.2fs",
+                                verification["overall_verdict"],
+                                verification["elapsed_seconds"],
+                            )
+                        except Exception as vex:
+                            run_logger.error("Analysis verification FAILED (non-blocking): %s", vex)
+                            logger.error("PIPELINE Analysis verification FAILED: %s", vex)
+
                 except Exception as exc:
                     # Graceful degradation: report the error but continue pipeline
                     run_logger.error("Analyze phase FAILED: %s", exc)
                     logger.error("PIPELINE Analyze phase FAILED: %s", exc)
                     err_result = {"error": str(exc), "ai_meta": None}
                     pipeline_results["analyze"] = err_result
-                    await _emit_phase(sid, filename, phase, i, "error", result=err_result, run_id=run_id)
+                    await _emit_phase(state, filename, phase, i, "error", result=err_result, run_id=run_id)
 
             elif phase["name"] == "brief":
                 # --- AI-powered actionable briefing (streamed to client) ---
                 try:
-                    async def on_brief_chunk(text_delta):
-                        await sio.emit("brief_chunk", {"text": text_delta}, to=sid)
+                    # Heartbeat for the brief phase too
+                    brief_heartbeat_active = True
 
-                    brief = await run_brief_phase(
-                        pipeline_results.get("detect", {}),
-                        pipeline_results.get("analyze", {}),
-                        on_chunk=on_brief_chunk,
-                        run_logger=run_logger,
-                    )
+                    async def _brief_heartbeat():
+                        while brief_heartbeat_active:
+                            await asyncio.sleep(10)
+                            if brief_heartbeat_active:
+                                try:
+                                    elapsed = int(time.time() - phase_start)
+                                    await _safe_emit(state, "heartbeat", {
+                                        "phase": "brief",
+                                        "elapsed": elapsed,
+                                        "run_id": run_id,
+                                    })
+                                except Exception:
+                                    pass
+
+                    brief_heartbeat_task = asyncio.create_task(_brief_heartbeat())
+
+                    async def on_brief_chunk(text_delta):
+                        await _safe_emit(state, "brief_chunk", {"text": text_delta})
+
+                    try:
+                        brief = await asyncio.wait_for(
+                            run_brief_phase(
+                                pipeline_results.get("detect", {}),
+                                pipeline_results.get("analyze", {}),
+                                on_chunk=on_brief_chunk,
+                                run_logger=run_logger,
+                            ),
+                            timeout=600,  # 10-minute hard ceiling
+                        )
+                    finally:
+                        brief_heartbeat_active = False
+                        brief_heartbeat_task.cancel()
                     pipeline_results["brief"] = brief
                     elapsed = time.time() - phase_start
                     run_logger.info("Phase %d: %s completed in %.2fs", i, phase["name"], elapsed)
                     logger.info("PIPELINE Phase %d: %s completed in %.2fs", i, phase["name"], elapsed)
-                    await _emit_phase(sid, filename, phase, i, "complete", result=brief, run_id=run_id)
+                    await _emit_phase(state, filename, phase, i, "complete", result=brief, run_id=run_id)
 
                     # --- Verification: run 3 agents in parallel to double-check the brief ---
                     try:
@@ -184,11 +355,14 @@ async def run_processing_pipeline(filename, sid):
                         brief["verification"] = verification
                         pipeline_results["brief"] = brief
 
-                        await sio.emit("verification_update", {
+                        verification_payload = {
                             "filename": filename,
+                            "phase": "brief",
                             "verification": verification,
                             "run_id": run_id,
-                        }, to=sid)
+                        }
+                        state.replay_events.append({"type": "verification_update", "payload": verification_payload})
+                        await _safe_emit(state, "verification_update", verification_payload)
                         run_logger.info(
                             "Verification complete: overall=%s elapsed=%.2fs",
                             verification["overall_verdict"],
@@ -202,29 +376,64 @@ async def run_processing_pipeline(filename, sid):
                     logger.error("PIPELINE Brief phase FAILED: %s", exc)
                     err_result = {"error": str(exc), "ai_meta": None}
                     pipeline_results["brief"] = err_result
-                    await _emit_phase(sid, filename, phase, i, "error", result=err_result, run_id=run_id)
+                    await _emit_phase(state, filename, phase, i, "error", result=err_result, run_id=run_id)
 
             else:
                 # Unknown phase — placeholder
                 await asyncio.sleep(2)
-                await _emit_phase(sid, filename, phase, i, "complete", run_id=run_id)
+                await _emit_phase(state, filename, phase, i, "complete", run_id=run_id)
 
+        state.status = "complete"
+        state.current_phase = len(PHASES)
         run_logger.info("PIPELINE complete for %s", filename)
-        await sio.emit("processing_complete", {
+        await _safe_emit(state, "processing_complete", {
             "filename": filename,
             "results": pipeline_results,
             "run_id": run_id,
-        }, to=sid)
+        })
+    except asyncio.CancelledError:
+        state.status = "error"
+        state.error = "Pipeline cancelled"
+        run_logger.info("PIPELINE cancelled for %s", filename)
     except Exception as e:
+        state.status = "error"
+        state.error = str(e)
         run_logger.error("PIPELINE error: %s", e)
-        await sio.emit("processing_error", {
+        await _safe_emit(state, "processing_error", {
             "filename": filename,
             "error": str(e),
             "run_id": run_id,
-        }, to=sid)
+        })
     finally:
         close_run_logger(run_logger, run_handler)
 
+
+# ---------------------------------------------------------------------------
+# Pipeline cache cleanup — evict expired entries every 60s
+# ---------------------------------------------------------------------------
+
+async def _cache_cleanup_loop():
+    """Periodically remove expired pipeline cache entries."""
+    while True:
+        await asyncio.sleep(60)
+        now = time.time()
+        expired = [k for k, v in _pipeline_cache.items() if now - v.created_at > PIPELINE_CACHE_TTL]
+        for k in expired:
+            state = _pipeline_cache.pop(k, None)
+            if state:
+                logger.info("PIPELINE Cache expired for %s (run_id=%s)", k, state.run_id)
+                if state.task and not state.task.done():
+                    state.task.cancel()
+
+
+@app.on_event("startup")
+async def startup_cache_cleanup():
+    asyncio.create_task(_cache_cleanup_loop())
+
+
+# ---------------------------------------------------------------------------
+# WebSocket handlers — connect / disconnect / start_processing
+# ---------------------------------------------------------------------------
 
 @sio.on("connect")
 async def handle_connect(sid, environ):
@@ -234,16 +443,73 @@ async def handle_connect(sid, environ):
 @sio.on("disconnect")
 async def handle_disconnect(sid):
     logger.info("SOCKET Client disconnected: %s", sid)
+    # Detach sid from any pipeline but let the pipeline continue running.
+    # Completed results are cached so the client can resume on reconnect.
+    for fname, state in _pipeline_cache.items():
+        if state.attached_sid == sid:
+            state.attached_sid = None
+            logger.info(
+                "PIPELINE Detached sid=%s from pipeline file=%s (continues running, run_id=%s)",
+                sid, fname, state.run_id,
+            )
 
 
 @sio.on("start_processing")
 async def handle_start_processing(sid, data):
     logger.info("PIPELINE start_processing received from %s: %s", sid, data)
     filename = data.get("filename", "")
+    resume = data.get("resume", False)
+
     if not filename.endswith(".json"):
         await sio.emit("processing_error", {"filename": filename, "error": "Only .json files supported"}, to=sid)
         return
-    asyncio.create_task(run_processing_pipeline(filename, sid))
+
+    existing = _pipeline_cache.get(filename)
+
+    # --- Resume path: reattach to a running or completed pipeline ---
+    if resume and existing and not _is_cache_expired(existing):
+        existing.attached_sid = sid
+        logger.info(
+            "PIPELINE Resuming pipeline for %s (run_id=%s, status=%s, phase=%d)",
+            filename, existing.run_id, existing.status, existing.current_phase,
+        )
+
+        if existing.status == "complete":
+            # Pipeline finished while client was away — instant replay
+            await _replay_completed_pipeline(sid, existing)
+        elif existing.status == "error":
+            # Pipeline failed — send the error
+            await _replay_completed_phases(sid, existing)
+            await sio.emit("processing_error", {
+                "filename": filename,
+                "error": existing.error or "Pipeline failed",
+                "run_id": existing.run_id,
+            }, to=sid)
+        else:
+            # Pipeline still running — replay completed phases, then live-stream picks up
+            await _replay_completed_phases(sid, existing)
+            # The running pipeline now emits to this sid via state.attached_sid
+        return
+
+    # --- Fresh start: cancel any stale pipeline for this file, create new one ---
+    if existing and existing.task and not existing.task.done():
+        logger.info("PIPELINE Cancelling previous pipeline for file=%s (fresh start)", filename)
+        existing.task.cancel()
+
+    state = PipelineState(
+        run_id=uuid.uuid4().hex[:8],
+        filename=filename,
+        current_phase=0,
+        status="running",
+        results={},
+        replay_events=[],
+        task=None,
+        attached_sid=sid,
+        created_at=time.time(),
+    )
+    task = asyncio.create_task(run_processing_pipeline(filename, state))
+    state.task = task
+    _pipeline_cache[filename] = state
 
 
 DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data"))
@@ -841,6 +1107,181 @@ async def chat(request: Request):
         return JSONResponse({"error": str(e), "run_id": run_id}, status_code=500)
     finally:
         close_run_logger(run_logger, run_handler)
+
+
+# ---------------------------------------------------------------------------
+# Streaming Chat Endpoint (SSE)
+# ---------------------------------------------------------------------------
+
+@app.post("/api/chat/stream")
+async def chat_stream(request: Request):
+    """Send a message to the AI chat and stream the response via SSE.
+
+    SSE events emitted:
+      - event: chunk      data: {"text": "..."}
+      - event: metadata   data: {"conversation_id", "run_id", "ai_meta"}
+      - event: verification data: {"verification": {...}}
+      - event: done       data: {}
+      - event: error      data: {"error": "..."}
+    """
+    data = await request.json()
+    message = (data.get("message") or "").strip()
+    if not message:
+        return JSONResponse({"error": "message is required"}, status_code=400)
+
+    session_id = _get_session_id(request)
+    conversation_id = data.get("conversation_id") or uuid.uuid4().hex[:12]
+    key = _make_key(session_id, conversation_id)
+    pipeline_context = data.get("pipeline_context")
+
+    # Get or create session
+    if key in _chat_sessions:
+        session = _chat_sessions[key]
+    else:
+        session = {
+            "messages": [],
+            "pipeline_context": None,
+            "created": datetime.now().isoformat(),
+        }
+        _chat_sessions[key] = session
+
+    if pipeline_context:
+        session["pipeline_context"] = pipeline_context
+
+    # Build system prompt
+    system_prompt = CHAT_SYSTEM_PROMPT
+    if session.get("pipeline_context"):
+        context_str = json.dumps(session["pipeline_context"], separators=(",", ":"))
+        if len(context_str) > 61440:
+            context_str = context_str[:61440] + "\n... (truncated)"
+        system_prompt += "\n\n=== PIPELINE CONTEXT ===\n" + context_str
+
+    session["messages"].append({"role": "user", "content": message})
+
+    run_id = uuid.uuid4().hex[:8]
+    run_logger, run_handler = create_run_logger(run_id)
+    run_logger.info("CHAT STREAM run_id=%s conversation=%s message_count=%d", run_id, conversation_id, len(session["messages"]))
+    run_logger.info("USER: %s", message[:500])
+
+    async def _sse_generator():
+        full_text = ""
+
+        def _sse_event(event: str, data: dict) -> str:
+            return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+        try:
+            async def on_chunk(text_delta):
+                nonlocal full_text
+                full_text += text_delta
+
+            # We need to yield chunks as they arrive.  Use an asyncio.Queue
+            # so the on_chunk callback can push text deltas that the generator
+            # yields immediately.
+            chunk_queue = asyncio.Queue()
+            SENTINEL = object()
+
+            async def _on_chunk_queued(text_delta):
+                nonlocal full_text
+                full_text += text_delta
+                await chunk_queue.put(text_delta)
+
+            async def _run_ai():
+                try:
+                    result = await call_ai_chat_stream(
+                        messages=session["messages"],
+                        system_prompt=system_prompt,
+                        on_chunk=_on_chunk_queued,
+                        run_logger=run_logger,
+                    )
+                    await chunk_queue.put(SENTINEL)
+                    return result
+                except Exception as exc:
+                    await chunk_queue.put(exc)
+                    return None
+
+            ai_task = asyncio.create_task(_run_ai())
+
+            # Yield chunks as they arrive
+            while True:
+                item = await chunk_queue.get()
+                if item is SENTINEL:
+                    break
+                if isinstance(item, Exception):
+                    yield _sse_event("error", {"error": str(item)})
+                    session["messages"].pop()  # remove failed user message
+                    return
+                yield _sse_event("chunk", {"text": item})
+
+            result = await ai_task
+            if result is None:
+                yield _sse_event("error", {"error": "AI call failed"})
+                session["messages"].pop()
+                return
+
+            # Append assistant response to session
+            session["messages"].append({"role": "assistant", "content": full_text})
+            run_logger.info("ASSISTANT (streamed): %s", full_text[:500])
+            run_logger.info("CHAT STREAM complete: provider=%s model=%s elapsed=%.2fs",
+                            result.get("provider_name"), result.get("model"), result.get("elapsed_seconds", 0))
+
+            # Send metadata
+            yield _sse_event("metadata", {
+                "conversation_id": conversation_id,
+                "run_id": run_id,
+                "ai_meta": {
+                    "provider": result.get("provider_name"),
+                    "model": result.get("model"),
+                    "usage": result.get("usage", {}),
+                    "elapsed_seconds": result.get("elapsed_seconds", 0),
+                },
+                "message_count": len(session["messages"]),
+            })
+
+            # Run verification
+            try:
+                source_data = ""
+                if session.get("pipeline_context"):
+                    source_data = json.dumps(session["pipeline_context"], indent=2)[:10000]
+
+                verification = await run_verification(
+                    text_to_verify=full_text,
+                    source_data=source_data,
+                    run_logger=run_logger,
+                )
+                run_logger.info("CHAT STREAM verification: overall=%s elapsed=%.2fs",
+                                verification["overall_verdict"], verification["elapsed_seconds"])
+                yield _sse_event("verification", {"verification": verification})
+            except Exception as vex:
+                run_logger.error("CHAT STREAM verification FAILED (non-blocking): %s", vex)
+                logger.error("Chat stream verification FAILED: %s", vex)
+
+            yield _sse_event("done", {})
+
+        except Exception as e:
+            run_logger.error("CHAT STREAM error: %s", e)
+            # Remove user message on failure
+            if session["messages"] and session["messages"][-1]["role"] == "user":
+                session["messages"].pop()
+            yield _sse_event("error", {"error": str(e)})
+        finally:
+            close_run_logger(run_logger, run_handler)
+
+    response = StreamingResponse(
+        _sse_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+    response.set_cookie(
+        key="betstamp_session",
+        value=session_id,
+        httponly=True,
+        samesite="lax",
+        max_age=60 * 60 * 24,
+    )
+    return response
 
 
 # ---------------------------------------------------------------------------

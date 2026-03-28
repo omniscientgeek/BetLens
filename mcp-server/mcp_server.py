@@ -14,10 +14,26 @@ import sys
 import os
 import json
 import random
+import asyncio
+import time
+import logging
+import functools
+import traceback
 from datetime import datetime, timezone
 from math import sqrt, log, exp, lgamma, inf
 from statistics import pstdev, mean
 from typing import Optional
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    stream=sys.stderr,  # Keep stdout clean for stdio transport
+)
+logger = logging.getLogger("betstamp-mcp")
 
 # Allow imports from sibling webservice/ directory
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "webservice")))
@@ -30,6 +46,180 @@ from odds_math import implied_probability, calculate_vig, no_vig_probabilities, 
 # ---------------------------------------------------------------------------
 
 DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data"))
+
+# ---------------------------------------------------------------------------
+# Resilience — retry, timeout, and auto-reconnect utilities
+# ---------------------------------------------------------------------------
+
+# Configuration (seconds)
+TOOL_TIMEOUT = 120          # Max time a single tool call may run
+DATA_LOAD_TIMEOUT = 60      # Max time for file I/O + JSON parsing
+RETRY_MAX_ATTEMPTS = 3      # Retries for transient failures
+RETRY_BASE_DELAY = 1.0      # Base delay between retries (exponential backoff)
+RECONNECT_MAX_ATTEMPTS = 0  # 0 = unlimited reconnect attempts
+RECONNECT_BASE_DELAY = 2.0  # Base delay between reconnection attempts
+RECONNECT_MAX_DELAY = 30.0  # Cap on exponential backoff for reconnects
+
+
+def retry(max_attempts: int = RETRY_MAX_ATTEMPTS, base_delay: float = RETRY_BASE_DELAY,
+          retryable_exceptions: tuple = (OSError, IOError, json.JSONDecodeError, TimeoutError)):
+    """Decorator that retries a function on transient failures with exponential backoff.
+
+    Works for both sync and async functions.
+    """
+    def decorator(func):
+        if asyncio.iscoroutinefunction(func):
+            @functools.wraps(func)
+            async def async_wrapper(*args, **kwargs):
+                last_exc = None
+                for attempt in range(1, max_attempts + 1):
+                    try:
+                        return await func(*args, **kwargs)
+                    except retryable_exceptions as exc:
+                        last_exc = exc
+                        if attempt < max_attempts:
+                            delay = base_delay * (2 ** (attempt - 1))
+                            logger.warning(
+                                "Retry %d/%d for %s after %s: %.1fs backoff",
+                                attempt, max_attempts, func.__name__, type(exc).__name__, delay,
+                            )
+                            await asyncio.sleep(delay)
+                        else:
+                            logger.error(
+                                "All %d attempts failed for %s: %s",
+                                max_attempts, func.__name__, exc,
+                            )
+                raise last_exc  # type: ignore[misc]
+            return async_wrapper
+        else:
+            @functools.wraps(func)
+            def sync_wrapper(*args, **kwargs):
+                last_exc = None
+                for attempt in range(1, max_attempts + 1):
+                    try:
+                        return func(*args, **kwargs)
+                    except retryable_exceptions as exc:
+                        last_exc = exc
+                        if attempt < max_attempts:
+                            delay = base_delay * (2 ** (attempt - 1))
+                            logger.warning(
+                                "Retry %d/%d for %s after %s: %.1fs backoff",
+                                attempt, max_attempts, func.__name__, type(exc).__name__, delay,
+                            )
+                            time.sleep(delay)
+                        else:
+                            logger.error(
+                                "All %d attempts failed for %s: %s",
+                                max_attempts, func.__name__, exc,
+                            )
+                raise last_exc  # type: ignore[misc]
+            return sync_wrapper
+    return decorator
+
+
+async def run_with_timeout(coro, timeout: float = TOOL_TIMEOUT, label: str = "tool"):
+    """Run an awaitable with a timeout.  Returns a JSON error on timeout instead of crashing."""
+    try:
+        return await asyncio.wait_for(coro, timeout=timeout)
+    except asyncio.TimeoutError:
+        logger.error("Timeout after %.0fs running %s", timeout, label)
+        return json.dumps({
+            "error": f"Processing timed out after {timeout}s. Try a smaller query or specific game_id.",
+            "hint": "Use a narrower filter (game_id, market, book) to reduce data volume.",
+        })
+
+
+def safe_tool(timeout: float = TOOL_TIMEOUT):
+    """Decorator for MCP tool functions that adds timeout + error handling.
+
+    Wraps async tool functions so they:
+    1. Time out gracefully instead of hanging forever
+    2. Catch unexpected exceptions and return structured JSON errors
+    3. Auto-retry on transient data-loading failures
+    """
+    def decorator(func):
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            try:
+                # If the tool function is sync, run it in the executor with a timeout
+                if not asyncio.iscoroutinefunction(func):
+                    loop = asyncio.get_event_loop()
+                    result = await asyncio.wait_for(
+                        loop.run_in_executor(None, functools.partial(func, *args, **kwargs)),
+                        timeout=timeout,
+                    )
+                else:
+                    result = await asyncio.wait_for(func(*args, **kwargs), timeout=timeout)
+                return result
+            except asyncio.TimeoutError:
+                logger.error("Tool '%s' timed out after %.0fs", func.__name__, timeout)
+                return json.dumps({
+                    "error": f"Tool '{func.__name__}' timed out after {timeout}s.",
+                    "hint": "Try a narrower query (specific game_id, market, or book).",
+                })
+            except (OSError, IOError) as exc:
+                logger.error("I/O error in tool '%s': %s", func.__name__, exc)
+                return json.dumps({
+                    "error": f"Data loading error: {exc}",
+                    "hint": "The data file may be updating. Retrying automatically next call.",
+                })
+            except Exception as exc:
+                logger.error("Unexpected error in tool '%s': %s\n%s",
+                             func.__name__, exc, traceback.format_exc())
+                return json.dumps({
+                    "error": f"Unexpected error: {type(exc).__name__}: {exc}",
+                })
+        # Preserve the original function's signature for FastMCP introspection
+        wrapper.__wrapped__ = func
+        return wrapper
+    return decorator
+
+
+async def run_server_with_reconnect(transport: str = "stdio"):
+    """Run the MCP server in a reconnect loop.
+
+    On connection loss (BrokenPipeError, ConnectionError, EOFError, etc.)
+    the server automatically restarts with exponential backoff.
+    Ensures the client always gets reconnected to fresh, up-to-date data.
+    """
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            logger.info("Starting MCP server (transport=%s, attempt=%d)...", transport, attempt)
+            # Clear stale caches on reconnect so the client gets fresh data
+            if attempt > 1:
+                _cache.__init__()
+                logger.info("Cache cleared for fresh reconnection.")
+            await mcp.run_async(transport=transport)
+            # If run_async returns normally, exit cleanly
+            logger.info("MCP server exited normally.")
+            break
+        except (BrokenPipeError, ConnectionError, ConnectionResetError,
+                EOFError, OSError) as exc:
+            delay = min(RECONNECT_BASE_DELAY * (2 ** (attempt - 1)), RECONNECT_MAX_DELAY)
+            logger.warning(
+                "Connection lost (%s: %s). Reconnecting in %.1fs (attempt %d)...",
+                type(exc).__name__, exc, delay, attempt,
+            )
+            if RECONNECT_MAX_ATTEMPTS and attempt >= RECONNECT_MAX_ATTEMPTS:
+                logger.error("Max reconnection attempts (%d) reached. Exiting.", RECONNECT_MAX_ATTEMPTS)
+                raise
+            await asyncio.sleep(delay)
+            # Reset attempt counter on successful long-running connection (>60s)
+        except KeyboardInterrupt:
+            logger.info("Server stopped by user.")
+            break
+        except Exception as exc:
+            delay = min(RECONNECT_BASE_DELAY * (2 ** (attempt - 1)), RECONNECT_MAX_DELAY)
+            logger.error(
+                "Unexpected server error (%s: %s). Restarting in %.1fs...",
+                type(exc).__name__, exc, delay,
+            )
+            if RECONNECT_MAX_ATTEMPTS and attempt >= RECONNECT_MAX_ATTEMPTS:
+                raise
+            await asyncio.sleep(delay)
+
 
 mcp = FastMCP(
     "BetStamp Intelligence",
@@ -89,16 +279,37 @@ class _OddsCache:
             del self._analysis[k]
 
     def load_odds(self, filename: Optional[str] = None) -> list[dict]:
-        """Load odds, returning cached version if the file hasn't changed."""
+        """Load odds, returning cached version if the file hasn't changed.
+
+        Retries on transient I/O or JSON parse errors with exponential backoff.
+        """
         filepath = self._resolve(filename)
         if not filepath:
             return []
         if not self._is_valid(filepath):
             self._invalidate(filepath)
-            with open(filepath, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            self._raw[filepath] = data.get("odds", [])
-            self._mtime[filepath] = os.path.getmtime(filepath)
+            last_exc = None
+            for attempt in range(1, RETRY_MAX_ATTEMPTS + 1):
+                try:
+                    with open(filepath, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    self._raw[filepath] = data.get("odds", [])
+                    self._mtime[filepath] = os.path.getmtime(filepath)
+                    if attempt > 1:
+                        logger.info("load_odds succeeded on attempt %d", attempt)
+                    break
+                except (OSError, IOError, json.JSONDecodeError) as exc:
+                    last_exc = exc
+                    if attempt < RETRY_MAX_ATTEMPTS:
+                        delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
+                        logger.warning(
+                            "load_odds attempt %d/%d failed (%s). Retrying in %.1fs...",
+                            attempt, RETRY_MAX_ATTEMPTS, exc, delay,
+                        )
+                        time.sleep(delay)
+                    else:
+                        logger.error("load_odds failed after %d attempts: %s", RETRY_MAX_ATTEMPTS, exc)
+                        raise last_exc  # type: ignore[misc]
         return self._raw[filepath]
 
     def load_enriched(self, filename: Optional[str] = None) -> list[dict]:
@@ -8580,11 +8791,50 @@ def get_glossary() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Run
+# Run — with automatic reconnection on connection loss
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    if "--sse" in sys.argv:
-        mcp.run(transport="sse")
+    transport = "sse" if "--sse" in sys.argv else "stdio"
+
+    # Check if the FastMCP version supports run_async for reconnect loop
+    if hasattr(mcp, "run_async"):
+        try:
+            asyncio.run(run_server_with_reconnect(transport=transport))
+        except KeyboardInterrupt:
+            logger.info("Server stopped by user.")
     else:
-        mcp.run(transport="stdio")
+        # Fallback: reconnect loop using synchronous mcp.run()
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                logger.info("Starting MCP server (transport=%s, attempt=%d)...", transport, attempt)
+                if attempt > 1:
+                    _cache.__init__()
+                    logger.info("Cache cleared for fresh reconnection.")
+                mcp.run(transport=transport)
+                break  # Clean exit
+            except (BrokenPipeError, ConnectionError, ConnectionResetError,
+                    EOFError, OSError) as exc:
+                delay = min(RECONNECT_BASE_DELAY * (2 ** (attempt - 1)), RECONNECT_MAX_DELAY)
+                logger.warning(
+                    "Connection lost (%s: %s). Reconnecting in %.1fs (attempt %d)...",
+                    type(exc).__name__, exc, delay, attempt,
+                )
+                if RECONNECT_MAX_ATTEMPTS and attempt >= RECONNECT_MAX_ATTEMPTS:
+                    logger.error("Max reconnection attempts (%d) reached. Exiting.", RECONNECT_MAX_ATTEMPTS)
+                    sys.exit(1)
+                time.sleep(delay)
+            except KeyboardInterrupt:
+                logger.info("Server stopped by user.")
+                break
+            except Exception as exc:
+                delay = min(RECONNECT_BASE_DELAY * (2 ** (attempt - 1)), RECONNECT_MAX_DELAY)
+                logger.error(
+                    "Unexpected server error (%s: %s). Restarting in %.1fs...",
+                    type(exc).__name__, exc, delay,
+                )
+                if RECONNECT_MAX_ATTEMPTS and attempt >= RECONNECT_MAX_ATTEMPTS:
+                    sys.exit(1)
+                time.sleep(delay)
