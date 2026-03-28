@@ -209,18 +209,31 @@ function BetLens() {
       const result = await res.json();
 
       // 2. Also trigger a browser download of the JSON
+      // Restructure: promote sub-agent verification results to top-level
+      // audit_analyze / audit_brief to mirror the 5-phase pipeline structure.
+      const downloadResults = { ...pipelineResults };
+      if (downloadResults.analyze?.verification) {
+        const { verification, ...analyzeRest } = downloadResults.analyze;
+        downloadResults.analyze = analyzeRest;
+        downloadResults.audit_analyze = verification;
+      }
+      if (downloadResults.brief?.verification) {
+        const { verification, ...briefRest } = downloadResults.brief;
+        downloadResults.brief = briefRest;
+        downloadResults.audit_brief = verification;
+      }
       const blob = new Blob(
         [JSON.stringify({
           source_file: selectedFile,
           saved_at: new Date().toISOString(),
-          pipeline_results: pipelineResults,
+          pipeline_results: downloadResults,
         }, null, 2)],
         { type: "application/json" }
       );
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = result.filename || `${selectedFile.replace(".json", "")}_results.json`;
+      a.download = result.filename || `betlens_results_${new Date().toISOString().slice(0, 19).replace(/[T:]/g, "_")}.json`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -408,7 +421,37 @@ function BetLens() {
       }
     });
 
-    // Receive verification results (arrives after analyze/brief phase, before processing_complete)
+    // Receive per-agent verification results in real time as each audit agent finishes
+    socket.on("verification_agent_update", (data) => {
+      if (data.agent_name && data.agent_result) {
+        const phase = data.phase || "brief";
+        setPhaseResults((prev) => {
+          const existing = prev[phase] || {};
+          const existingVerification = existing.verification || {
+            overall_verdict: "pending",
+            elapsed_seconds: null,
+            agents: {},
+            _pending: true,
+          };
+          const updatedAgents = {
+            ...existingVerification.agents,
+            [data.agent_name]: data.agent_result,
+          };
+          return {
+            ...prev,
+            [phase]: {
+              ...existing,
+              verification: {
+                ...existingVerification,
+                agents: updatedAgents,
+              },
+            },
+          };
+        });
+      }
+    });
+
+    // Receive final verification results (arrives after all agents finish, before processing_complete)
     socket.on("verification_update", (data) => {
       if (data.verification) {
         const phase = data.phase || "brief";
@@ -713,7 +756,7 @@ function BetLens() {
         />
       )}
 
-      {/* Audit Analyze — show during processing once verification arrives */}
+      {/* Audit Analyze — show during processing with real-time agent updates */}
       {!pipelineComplete && !pipelineError && pipeline && pipeline.phaseIndex >= 2 && (
         <div className="verification-card">
           <div className="verification-card-header">
@@ -721,7 +764,10 @@ function BetLens() {
             <h3>Audit Analyze</h3>
           </div>
           {phaseResults.analyze?.verification ? (
-            <VerificationBadge verification={phaseResults.analyze.verification} />
+            <VerificationBadge
+              verification={phaseResults.analyze.verification}
+              streaming={!!phaseResults.analyze.verification._pending}
+            />
           ) : (
             <div className="verification-card-pending">
               <span className="pipeline-step-spinner" />
@@ -743,7 +789,7 @@ function BetLens() {
         />
       )}
 
-      {/* Audit Brief — show during processing once verification arrives */}
+      {/* Audit Brief — show during processing with real-time agent updates */}
       {!pipelineComplete && !pipelineError && pipeline && pipeline.phaseIndex >= 4 && (
         <div className="verification-card">
           <div className="verification-card-header">
@@ -751,7 +797,10 @@ function BetLens() {
             <h3>Audit Brief</h3>
           </div>
           {phaseResults.brief?.verification ? (
-            <VerificationBadge verification={phaseResults.brief.verification} />
+            <VerificationBadge
+              verification={phaseResults.brief.verification}
+              streaming={!!phaseResults.brief.verification._pending}
+            />
           ) : (
             <div className="verification-card-pending">
               <span className="pipeline-step-spinner" />

@@ -271,10 +271,23 @@ async def run_processing_pipeline(filename: str, state: PipelineState):
                             default=str,
                         )
 
+                        # Real-time callback: emit each agent's result as it completes
+                        async def _on_analyze_agent(agent_name, agent_result):
+                            agent_payload = {
+                                "filename": filename,
+                                "phase": "analyze",
+                                "agent_name": agent_name,
+                                "agent_result": agent_result,
+                                "run_id": run_id,
+                            }
+                            state.replay_events.append({"type": "verification_agent_update", "payload": agent_payload})
+                            await _safe_emit(state, "verification_agent_update", agent_payload)
+
                         verification = await run_verification(
                             text_to_verify=analyze_text,
                             source_data=source_data,
                             run_logger=run_logger,
+                            on_agent_complete=_on_analyze_agent,
                         )
                         analysis["verification"] = verification
                         pipeline_results["analyze"] = analysis
@@ -367,10 +380,23 @@ async def run_processing_pipeline(filename: str, state: PipelineState):
                             separators=(",", ":"),
                         )
 
+                        # Real-time callback: emit each agent's result as it completes
+                        async def _on_brief_agent(agent_name, agent_result):
+                            agent_payload = {
+                                "filename": filename,
+                                "phase": "brief",
+                                "agent_name": agent_name,
+                                "agent_result": agent_result,
+                                "run_id": run_id,
+                            }
+                            state.replay_events.append({"type": "verification_agent_update", "payload": agent_payload})
+                            await _safe_emit(state, "verification_agent_update", agent_payload)
+
                         verification = await run_verification(
                             text_to_verify=brief["brief_text"],
                             source_data=source_data,
                             run_logger=run_logger,
+                            on_agent_complete=_on_brief_agent,
                         )
                         brief["verification"] = verification
                         pipeline_results["brief"] = brief
@@ -622,16 +648,30 @@ async def save_results(request: Request):
 
     os.makedirs(SAVED_RESULTS_DIR, exist_ok=True)
 
-    # Build a timestamped filename: e.g. odds_data_2026-03-27_143022.json
-    base = os.path.splitext(filename)[0]
+    # Build a timestamped filename: e.g. betlens_results_2026-03-27_143022.json
     ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    save_filename = f"{base}_{ts}.json"
+    save_filename = f"betlens_results_{ts}.json"
     save_path = os.path.join(SAVED_RESULTS_DIR, save_filename)
+
+    # Restructure: promote sub-agent verification results from nested
+    # analyze.verification / brief.verification to top-level audit_analyze / audit_brief
+    # so the saved file mirrors the 5-phase pipeline structure.
+    structured_results = dict(pipeline_results)
+
+    analyze = structured_results.get("analyze")
+    if isinstance(analyze, dict) and "verification" in analyze:
+        structured_results["audit_analyze"] = analyze.pop("verification")
+        structured_results["analyze"] = analyze
+
+    brief = structured_results.get("brief")
+    if isinstance(brief, dict) and "verification" in brief:
+        structured_results["audit_brief"] = brief.pop("verification")
+        structured_results["brief"] = brief
 
     payload = {
         "source_file": filename,
         "saved_at": datetime.now().isoformat(),
-        "pipeline_results": pipeline_results,
+        "pipeline_results": structured_results,
         "file_data": file_data,
     }
 

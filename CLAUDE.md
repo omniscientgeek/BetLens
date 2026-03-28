@@ -99,6 +99,72 @@ A standalone MCP server (`mcp-server/mcp_server.py`) that exposes betting intell
 | `arithmetic_modulo` | Remainder of division (a % b) — divisibility checks, cyclic patterns |
 | `arithmetic_evaluate` | Evaluate multi-step arithmetic expressions safely, e.g. "(100 * 0.25) + 50" |
 
+## Bet Lens — Saved Results
+
+**Filename:** `betlens_results_{YYYY-MM-DD_HHMMSS}.json`
+**Location:** `./saved_results/`
+
+### Saved File Structure
+
+```json
+{
+  "source_file": "original_data_filename.json",
+  "saved_at": "ISO 8601 timestamp",
+  "pipeline_results": {
+    "detect": { /* pattern detection output */ },
+    "analyze": {
+      "conversation": {
+        "system_prompt": "string",
+        "user_prompt": "string",
+        "assistant_response": "string",
+        "thinking": "string | null",
+        "tool_calls": [
+          { "id": "string", "name": "string", "input": {}, "result": "string | object", "is_error": false }
+        ]
+      },
+      "analysis": "string | object",
+      "ai_meta": { "provider": "string", "model": "string", "elapsed_seconds": 0, "usage": { "input_tokens": 0, "output_tokens": 0 } }
+    },
+    "audit_analyze": {
+      "overall_verdict": "pass | warn | fail | error",
+      "elapsed_seconds": 0,
+      "agents": {
+        "reasoning": { "agent": "reasoning", "verdict": "pass | warn | fail", "confidence": 0.0, "checks_total": 0, "checks_failed": 0, "summary": "string", "issues": [{ "severity": "info | warning | error", "claim": "string", "finding": "string" }], "ai_meta": {}, "conversation": {} },
+        "factual":   { /* same structure as reasoning */ },
+        "betting":   { /* same structure as reasoning */ }
+      }
+    },
+    "brief": {
+      "brief_text": "markdown string",
+      "generated_at": "ISO 8601 timestamp",
+      "ai_meta": { "provider": "string", "model": "string", "elapsed_seconds": 0, "usage": { "input_tokens": 0, "output_tokens": 0 } }
+    },
+    "audit_brief": {
+      "overall_verdict": "pass | warn | fail | error",
+      "elapsed_seconds": 0,
+      "agents": {
+        "reasoning": { /* same structure as audit_analyze agents */ },
+        "factual":   { /* same structure */ },
+        "betting":   { /* same structure */ }
+      }
+    }
+  },
+  "file_data": { /* original input data */ }
+}
+```
+
+### Audit Agent Details
+
+Each audit phase (`audit_analyze`, `audit_brief`) runs **3 concurrent verification sub-agents**:
+
+| Agent | Role |
+|-------|------|
+| `reasoning` | Validates logical consistency of claims |
+| `factual` | Cross-checks facts against source data using MCP tools |
+| `betting` | Verifies betting-specific accuracy (odds, lines, calculations) |
+
+Each agent returns a verdict (`pass` / `warn` / `fail`), a confidence score (0–1), and a list of issues found. The `overall_verdict` is the worst verdict across all three agents.
+
 ### MCP Resources
 
 | URI | Purpose |
