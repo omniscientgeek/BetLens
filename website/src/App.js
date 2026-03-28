@@ -101,6 +101,10 @@ function BetLens() {
   // Self-healing fix tracking
   const [fixStatus, setFixStatus] = useState({}); // { analyze: {attempt, max, verdict}, brief: {...} }
 
+  // Streaming fix history — accumulates audit results + fix conversations as they arrive
+  // so the timeline is visible during real-time processing (before pipelineComplete).
+  const [streamingFixHistory, setStreamingFixHistory] = useState({ analyze: [], brief: [] });
+
   // Save state
   const [saving, setSaving] = useState(false);
   const [saveStatus, setSaveStatus] = useState(null); // { ok, message }
@@ -333,6 +337,7 @@ function BetLens() {
     setSaving(false);
     setSaveStatus(null);
     setFixStatus({});
+    setStreamingFixHistory({ analyze: [], brief: [] });
 
     if (!filename) {
       sessionRemove("selectedFile");
@@ -532,6 +537,16 @@ function BetLens() {
           ...prev,
           [phase]: { ...prev[phase], verification: data.verification },
         }));
+        // Accumulate into streaming fix history so the timeline is visible in real-time
+        const attempt = data.fix_attempt ?? 0;
+        const overall = data.verification.overall_verdict || "error";
+        setStreamingFixHistory((prev) => ({
+          ...prev,
+          [phase]: [
+            ...prev[phase],
+            { type: "audit", attempt, verdict: overall, verification: data.verification },
+          ],
+        }));
       }
     });
 
@@ -547,13 +562,18 @@ function BetLens() {
           status: "fixing",
         },
       }));
-      // Clear previous verification agents for this phase so the UI shows fresh results
+      // Keep the previous verification visible (don't clear it) so the user
+      // can still see the failed audit result while the fix is in progress.
+      // Only clear the _pending flag so agent chips stop spinning.
       setPhaseResults((prev) => {
         const existing = prev[phase] || {};
-        return {
-          ...prev,
-          [phase]: { ...existing, verification: undefined },
-        };
+        if (existing.verification) {
+          return {
+            ...prev,
+            [phase]: { ...existing, verification: { ...existing.verification, _pending: false } },
+          };
+        }
+        return prev;
       });
       // For brief fixes, clear streaming text so new fixed text can stream in
       if (phase === "brief") {
@@ -572,6 +592,27 @@ function BetLens() {
           fixConversation: data.fix_conversation || null,
           fixAiMeta: data.fix_ai_meta || null,
         },
+      }));
+      // Clear previous verification agents so re-audit shows fresh progress
+      setPhaseResults((prev) => {
+        const existing = prev[phase] || {};
+        return {
+          ...prev,
+          [phase]: { ...existing, verification: undefined },
+        };
+      });
+      // Accumulate fix conversation into streaming fix history
+      setStreamingFixHistory((prev) => ({
+        ...prev,
+        [phase]: [
+          ...prev[phase],
+          {
+            type: "fix",
+            attempt: data.fix_attempt,
+            conversation: data.fix_conversation || null,
+            ai_meta: data.fix_ai_meta || null,
+          },
+        ],
       }));
     });
 
@@ -1009,6 +1050,8 @@ function BetLens() {
         const totalAgents = 3;
         const progressPct = (completedCount / totalAgents) * 100;
         const isAuditing = !auditV || auditV._pending;
+        const history = streamingFixHistory.analyze || [];
+        const hasHistory = history.length > 1 || (history.length === 1 && fixStatus.analyze);
 
         return (
           <div className="verification-card">
@@ -1031,6 +1074,66 @@ function BetLens() {
                 </span>
               )}
             </div>
+
+            {/* Previous audit results + fix conversations timeline (shown during self-healing) */}
+            {hasHistory && (
+              <div className="audit-timeline audit-timeline--streaming">
+                {history.map((h, idx) => {
+                  if (h.type === "fix") {
+                    return (
+                      <div key={`fix-${idx}`} className="fix-block">
+                        <div className="fix-block-header">
+                          <span className="fix-block-indicator">{"\u{1F527}"}</span>
+                          <span className="fix-block-title">Fix #{h.attempt}</span>
+                          {h.ai_meta && (
+                            <span className="fix-block-meta">
+                              {h.ai_meta.provider} / {h.ai_meta.model}
+                              {h.ai_meta.elapsed_seconds != null && ` \u00B7 ${h.ai_meta.elapsed_seconds.toFixed(1)}s`}
+                            </span>
+                          )}
+                        </div>
+                        {h.conversation && (
+                          <AnalyzeConversation
+                            analyzeResult={{ conversation: h.conversation, ai_meta: h.ai_meta }}
+                            streaming={false}
+                            defaultExpanded={false}
+                            title={`Fix #${h.attempt} Conversation`}
+                          />
+                        )}
+                      </div>
+                    );
+                  }
+                  // Audit entry — only show historical ones (not the current/latest)
+                  const isLast = idx === history.length - 1 && !fixStatus.analyze;
+                  if (isLast) return null; // current audit is shown below with live progress
+                  const isPassed = h.verdict === "pass";
+                  const issueCount = Object.values(h.verification?.agents || {}).reduce(
+                    (sum, a) => sum + (a.issues?.length || 0), 0
+                  );
+                  return (
+                    <div key={`audit-${idx}`} className={`audit-block audit-block--${h.verdict} audit-block--historical`}>
+                      <div className="audit-block-header">
+                        <span className={`audit-block-indicator audit-block-indicator--${h.verdict}`}>
+                          {isPassed ? "\u2705" : h.verdict === "warn" ? "\u26A0\uFE0F" : "\u274C"}
+                        </span>
+                        <span className="audit-block-title">
+                          {h.attempt === 0 ? "Initial Audit" : `Re-audit after Fix #${h.attempt}`}
+                        </span>
+                        <span className={`audit-block-verdict verdict--${h.verdict}`}>
+                          {h.verdict.toUpperCase()}
+                        </span>
+                        {issueCount > 0 && (
+                          <span className="audit-block-issues">
+                            {issueCount} issue{issueCount !== 1 ? "s" : ""}
+                          </span>
+                        )}
+                      </div>
+                      <VerificationBadge verification={h.verification} />
+                    </div>
+                  );
+                })}
+              </div>
+            )}
 
             {/* Segmented progress bar */}
             {isAuditing && (
@@ -1122,6 +1225,8 @@ function BetLens() {
         const totalAgents = 3;
         const progressPct = (completedCount / totalAgents) * 100;
         const isAuditing = !auditV || auditV._pending;
+        const history = streamingFixHistory.brief || [];
+        const hasHistory = history.length > 1 || (history.length === 1 && fixStatus.brief);
 
         return (
           <div className="verification-card">
@@ -1144,6 +1249,66 @@ function BetLens() {
                 </span>
               )}
             </div>
+
+            {/* Previous audit results + fix conversations timeline (shown during self-healing) */}
+            {hasHistory && (
+              <div className="audit-timeline audit-timeline--streaming">
+                {history.map((h, idx) => {
+                  if (h.type === "fix") {
+                    return (
+                      <div key={`fix-${idx}`} className="fix-block">
+                        <div className="fix-block-header">
+                          <span className="fix-block-indicator">{"\u{1F527}"}</span>
+                          <span className="fix-block-title">Fix #{h.attempt}</span>
+                          {h.ai_meta && (
+                            <span className="fix-block-meta">
+                              {h.ai_meta.provider} / {h.ai_meta.model}
+                              {h.ai_meta.elapsed_seconds != null && ` \u00B7 ${h.ai_meta.elapsed_seconds.toFixed(1)}s`}
+                            </span>
+                          )}
+                        </div>
+                        {h.conversation && (
+                          <AnalyzeConversation
+                            analyzeResult={{ conversation: h.conversation, ai_meta: h.ai_meta }}
+                            streaming={false}
+                            defaultExpanded={false}
+                            title={`Fix #${h.attempt} Conversation`}
+                          />
+                        )}
+                      </div>
+                    );
+                  }
+                  // Audit entry — only show historical ones (not the current/latest)
+                  const isLast = idx === history.length - 1 && !fixStatus.brief;
+                  if (isLast) return null; // current audit is shown below with live progress
+                  const isPassed = h.verdict === "pass";
+                  const issueCount = Object.values(h.verification?.agents || {}).reduce(
+                    (sum, a) => sum + (a.issues?.length || 0), 0
+                  );
+                  return (
+                    <div key={`audit-${idx}`} className={`audit-block audit-block--${h.verdict} audit-block--historical`}>
+                      <div className="audit-block-header">
+                        <span className={`audit-block-indicator audit-block-indicator--${h.verdict}`}>
+                          {isPassed ? "\u2705" : h.verdict === "warn" ? "\u26A0\uFE0F" : "\u274C"}
+                        </span>
+                        <span className="audit-block-title">
+                          {h.attempt === 0 ? "Initial Audit" : `Re-audit after Fix #${h.attempt}`}
+                        </span>
+                        <span className={`audit-block-verdict verdict--${h.verdict}`}>
+                          {h.verdict.toUpperCase()}
+                        </span>
+                        {issueCount > 0 && (
+                          <span className="audit-block-issues">
+                            {issueCount} issue{issueCount !== 1 ? "s" : ""}
+                          </span>
+                        )}
+                      </div>
+                      <VerificationBadge verification={h.verification} />
+                    </div>
+                  );
+                })}
+              </div>
+            )}
 
             {/* Segmented progress bar */}
             {isAuditing && (
