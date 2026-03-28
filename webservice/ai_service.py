@@ -2700,9 +2700,42 @@ async def run_fix_phase(
     fix_max_tokens = 16384
 
     if on_chunk:
+        if phase_type == "brief":
+            # Buffer streaming chunks to strip any preamble before the first "##" heading,
+            # just like run_brief_phase does.  Without this the UI receives raw LLM tokens
+            # like "percentage:## Market Snapshot" before the heading is detected.
+            _fix_preamble_buffer = []
+            _fix_preamble_stripped = [False]
+
+            async def _filtered_fix_chunk(text_delta):
+                if _fix_preamble_stripped[0]:
+                    await on_chunk(text_delta)
+                    return
+
+                _fix_preamble_buffer.append(text_delta)
+                accumulated = "".join(_fix_preamble_buffer)
+
+                heading_pos = accumulated.find("## ")
+                if heading_pos != -1:
+                    _fix_preamble_stripped[0] = True
+                    real_content = accumulated[heading_pos:]
+                    if real_content:
+                        await on_chunk(real_content)
+                    if heading_pos > 0 and run_logger:
+                        run_logger.info("Fix phase: stripped %d chars of streaming preamble before first heading", heading_pos)
+                elif len(accumulated) > 2000:
+                    _fix_preamble_stripped[0] = True
+                    await on_chunk(accumulated)
+                    if run_logger:
+                        run_logger.warning("Fix phase: no heading found after 2KB buffer, flushing all content")
+
+            chunk_fn = _filtered_fix_chunk
+        else:
+            chunk_fn = on_chunk
+
         result = await call_ai_stream(
             system_prompt, user_prompt,
-            on_chunk=on_chunk,
+            on_chunk=chunk_fn,
             run_logger=run_logger,
             max_tokens=fix_max_tokens,
         )
