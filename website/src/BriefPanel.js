@@ -351,7 +351,6 @@ export default function BriefPanel({ briefResult, isInterim = false }) {
   const brief_text = briefResult?.brief_text || null;
   const generated_at = briefResult?.generated_at;
   const ai_meta = briefResult?.ai_meta;
-  const verification = briefResult?.verification;
 
   // Auto-scroll to bottom as streaming content arrives
   useEffect(() => {
@@ -402,11 +401,6 @@ export default function BriefPanel({ briefResult, isInterim = false }) {
           </div>
         )}
       </div>
-
-      {/* Verification badges — shown when brief is complete (not during streaming) */}
-      {!isInterim && verification && (
-        <VerificationBadge verification={verification} />
-      )}
 
       {/* Brief text body */}
       <div className="bp-body" ref={bodyRef}>

@@ -4,7 +4,7 @@ import { io } from "socket.io-client";
 import DevNotes from "./DevNotes";
 import AISettings from "./AISettings";
 import ChatPanel from "./ChatPanel";
-import BriefPanel from "./BriefPanel";
+import BriefPanel, { VerificationBadge } from "./BriefPanel";
 import AnalyzeConversation from "./AnalyzeConversation";
 import "./App.css"; // updated
 
@@ -50,26 +50,24 @@ function sessionRemove(key) {
 function Navigation() {
   const location = useLocation();
 
+  const NAV_ITEMS = [
+    { path: "/", label: "BetLens", icon: "◎" },
+    { path: "/devnotes", label: "Notes", icon: "◆" },
+    { path: "/ai-settings", label: "Settings", icon: "⚙" },
+  ];
+
   return (
     <nav className="App-nav">
-      <Link
-        to="/"
-        className={`nav-btn ${location.pathname === "/" ? "active" : ""}`}
-      >
-        Bet Lens
-      </Link>
-      <Link
-        to="/devnotes"
-        className={`nav-btn ${location.pathname === "/devnotes" ? "active" : ""}`}
-      >
-        Dev Notes
-      </Link>
-      <Link
-        to="/ai-settings"
-        className={`nav-btn ${location.pathname === "/ai-settings" ? "active" : ""}`}
-      >
-        AI Settings
-      </Link>
+      {NAV_ITEMS.map(({ path, label, icon }) => (
+        <Link
+          key={path}
+          to={path}
+          className={`nav-btn ${location.pathname === path ? "active" : ""}`}
+        >
+          <span className="nav-btn-icon">{icon}</span>
+          <span className="nav-btn-label">{label}</span>
+        </Link>
+      ))}
     </nav>
   );
 }
@@ -750,6 +748,17 @@ function BetLens() {
           {pipelineResults?.brief && !pipelineResults.brief.error && (
             <BriefPanel briefResult={pipelineResults.brief} />
           )}
+
+          {/* Sub-Agent Verification — standalone card */}
+          {pipelineResults?.brief?.verification && (
+            <div className="verification-card">
+              <div className="verification-card-header">
+                <span className="verification-card-icon">🛡</span>
+                <h3>Sub-Agent Review</h3>
+              </div>
+              <VerificationBadge verification={pipelineResults.brief.verification} />
+            </div>
+          )}
         </>
       )}
 
@@ -767,22 +776,22 @@ function BetLens() {
 
 const PAGE_TITLES = {
   "/": "BetLens",
-  "/devnotes": "Dev Notes",
-  "/ai-settings": "AI Settings",
+  "/devnotes": "Notes",
+  "/ai-settings": "Settings",
 };
 
 function AppContent() {
   const location = useLocation();
 
   useEffect(() => {
-    const pageName = PAGE_TITLES[location.pathname] || "Bet Stamp";
-    document.title = `${pageName} — Bet Stamp`;
+    const pageName = PAGE_TITLES[location.pathname] || "BetStamp";
+    document.title = `${pageName} — BetStamp`;
   }, [location.pathname]);
 
   return (
     <div className="App">
       <header className="App-header">
-        <h1>Bet Stamp</h1>
+        <h1>BetStamp</h1>
         <Navigation />
       </header>
 
