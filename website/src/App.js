@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Link, useLocation, useNavigate } from "re
 import { io } from "socket.io-client";
 import DevNotes from "./DevNotes";
 import AISettings from "./AISettings";
+import AIAgents from "./AIAgents";
 import PastRuns from "./PastRuns";
 import TestRunner from "./TestRunner";
 import "./TestRunner.css";
@@ -42,6 +43,7 @@ function Navigation() {
 
   const NAV_ITEMS = [
     { path: "/", label: "BetLens", icon: "◎" },
+    { path: "/ai-agent", label: "Agent", icon: "◈" },
     { path: "/past-runs", label: "History", icon: "▤" },
     { path: "/devnotes", label: "Notes", icon: "◆" },
     { path: "/tests", label: "Tests", icon: "⬡" },
@@ -80,6 +82,7 @@ function BetLens() {
   // Reconnection tracking
   const [reconnecting, setReconnecting] = useState(false);
   const reconnectAttemptsRef = useRef(0);
+  const pipelineDoneRef = useRef(false); // true once pipeline completes or errors — prevents reconnect loops
   const MAX_RECONNECT_RESTARTS = 6; // max times we'll auto-reconnect (audit phases can run 5+ min)
 
   // Pipeline results (used by BriefPanel and ChatPanel)
@@ -370,6 +373,7 @@ function BetLens() {
     // Auto-reconnect is enabled — on reconnect we resume the pipeline
     // from where it left off (completed phases are cached server-side).
     reconnectAttemptsRef.current = 0;
+    pipelineDoneRef.current = false;
     const socket = io(SOCKET_URL, {
       transports: ["websocket", "polling"],
       reconnection: true,
@@ -626,6 +630,7 @@ function BetLens() {
 
     socket.on("processing_complete", (data) => {
       if (data.run_id) setRunId(data.run_id);
+      pipelineDoneRef.current = true;
       setPipelineComplete(true);
       // Merge streaming phaseResults verification into server results as fallback
       // so audit data captured during streaming isn't lost
@@ -649,12 +654,17 @@ function BetLens() {
       setStreamingBrief(""); // Clear streaming text — final brief is in results
       setSaveStatus({ ok: true, message: "Results saved automatically" });
       setTimeout(() => setSaveStatus(null), 5000);
+      // Disable auto-reconnect before disconnecting to prevent the reconnect
+      // engine from re-triggering the pipeline after completion.
+      socket.io.opts.reconnection = false;
       socket.disconnect();
       socketRef.current = null;
     });
 
     socket.on("processing_error", (data) => {
+      pipelineDoneRef.current = true;
       setPipelineError(data.error);
+      socket.io.opts.reconnection = false;
       socket.disconnect();
       socketRef.current = null;
     });
@@ -663,6 +673,8 @@ function BetLens() {
     socket.on("disconnect", (reason) => {
       // Ignore intentional disconnects (we call socket.disconnect() on complete/error)
       if (reason === "io client disconnect") return;
+      // Don't reconnect if the pipeline already finished successfully or errored
+      if (pipelineDoneRef.current) return;
 
       reconnectAttemptsRef.current += 1;
 
@@ -1700,7 +1712,7 @@ function BetLens() {
       )}
 
       {pipelineComplete && pipelineResults && (
-        <ChatPanel key={selectedFile} pipelineResults={pipelineResults} debugMode={debugMode} />
+        <ChatPanel key={selectedFile} pipelineResults={pipelineResults} debugMode={debugMode} agentMode={true} />
       )}
 
     </>
@@ -1709,6 +1721,7 @@ function BetLens() {
 
 const PAGE_TITLES = {
   "/": "BetLens",
+  "/ai-agent": "AI Agent",
   "/past-runs": "History",
   "/devnotes": "Notes",
   "/tests": "Tests",
@@ -1733,6 +1746,7 @@ function AppContent() {
       <main className="App-main">
         <Routes>
           <Route path="/" element={<BetLens />} />
+          <Route path="/ai-agent" element={<AIAgents />} />
           <Route path="/past-runs" element={<PastRuns />} />
           <Route path="/devnotes" element={<DevNotes />} />
           <Route path="/tests" element={<TestRunner />} />

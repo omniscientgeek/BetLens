@@ -33,6 +33,7 @@ from ai_service import (
     call_ai_chat,
     call_ai_chat_stream,
     CHAT_SYSTEM_PROMPT,
+    AGENT_SYSTEM_PROMPT,
     _build_brief_payload,
 )
 from verification_agents import run_verification
@@ -1847,6 +1848,7 @@ async def chat(request: Request):
     conversation_id = data.get("conversation_id") or uuid.uuid4().hex[:12]
     key = _make_key(session_id, conversation_id)
     pipeline_context = data.get("pipeline_context")
+    agent_mode = data.get("agent_mode", False)
 
     # Get or create session (scoped to user)
     if key in _chat_sessions:
@@ -1863,8 +1865,8 @@ async def chat(request: Request):
     if pipeline_context:
         session["pipeline_context"] = pipeline_context
 
-    # Build system prompt with optional pipeline context
-    system_prompt = CHAT_SYSTEM_PROMPT
+    # Build system prompt — agent mode uses the epistemic-honesty prompt
+    system_prompt = AGENT_SYSTEM_PROMPT if agent_mode else CHAT_SYSTEM_PROMPT
     if session.get("pipeline_context"):
         context_str = json.dumps(session["pipeline_context"], separators=(",", ":"))
         # Truncate to 60KB (compact JSON keeps payload small)
@@ -1975,6 +1977,7 @@ async def chat_stream(request: Request):
     conversation_id = data.get("conversation_id") or uuid.uuid4().hex[:12]
     key = _make_key(session_id, conversation_id)
     pipeline_context = data.get("pipeline_context")
+    agent_mode = data.get("agent_mode", False)
 
     # Get or create session
     if key in _chat_sessions:
@@ -1990,8 +1993,8 @@ async def chat_stream(request: Request):
     if pipeline_context:
         session["pipeline_context"] = pipeline_context
 
-    # Build system prompt
-    system_prompt = CHAT_SYSTEM_PROMPT
+    # Build system prompt — agent mode uses the epistemic-honesty prompt
+    system_prompt = AGENT_SYSTEM_PROMPT if agent_mode else CHAT_SYSTEM_PROMPT
     if session.get("pipeline_context"):
         context_str = json.dumps(session["pipeline_context"], separators=(",", ":"))
         if len(context_str) > 61440:

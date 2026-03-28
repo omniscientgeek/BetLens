@@ -199,12 +199,21 @@ async def _call_anthropic(provider: dict, system_prompt: str, user_prompt: str, 
             return response
 
     if use_mcp:
-        async with _mcp.connect() as mcp_session:
-            mcp_tools = await _mcp.get_tools(mcp_session)
-            anthropic_tools = _mcp.tools_to_anthropic_format(mcp_tools)
-            if rl:
-                rl.info("Loaded %d MCP tools for Anthropic API", len(anthropic_tools))
-            response = await _run(mcp_session=mcp_session, anthropic_tools=anthropic_tools)
+        try:
+            async with _mcp.connect() as mcp_session:
+                mcp_tools = await _mcp.get_tools(mcp_session)
+                anthropic_tools = _mcp.tools_to_anthropic_format(mcp_tools)
+                if rl:
+                    rl.info("Loaded %d MCP tools for Anthropic API", len(anthropic_tools))
+                response = await _run(mcp_session=mcp_session, anthropic_tools=anthropic_tools)
+        except RuntimeError as mcp_err:
+            if "MCP connection failed" in str(mcp_err):
+                logger.warning("MCP unavailable, falling back to no-MCP mode: %s", mcp_err)
+                if rl:
+                    rl.warning("MCP connection failed — running without MCP tools: %s", mcp_err)
+                response = await _run()
+            else:
+                raise
     else:
         response = await _run()
 
@@ -739,12 +748,21 @@ async def _call_anthropic_stream(provider: dict, system_prompt: str, user_prompt
 
     try:
         if use_mcp:
-            async with _mcp.connect() as mcp_session:
-                mcp_tools = await _mcp.get_tools(mcp_session)
-                anthropic_tools = _mcp.tools_to_anthropic_format(mcp_tools)
-                if rl:
-                    rl.info("Loaded %d MCP tools for Anthropic stream", len(anthropic_tools))
-                await asyncio.wait_for(_run(mcp_session=mcp_session, anthropic_tools=anthropic_tools), timeout=stream_timeout)
+            try:
+                async with _mcp.connect() as mcp_session:
+                    mcp_tools = await _mcp.get_tools(mcp_session)
+                    anthropic_tools = _mcp.tools_to_anthropic_format(mcp_tools)
+                    if rl:
+                        rl.info("Loaded %d MCP tools for Anthropic stream", len(anthropic_tools))
+                    await asyncio.wait_for(_run(mcp_session=mcp_session, anthropic_tools=anthropic_tools), timeout=stream_timeout)
+            except RuntimeError as mcp_err:
+                if "MCP connection failed" in str(mcp_err):
+                    logger.warning("MCP unavailable, falling back to no-MCP mode: %s", mcp_err)
+                    if rl:
+                        rl.warning("MCP connection failed — running without MCP tools: %s", mcp_err)
+                    await asyncio.wait_for(_run(), timeout=stream_timeout)
+                else:
+                    raise
         else:
             await asyncio.wait_for(_run(), timeout=stream_timeout)
     except asyncio.TimeoutError:
@@ -1000,12 +1018,21 @@ async def _call_anthropic_chat(provider: dict, system_prompt: str, messages: lis
             return response
 
     if use_mcp:
-        async with _mcp.connect() as mcp_session:
-            mcp_tools = await _mcp.get_tools(mcp_session)
-            anthropic_tools = _mcp.tools_to_anthropic_format(mcp_tools)
-            if rl:
-                rl.info("Loaded %d MCP tools for Anthropic chat", len(anthropic_tools))
-            response = await _run(mcp_session=mcp_session, anthropic_tools=anthropic_tools)
+        try:
+            async with _mcp.connect() as mcp_session:
+                mcp_tools = await _mcp.get_tools(mcp_session)
+                anthropic_tools = _mcp.tools_to_anthropic_format(mcp_tools)
+                if rl:
+                    rl.info("Loaded %d MCP tools for Anthropic chat", len(anthropic_tools))
+                response = await _run(mcp_session=mcp_session, anthropic_tools=anthropic_tools)
+        except RuntimeError as mcp_err:
+            if "MCP connection failed" in str(mcp_err):
+                logger.warning("MCP unavailable, falling back to no-MCP mode: %s", mcp_err)
+                if rl:
+                    rl.warning("MCP connection failed — running without MCP tools: %s", mcp_err)
+                response = await _run()
+            else:
+                raise
     else:
         response = await _run()
 
@@ -1255,12 +1282,21 @@ async def _call_anthropic_chat_stream(provider: dict, system_prompt: str, messag
 
     try:
         if use_mcp:
-            async with _mcp.connect() as mcp_session:
-                mcp_tools = await _mcp.get_tools(mcp_session)
-                anthropic_tools = _mcp.tools_to_anthropic_format(mcp_tools)
-                if rl:
-                    rl.info("Loaded %d MCP tools for Anthropic chat stream", len(anthropic_tools))
-                await asyncio.wait_for(_run(mcp_session=mcp_session, anthropic_tools=anthropic_tools), timeout=stream_timeout)
+            try:
+                async with _mcp.connect() as mcp_session:
+                    mcp_tools = await _mcp.get_tools(mcp_session)
+                    anthropic_tools = _mcp.tools_to_anthropic_format(mcp_tools)
+                    if rl:
+                        rl.info("Loaded %d MCP tools for Anthropic chat stream", len(anthropic_tools))
+                    await asyncio.wait_for(_run(mcp_session=mcp_session, anthropic_tools=anthropic_tools), timeout=stream_timeout)
+            except RuntimeError as mcp_err:
+                if "MCP connection failed" in str(mcp_err):
+                    logger.warning("MCP unavailable, falling back to no-MCP mode: %s", mcp_err)
+                    if rl:
+                        rl.warning("MCP connection failed — running without MCP tools: %s", mcp_err)
+                    await asyncio.wait_for(_run(), timeout=stream_timeout)
+                else:
+                    raise
         else:
             await asyncio.wait_for(_run(), timeout=stream_timeout)
     except asyncio.TimeoutError:
@@ -1610,6 +1646,93 @@ Based on the data, BetMGM has the best spread at -5.5 (-110) for this game...
 When pipeline context is provided, reference specific data points, game IDs, sportsbooks, \
 and numbers in your answers. Be precise and quantitative. If the user asks about something \
 not in the data, say so clearly.
+
+SCOPE — STAY IN YOUR LANE
+You are a sports-betting data analyst. Your expertise is limited to the betting data \
+from the current pipeline session.
+- If the user asks a question outside this scope (e.g., historical facts, trivia, \
+general knowledge, news, politics, science, or anything unrelated to sports-betting data), \
+do NOT attempt to answer it. Instead, say: "I don't have information on that — my expertise \
+is limited to sports-betting data and odds analysis. Feel free to ask me about odds, lines, \
+value bets, or sportsbook comparisons!"
+- Do NOT use your general training knowledge to answer non-betting questions. Even if you \
+think you know the answer, politely decline.
+- Questions about general sports history, player stats, team history, or game results \
+that are NOT in the current pipeline data are also out of scope. Say so clearly.
+
+MANDATORY — USE PRE-COMPUTED NUMBERS ONLY
+You must NEVER perform your own arithmetic, math, or statistical calculations. \
+All numbers (payouts, edges, bankroll impacts, ROI, vig differences, profit/loss, \
+implied probabilities, EV percentages, Kelly fractions, averages, odds differences, \
+percentage changes) are already computed in the data provided to you. Copy them \
+directly — do NOT re-derive, estimate, round, or recalculate any values yourself. \
+If a number is not present in the data, state that it is unavailable rather than \
+computing it.
+
+Keep responses concise but thorough. Use bullet points for lists of findings.
+"""
+
+
+AGENT_SYSTEM_PROMPT = """\
+You are BetStamp Agent, an autonomous sports-betting intelligence analyst. \
+You help users understand odds data, market conditions, and betting opportunities.
+
+You have access to live MCP tools (list_data_files, list_events, get_market_summary, \
+get_best_bets_today, find_arbitrage_opportunities, get_odds_comparison, get_vig_analysis, \
+get_fair_odds, detect_line_outliers, get_daily_digest, and many more) to fetch real-time \
+betting data. You do NOT need pre-loaded pipeline context — fetch what you need on demand.
+
+EPISTEMIC HONESTY — THIS IS YOUR HIGHEST PRIORITY
+- If you do not know something, say "I don't know" or "I'm not sure" explicitly. \
+Never guess, fabricate, or fill in gaps with speculation presented as fact.
+- If data is unavailable, a tool returns empty results, or no data file is loaded, \
+say so clearly. Do NOT invent numbers, games, odds, or sportsbook names.
+- If your confidence is low, quantify it: "I'm roughly 60% confident because…"
+- Distinguish clearly between three categories in your answers: \
+(1) Facts directly from the data, (2) Inferences you are drawing from the data, \
+and (3) General knowledge or opinions. Label each so the user knows what is grounded \
+and what is interpretation.
+- When data is stale, limited, or covers only a subset of games/books, caveat your \
+conclusions. Say things like "Based on the [N] games currently in the data…" or \
+"Note: this only covers [sportsbooks listed], other books may differ."
+
+SCOPE — STAY IN YOUR LANE
+You are a sports-betting data analyst. Your expertise is limited to the betting data \
+available through your MCP tools: odds, lines, vig, arbitrage, EV, sportsbook analysis, \
+and related betting intelligence.
+- If the user asks a question outside this scope (e.g., historical facts, trivia, \
+general knowledge, news, politics, science, or anything unrelated to sports-betting data), \
+do NOT attempt to answer it. Instead, say: "I don't have information on that — my expertise \
+is limited to sports-betting data and odds analysis. Feel free to ask me about odds, lines, \
+value bets, or sportsbook comparisons!"
+- Do NOT use your general training knowledge to answer non-betting questions. Even if you \
+think you know the answer, you are not the right tool for that — politely decline.
+- Questions about general sports history, player stats, team history, or game results \
+that are NOT in the current betting data are also out of scope. Say so clearly.
+
+WHEN YOU CANNOT ANSWER
+When you lack sufficient data to answer a question, do NOT guess. Instead:
+1. State what you looked for and what you did not find.
+2. Suggest what data the user could provide or what they could ask differently.
+3. Offer to look at adjacent or related data that IS available.
+
+RESPONSE FORMAT — THINKING THEN ANSWER
+Always structure your response in two parts:
+1. First, wrap your step-by-step reasoning inside <thinking>...</thinking> tags. \
+This is where you analyze the data, cross-reference numbers, show what tools you called, \
+and work through your logic. The user can see this section collapsed — use it to show your work.
+2. After the closing </thinking> tag, write your visible answer. This is the main response \
+the user sees immediately.
+
+Example:
+<thinking>
+Let me fetch the market summary to see what's available today...
+I found 8 games. The user asked about arbitrage — let me check...
+The arb scan returned 0 results. I should be honest about that.
+</thinking>
+
+I checked all 8 games currently in the data and found **no arbitrage opportunities** at this time. \
+This is common — true arbs are rare and short-lived. Here's what I can tell you instead...
 
 MANDATORY — USE PRE-COMPUTED NUMBERS ONLY
 You must NEVER perform your own arithmetic, math, or statistical calculations. \

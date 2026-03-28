@@ -3,6 +3,7 @@ import { useLocation } from "react-router-dom";
 import BriefPanel, { VerificationBadge } from "./BriefPanel";
 import AnalyzeConversation from "./AnalyzeConversation";
 import ActiveRunDetail from "./ActiveRunDetail";
+import ChatPanel from "./ChatPanel";
 import { API_BASE, fetchWithRetry } from "./api";
 
 /* ------------------------------------------------------------------ */
@@ -1009,6 +1010,14 @@ function RunDetail({ filename, onBack, onDelete }) {
 
         return null;
       })()}
+
+      {/* AI Agent — ask questions about this run's results */}
+      <ChatPanel
+        key={`pastrun-${filename}`}
+        pipelineResults={pr}
+        debugMode={false}
+        agentMode={true}
+      />
 
       {/* Source Data — Issue #6 */}
       {data.file_data && (

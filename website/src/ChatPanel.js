@@ -101,22 +101,39 @@ function renderMarkdown(text) {
   return elements;
 }
 
-function WelcomeMessage({ onSuggestionClick }) {
-  const suggestions = [
-    "What are the best value bets right now?",
-    "Are there any arbitrage opportunities?",
-    "Which sportsbooks have the highest vig?",
-    "Explain the outlier lines detected",
-  ];
+const ASSISTANT_SUGGESTIONS = [
+  "What are the best value bets right now?",
+  "Are there any arbitrage opportunities?",
+  "Which sportsbooks have the highest vig?",
+  "Explain the outlier lines detected",
+];
+
+const AGENT_SUGGESTIONS = [
+  "Give me today's daily digest",
+  "Which sportsbooks are sharpest right now?",
+  "Find the best value bets across all sports",
+  "Are there any arbitrage opportunities today?",
+  "What games have the most market disagreement?",
+  "Show me the power rankings for today's games",
+];
+
+function WelcomeMessage({ onSuggestionClick, agentMode }) {
+  const suggestions = agentMode ? AGENT_SUGGESTIONS : ASSISTANT_SUGGESTIONS;
 
   return (
     <div className="chat-welcome">
-      <h4>AI Assistant</h4>
+      <h4>{agentMode ? "BetStamp Agent" : "AI Assistant"}</h4>
       <p>
-        Ask questions about your betting data, odds analysis, or pipeline
-        results. I can help identify value bets, arbitrage opportunities, and
-        more.
+        {agentMode
+          ? "I can fetch live betting data and analyze it for you. I'll always show my reasoning and tell you honestly when I'm unsure or don't have enough data."
+          : "Ask questions about your betting data, odds analysis, or pipeline results. I can help identify value bets, arbitrage opportunities, and more."}
       </p>
+      {agentMode && (
+        <div className="agent-honesty-badge">
+          <span className="agent-honesty-icon">◈</span>
+          <span>This agent will clearly state when it doesn't know something</span>
+        </div>
+      )}
       <div className="chat-suggestions">
         {suggestions.map((s, i) => (
           <button
@@ -226,10 +243,13 @@ function ThinkingBlock({ text, isStreaming, defaultOpen }) {
   );
 }
 
-function ChatPanel({ pipelineResults, debugMode }) {
-  const [messages, setMessages] = useState(() => sessionGet("chatMessages", []));
+function ChatPanel({ pipelineResults, debugMode, agentMode }) {
+  // Use separate session keys for agent vs assistant to keep histories independent
+  const keyPrefix = agentMode ? "agentChatMessages" : "chatMessages";
+  const convKeyPrefix = agentMode ? "agentChatConversationId" : "chatConversationId";
+  const [messages, setMessages] = useState(() => sessionGet(keyPrefix, []));
   const [input, setInput] = useState("");
-  const [conversationId, setConversationId] = useState(() => sessionGet("chatConversationId", null));
+  const [conversationId, setConversationId] = useState(() => sessionGet(convKeyPrefix, null));
   const [isLoading, setIsLoading] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamingText, setStreamingText] = useState("");
@@ -243,9 +263,9 @@ function ChatPanel({ pipelineResults, debugMode }) {
 
   // Persist chat state to sessionStorage (skip during active streaming to avoid perf issues)
   useEffect(() => {
-    if (!isStreaming) { sessionSet("chatMessages", messages); }
-  }, [messages, isStreaming]);
-  useEffect(() => { sessionSet("chatConversationId", conversationId); }, [conversationId]);
+    if (!isStreaming) { sessionSet(keyPrefix, messages); }
+  }, [messages, isStreaming, keyPrefix]);
+  useEffect(() => { sessionSet(convKeyPrefix, conversationId); }, [conversationId, convKeyPrefix]);
 
   // Auto-scroll to bottom on new messages or streaming updates
   useEffect(() => {
@@ -297,8 +317,8 @@ function ChatPanel({ pipelineResults, debugMode }) {
     setStreamingText("");
     setStreamingParsed({ thinking: "", response: "", isThinking: false });
     streamingTextRef.current = "";
-    sessionSet("chatMessages", []);
-    sessionSet("chatConversationId", null);
+    sessionSet(keyPrefix, []);
+    sessionSet(convKeyPrefix, null);
   };
 
   /**
@@ -366,7 +386,8 @@ function ChatPanel({ pipelineResults, debugMode }) {
       const body = {
         message: text,
         conversation_id: conversationId,
-        pipeline_context: pipelineResults,
+        pipeline_context: pipelineResults || undefined,
+        agent_mode: agentMode || false,
       };
 
       const res = await fetch(`${API_BASE}/chat/stream`, {
@@ -435,6 +456,21 @@ function ChatPanel({ pipelineResults, debugMode }) {
       setMessages((prev) => [...prev, assistantMsg]);
     } catch (err) {
       if (err.name !== "AbortError") {
+        // If we accumulated streaming text before the error, preserve it as a message
+        // so the user doesn't lose the response they were reading
+        if (streamingTextRef.current) {
+          const partialRaw = streamingTextRef.current;
+          const partialParsed = parseThinkingFromText(partialRaw);
+          const partialMsg = {
+            role: "assistant",
+            content: partialParsed.response || partialRaw,
+            thinking: partialParsed.thinking || null,
+            timestamp: new Date(),
+            run_id: runId,
+            verification: verification,
+          };
+          setMessages((prev) => [...prev, partialMsg]);
+        }
         setError(err.message);
       }
     } finally {
@@ -473,7 +509,7 @@ function ChatPanel({ pipelineResults, debugMode }) {
     <div className="chat-panel">
       <div className="chat-panel-header">
         <h3>
-          AI Assistant
+          {agentMode ? "BetStamp Agent" : "AI Assistant"}
           {messageCount > 0 && (
             <span className="chat-msg-count">({messageCount})</span>
           )}
@@ -487,7 +523,7 @@ function ChatPanel({ pipelineResults, debugMode }) {
 
       <div className="chat-messages" ref={messagesEndRef}>
         {messages.length === 0 && (
-          <WelcomeMessage onSuggestionClick={handleSuggestionClick} />
+          <WelcomeMessage onSuggestionClick={handleSuggestionClick} agentMode={agentMode} />
         )}
         {messages.map((msg, i) => {
           if (msg.role === "notice") {
@@ -560,7 +596,7 @@ function ChatPanel({ pipelineResults, debugMode }) {
           value={input}
           onChange={handleTextareaChange}
           onKeyDown={handleKeyDown}
-          placeholder="Ask about your betting data..."
+          placeholder={agentMode ? "Ask the agent about live betting data..." : "Ask about your betting data..."}
           rows={1}
         />
         <button
