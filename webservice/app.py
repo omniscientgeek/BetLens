@@ -831,7 +831,7 @@ async def handle_start_processing(sid, data):
     _pipeline_cache[filename] = state
 
 
-DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data"))
+DATA_DIR = os.environ.get("DATA_DIR") or os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data"))
 DEV_NOTES_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "devNotesData"))
 CONVERSATIONS_DIR = r"C:\ProgramData\DesktopDevService\Conversations"
 
@@ -905,7 +905,7 @@ async def upload_file(file: UploadFile = File(...)):
 # Save pipeline results
 # ---------------------------------------------------------------------------
 
-SAVED_RESULTS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "saved_results"))
+SAVED_RESULTS_DIR = os.environ.get("SAVED_RESULTS_DIR") or os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "saved_results"))
 
 
 @app.post("/api/save-results")
@@ -985,6 +985,16 @@ async def list_saved_results():
                 pr.get("brief", {}).get("verification", {}).get("overall_verdict")
                 or pr.get("audit_brief", {}).get("overall_verdict")
             )
+            # Compute total pipeline runtime by summing phase + verification times
+            total_secs = 0.0
+            for phase_key in ("analyze", "brief"):
+                phase = pr.get(phase_key, {})
+                ai = phase.get("ai_meta") or {}
+                total_secs += ai.get("elapsed_seconds", 0) or 0
+                verif = phase.get("verification") or {}
+                total_secs += verif.get("elapsed_seconds", 0) or 0
+            if total_secs > 0:
+                meta["total_runtime_seconds"] = round(total_secs, 1)
         except Exception:
             pass
         runs.append(meta)
@@ -1012,7 +1022,20 @@ async def get_saved_result(filename: str):
     import aiofiles
     async with aiofiles.open(filepath, "r", encoding="utf-8") as f:
         content = await f.read()
-    return json.loads(content)
+
+    if not content or not content.strip():
+        return JSONResponse(
+            {"error": "Saved result file is empty — the pipeline may have failed before writing results"},
+            status_code=422,
+        )
+
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError as exc:
+        return JSONResponse(
+            {"error": f"Saved result file contains invalid JSON: {exc}"},
+            status_code=422,
+        )
 
 
 @app.get("/api/active-runs")

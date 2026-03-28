@@ -38,6 +38,7 @@ export default function ActiveRunDetail({ filename, onBack, backLabel }) {
       if (res.status === 404) {
         // Run no longer active — it completed and was evicted from cache
         setError("Run is no longer active. It may have completed — check the History list.");
+        setLoading(false);
         clearInterval(pollRef.current);
         return;
       }

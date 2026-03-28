@@ -2,6 +2,8 @@ import React, { useState, useEffect } from "react";
 import { API_BASE } from "./api";
 const PROJECT_ID = 10;
 
+const isRailway = window.location.hostname.endsWith(".railway.app");
+
 function DevNotes() {
   const [conversations, setConversations] = useState([]);
   const [notes, setNotes] = useState([]);
@@ -145,9 +147,10 @@ function DevNotes() {
         <button
           className="generate-btn"
           onClick={handleGenerate}
-          disabled={loading}
+          disabled={loading || isRailway}
+          title={isRailway ? "Not available in production" : undefined}
         >
-          {loading ? "Generating..." : "Generate"}
+          {loading ? "Generating..." : isRailway ? "Unavailable" : "Generate"}
         </button>
 
         <div className="filter-group">

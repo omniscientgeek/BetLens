@@ -183,6 +183,11 @@ function RunList({ runs, activeRuns, onSelect, loading, error }) {
                     <span className="pr-list-item-date">
                       {meta.date ? `${meta.date} at ${meta.time}` : run.filename}
                     </span>
+                    {run.total_runtime_seconds != null && (
+                      <span className="pr-list-item-runtime">
+                        ⏱ {formatElapsed(Math.round(run.total_runtime_seconds))}
+                      </span>
+                    )}
                   </div>
                 </div>
                 <div className="pr-list-item-verdicts">
@@ -223,9 +228,12 @@ function RunDetail({ filename, onBack }) {
     setError(null);
 
     fetchWithRetry(`${API_BASE}/saved-results/${encodeURIComponent(filename)}`)
-      .then((res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return res.json();
+      .then(async (res) => {
+        const json = await res.json().catch(() => null);
+        if (!res.ok) {
+          throw new Error(json?.error || `HTTP ${res.status}`);
+        }
+        return json;
       })
       .then((json) => {
         if (!cancelled) setData(json);
@@ -268,6 +276,14 @@ function RunDetail({ filename, onBack }) {
     ? meta.dateTime.toLocaleString()
     : filename;
 
+  // Compute total pipeline runtime from phase + verification elapsed times
+  let totalRuntime = 0;
+  for (const phaseKey of ["analyze", "brief"]) {
+    const phase = pr[phaseKey] || {};
+    totalRuntime += (phase.ai_meta?.elapsed_seconds || 0);
+    totalRuntime += (phase.verification?.elapsed_seconds || 0);
+  }
+
   return (
     <div className="pr-detail">
       {/* Header bar */}
@@ -275,7 +291,12 @@ function RunDetail({ filename, onBack }) {
         <button className="pr-back-btn" onClick={onBack}>← Back to History</button>
         <div className="pr-detail-meta">
           <span className="pr-detail-source">{data.source_file || filename}</span>
-          <span className="pr-detail-date">Saved {savedAt}</span>
+          <span className="pr-detail-date">
+            Saved {savedAt}
+            {totalRuntime > 0 && (
+              <span className="pr-detail-runtime"> · ⏱ {formatElapsed(Math.round(totalRuntime))}</span>
+            )}
+          </span>
         </div>
       </div>
 

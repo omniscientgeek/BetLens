@@ -264,3 +264,13 @@ _Thu, Mar 26, 2026 at 8:18 PM_
 _Fri, Mar 27, 2026 at 11:42 AM_
 
 Long term the data files should be cleaned up to minimize the disk space usage.
+
+## Crunch Time!
+_Sat, Mar 28, 2026 at 01:13 PM_
+
+The code has been deployed to the railway. The AI chat is currently not working. The data processing is taking a long time to complete. The major time impact right now is because of the quality of the brief. This requires the Audit to be run multiple times before it passes (3-4 times) before it passes. I have some display issues: the audit only shows the last results, and the process to fix the output is not displayed.
+
+## Major refactor last night
+_Sat, Mar 28, 2026 at 01:20 PM_
+
+Last night, I was having major issues with the code's accuracy. I decided to refactor the code. I moved all the arithmetic operations to the first phase. Then I created a Agent to thoroughly review the data. Once the agent was completed, I had three audit agents run to identify any issues. If the agents found any errors, the results were corrected, and the audit was rerun. This would keep repeating until the audit found no issues. The results would be to summarize the data. Once the summarize agent is done, the same agent audits will be rerun and will only complete once all agents are done. This has increased processing time from 4 minutes to 30-40 minutes. I have updated the system and user prompts to increase the reliability. Currently, the analysis agent is passing all the audit agents. Once in a while, one or two errors are identified. The summary is another store. I have currently been focusing on the analysis agent. I am really happy with the current approach. It definitely needs to be optimized.

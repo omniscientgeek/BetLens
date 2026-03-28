@@ -3291,6 +3291,17 @@
   color: var(--text-secondary);
 }
 
+.pr-list-item-runtime {
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+  opacity: 0.8;
+  margin-left: 0.5rem;
+}
+
+.pr-detail-runtime {
+  opacity: 0.8;
+}
+
 .pr-list-item-verdicts {
   display: flex;
   gap: var(--space-md);

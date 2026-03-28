@@ -19,8 +19,8 @@ from logging.handlers import RotatingFileHandler
 
 _CONFIGURED = False
 
-LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
-RUNS_LOG_DIR = os.path.join(LOG_DIR, "runs")
+LOG_DIR = os.environ.get("LOG_DIR") or os.path.join(os.path.dirname(__file__), "logs")
+RUNS_LOG_DIR = os.environ.get("RUNS_LOG_DIR") or os.path.join(LOG_DIR, "runs")
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
 
