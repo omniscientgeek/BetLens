@@ -69,11 +69,12 @@ function DevNotes() {
     setGenerated(false);
 
     try {
-      // Fetch conversations, git stats, and devnotes in parallel
-      const [convRes, gitRes, notesRes] = await Promise.all([
+      // Fetch conversations, git stats, devnotes, and generate combined MD in parallel
+      const [convRes, gitRes, notesRes, mdRes] = await Promise.all([
         fetch(`${API_BASE}/conversations?project_id=${PROJECT_ID}`),
         fetch(`${API_BASE}/git-stats`),
         fetch(`${API_BASE}/notes`),
+        fetch(`${API_BASE}/generate-devnotes-md?project_id=${PROJECT_ID}`, { method: "POST" }),
       ]);
 
       if (!convRes.ok) {
@@ -91,6 +92,10 @@ function DevNotes() {
       if (notesRes.ok) {
         const notesData = await notesRes.json();
         setNotes(notesData.notes || []);
+      }
+
+      if (!mdRes.ok) {
+        console.warn("Failed to generate combined MD file");
       }
 
       setGenerated(true);

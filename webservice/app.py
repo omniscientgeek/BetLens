@@ -1308,15 +1308,13 @@ async def list_conversations(project_id: int = Query(...)):
 
     result = {"conversations": conversations, "count": len(conversations)}
 
-    # Persist to a JSON file so it can be auto-loaded later
+    # Persist to a JSON file so it can be auto-loaded later (cache only, not committed)
     try:
         os.makedirs(DEV_NOTES_DIR, exist_ok=True)
         save_path = os.path.join(DEV_NOTES_DIR, f"devnotes_project_{project_id}.json")
         import aiofiles
         async with aiofiles.open(save_path, "w", encoding="utf-8") as f:
             await f.write(json.dumps(result, indent=2))
-        # Auto-commit the saved devnotes data
-        await _auto_commit_devnotes(f"Auto-sync devnotes for project {project_id}")
     except Exception:
         pass  # Don't fail the response if saving fails
 
@@ -1408,6 +1406,111 @@ async def get_notes():
     return {"notes": notes, "count": len(notes)}
 
 
+@app.post("/api/generate-devnotes-md")
+async def generate_devnotes_md(project_id: int = Query(default=10)):
+    """Generate a combined Markdown file with conversations and notes in sequential order, then commit it."""
+    # Fetch conversations
+    project_guid = PROJECT_GUID_MAP.get(project_id)
+    if not project_guid:
+        return JSONResponse({"error": f"Unknown project_id: {project_id}"}, status_code=404)
+
+    def _get_conversations():
+        conversations = []
+        if os.path.isdir(CONVERSATIONS_DIR):
+            for fname in os.listdir(CONVERSATIONS_DIR):
+                if not fname.endswith(".txt"):
+                    continue
+                filepath = os.path.join(CONVERSATIONS_DIR, fname)
+                parsed = _parse_conversation_file(filepath)
+                if parsed and parsed["project"] == project_guid:
+                    conversations.append(parsed)
+        return conversations
+
+    conversations = await asyncio.to_thread(_get_conversations)
+    notes = await asyncio.to_thread(_parse_notes_file)
+
+    # Build combined items with a common sort date
+    items = []
+    for c in conversations:
+        sort_date = (c["messages"][0]["timestamp"] if c.get("messages") else c.get("created", ""))
+        items.append({"type": "conversation", "sort_date": sort_date, "data": c})
+    for n in notes:
+        sort_date = (n.get("created") or "").replace("T", " ")
+        items.append({"type": "note", "sort_date": sort_date, "data": n})
+
+    # Sort chronologically (oldest first)
+    items.sort(key=lambda x: x["sort_date"])
+
+    # Build Markdown
+    lines = []
+    lines.append("# Dev Notes & Conversations")
+    lines.append("")
+    lines.append(f"_Generated {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_")
+    lines.append("")
+    lines.append(f"**{len(conversations)}** conversations · **{len(notes)}** notes · **{len(items)}** total items")
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+
+    for item in items:
+        if item["type"] == "conversation":
+            c = item["data"]
+            lines.append(f"## 💬 {c['title'] or 'Untitled Conversation'}")
+            lines.append("")
+            meta_parts = []
+            if c.get("created"):
+                meta_parts.append(f"**Created:** {c['created']}")
+            if c.get("status"):
+                meta_parts.append(f"**Status:** {c['status']}")
+            if c.get("description"):
+                meta_parts.append(f"**Description:** {c['description']}")
+            meta_parts.append(f"**Messages:** {len(c.get('messages', []))}")
+            lines.append(" · ".join(meta_parts))
+            lines.append("")
+            for msg in c.get("messages", []):
+                role_label = "🧑 User" if msg["role"] == "user" else "🤖 Assistant"
+                lines.append(f"### {role_label}")
+                lines.append(f"*{msg['timestamp']}*")
+                lines.append("")
+                lines.append(msg["content"])
+                lines.append("")
+            lines.append("---")
+            lines.append("")
+        else:
+            n = item["data"]
+            lines.append(f"## 📝 {n['title']}")
+            lines.append("")
+            if n.get("timestamp"):
+                lines.append(f"_{n['timestamp']}_")
+                lines.append("")
+            lines.append(n.get("content", ""))
+            lines.append("")
+            lines.append("---")
+            lines.append("")
+
+    md_content = "\n".join(lines)
+
+    # Write to devNotesData/
+    os.makedirs(DEV_NOTES_DIR, exist_ok=True)
+    md_filename = f"devnotes_combined_project_{project_id}.md"
+    md_path = os.path.join(DEV_NOTES_DIR, md_filename)
+
+    import aiofiles
+    async with aiofiles.open(md_path, "w", encoding="utf-8") as f:
+        await f.write(md_content)
+
+    # Auto-commit
+    await _auto_commit_devnotes(f"Auto-sync combined devnotes MD for project {project_id}")
+
+    return {
+        "filename": md_filename,
+        "path": md_path,
+        "items_count": len(items),
+        "conversations_count": len(conversations),
+        "notes_count": len(notes),
+    }
+
+
 REPO_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 GIT_STATS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "devNotesData"))
 
@@ -1417,15 +1520,16 @@ AUTOSYNC_EMAIL = "autosync@betstamp.app"
 
 
 async def _auto_commit_devnotes(message: str = "Auto-sync devNotesData"):
-    """Stage and commit only devNotesData/ files using the AutoSync identity.
+    """Stage and commit only the combined MD file in devNotesData/ using the AutoSync identity.
 
     This ensures auto-generated data commits appear as a distinct contributor
     separate from both Claude and the user in git contribution stats.
+    Only the combined .md file is committed — JSON cache files are excluded.
     """
     try:
-        # Stage only devNotesData/ files
+        # Stage only .md files in devNotesData/
         add_proc = await asyncio.create_subprocess_exec(
-            "git", "add", "devNotesData/",
+            "git", "add", "devNotesData/*.md",
             cwd=REPO_DIR,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -1436,7 +1540,7 @@ async def _auto_commit_devnotes(message: str = "Auto-sync devNotesData"):
 
         # Check if there are staged changes to commit
         diff_proc = await asyncio.create_subprocess_exec(
-            "git", "diff", "--cached", "--quiet", "devNotesData/",
+            "git", "diff", "--cached", "--quiet",
             cwd=REPO_DIR,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -1451,14 +1555,14 @@ async def _auto_commit_devnotes(message: str = "Auto-sync devNotesData"):
             "git", "commit",
             "--author", f"{AUTOSYNC_AUTHOR} <{AUTOSYNC_EMAIL}>",
             "-m", message,
-            "--", "devNotesData/",
+            "--", "devNotesData/*.md",
             cwd=REPO_DIR,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
         stdout, stderr = await commit_proc.communicate()
         if commit_proc.returncode == 0:
-            logger.info("AutoSync committed devNotesData: %s", stdout.decode().strip())
+            logger.info("AutoSync committed devNotesData MD: %s", stdout.decode().strip())
         else:
             logger.warning("AutoSync commit failed: %s", stderr.decode().strip())
     except Exception as e:

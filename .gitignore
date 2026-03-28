@@ -22,5 +22,8 @@ logs/
 .DS_Store
 Thumbs.db
 
+# DevNotes JSON cache (only .md files are committed)
+devNotesData/*.json
+
 # Private docs
 Requirements.pdf
