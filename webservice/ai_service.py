@@ -24,6 +24,23 @@ from mcp_client import mcp_client as _mcp
 
 logger = logging.getLogger(__name__)
 
+
+def _unwrap_exception_group(exc: Exception) -> Exception:
+    """Unwrap anyio/asyncio ExceptionGroup to get the real root-cause error.
+
+    The MCP SDK's stdio_client uses anyio TaskGroups internally.  When a
+    sub-task fails, the error is wrapped in an ``ExceptionGroup`` (Python 3.11+)
+    or ``BaseExceptionGroup`` which surfaces as the unhelpful message
+    "unhandled errors in a TaskGroup (1 sub-exception)".
+
+    This helper recursively unwraps single-exception groups so the caller
+    sees the actual underlying error (e.g. ``ConnectionResetError``,
+    ``TimeoutError``, ``anthropic.APIError``, etc.).
+    """
+    while isinstance(exc, BaseExceptionGroup) and len(exc.exceptions) == 1:
+        exc = exc.exceptions[0]
+    return exc
+
 # Context variable for per-run logger — set by call_ai/call_ai_stream/call_ai_chat
 # so that low-level provider functions (_call_claude_sdk etc.) can log to the run file
 _current_run_logger: contextvars.ContextVar[Optional[logging.Logger]] = contextvars.ContextVar(
@@ -872,8 +889,9 @@ async def call_ai_stream(system_prompt: str, user_prompt: str, on_chunk=None, on
                 if run_logger:
                     run_logger.info(success_msg, *success_args)
                 return result
-            except Exception as exc:
-                msg = f"{provider['id']} attempt {attempt}: {exc}"
+            except BaseException as exc:
+                exc = _unwrap_exception_group(exc)
+                msg = f"{provider['id']} attempt {attempt}: {type(exc).__name__}: {exc}"
                 logger.warning(msg)
                 if run_logger:
                     run_logger.warning(msg)
@@ -1397,8 +1415,9 @@ async def call_ai_chat_stream(messages: list[dict], system_prompt: str, on_chunk
                 if run_logger:
                     run_logger.info(success_msg, *success_args)
                 return result
-            except Exception as exc:
-                msg = f"{provider['id']} attempt {attempt}: {exc}"
+            except BaseException as exc:
+                exc = _unwrap_exception_group(exc)
+                msg = f"{provider['id']} attempt {attempt}: {type(exc).__name__}: {exc}"
                 logger.warning(msg)
                 if run_logger:
                     run_logger.warning(msg)
@@ -1474,8 +1493,9 @@ async def call_ai(system_prompt: str, user_prompt: str, provider_id: Optional[st
                 if run_logger:
                     run_logger.info(success_msg, *success_args)
                 return result
-            except Exception as exc:
-                msg = f"{provider['id']} attempt {attempt}: {exc}"
+            except BaseException as exc:
+                exc = _unwrap_exception_group(exc)
+                msg = f"{provider['id']} attempt {attempt}: {type(exc).__name__}: {exc}"
                 logger.warning(msg)
                 if run_logger:
                     run_logger.warning(msg)
@@ -1542,8 +1562,9 @@ async def call_ai_chat(messages: list[dict], system_prompt: str, provider_id: Op
                 if run_logger:
                     run_logger.info(success_msg, *success_args)
                 return result
-            except Exception as exc:
-                msg = f"{provider['id']} attempt {attempt}: {exc}"
+            except BaseException as exc:
+                exc = _unwrap_exception_group(exc)
+                msg = f"{provider['id']} attempt {attempt}: {type(exc).__name__}: {exc}"
                 logger.warning(msg)
                 if run_logger:
                     run_logger.warning(msg)

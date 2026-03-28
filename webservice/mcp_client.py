@@ -66,11 +66,18 @@ class McpClient:
 
         logger.info("Connecting to MCP server: %s", self._server_script)
 
-        async with stdio_client(server_params) as (read_stream, write_stream):
-            async with ClientSession(read_stream, write_stream) as session:
-                await session.initialize()
-                logger.info("MCP session initialized")
-                yield session
+        try:
+            async with stdio_client(server_params) as (read_stream, write_stream):
+                async with ClientSession(read_stream, write_stream) as session:
+                    await session.initialize()
+                    logger.info("MCP session initialized")
+                    yield session
+        except BaseExceptionGroup as eg:
+            # anyio TaskGroup wraps subprocess/connection errors in an
+            # ExceptionGroup — unwrap to surface the real cause.
+            real = eg.exceptions[0] if len(eg.exceptions) == 1 else eg
+            logger.error("MCP connection failed (unwrapped): %s: %s", type(real).__name__, real)
+            raise RuntimeError(f"MCP connection failed: {type(real).__name__}: {real}") from real
 
     async def get_tools(self, session: ClientSession) -> list:
         """Fetch tool definitions from the MCP server.
