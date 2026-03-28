@@ -1,0 +1,461 @@
+import React, { useState, useEffect, useCallback, useRef } from "react";
+import BriefPanel, { VerificationBadge } from "./BriefPanel";
+import AnalyzeConversation from "./AnalyzeConversation";
+import { API_BASE, fetchWithRetry } from "./api";
+
+/* ------------------------------------------------------------------ */
+/*  Verdict badge helper                                               */
+/* ------------------------------------------------------------------ */
+const VERDICT_CONFIG = {
+  pass: { icon: "\u2705", label: "Pass", cls: "verdict--pass" },
+  warn: { icon: "\u26A0\uFE0F", label: "Warn", cls: "verdict--warn" },
+  fail: { icon: "\u274C", label: "Fail", cls: "verdict--fail" },
+  error: { icon: "\u2753", label: "Error", cls: "verdict--error" },
+};
+
+function VerdictPill({ verdict }) {
+  const cfg = VERDICT_CONFIG[verdict] || { icon: "\u2022", label: verdict || "N/A", cls: "" };
+  return (
+    <span className={`pr-verdict-pill ${cfg.cls}`}>
+      <span className="pr-verdict-icon">{cfg.icon}</span>
+      {cfg.label}
+    </span>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Phase progress labels                                              */
+/* ------------------------------------------------------------------ */
+const PHASE_LABELS = {
+  detect: "Detect",
+  analyze: "Analyze",
+  audit_analyze: "Audit Analyze",
+  brief: "Brief",
+  audit_brief: "Audit Brief",
+  done: "Complete",
+};
+
+/* ------------------------------------------------------------------ */
+/*  Parse metadata from filename + optional saved_at                   */
+/* ------------------------------------------------------------------ */
+function parseRunMeta(filename) {
+  // betlens_results_2026-03-28_013024.json  or  sample_2026-03-28_013024.json
+  const match = filename.match(/(\d{4}-\d{2}-\d{2})_(\d{2})(\d{2})(\d{2})\.json$/);
+  if (match) {
+    const [, date, hh, mm, ss] = match;
+    return {
+      date,
+      time: `${hh}:${mm}:${ss}`,
+      dateTime: new Date(`${date}T${hh}:${mm}:${ss}`),
+    };
+  }
+  return { date: null, time: null, dateTime: null };
+}
+
+/* ------------------------------------------------------------------ */
+/*  Format elapsed seconds as m:ss or h:mm:ss                         */
+/* ------------------------------------------------------------------ */
+function formatElapsed(totalSec) {
+  const hrs = Math.floor(totalSec / 3600);
+  const mins = Math.floor((totalSec % 3600) / 60);
+  const secs = totalSec % 60;
+  if (hrs > 0) return `${hrs}:${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+  return `${mins}:${String(secs).padStart(2, "0")}`;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Active runs section                                                */
+/* ------------------------------------------------------------------ */
+function ActiveRuns({ activeRuns }) {
+  if (!activeRuns || activeRuns.length === 0) return null;
+
+  return (
+    <div className="pr-active-section">
+      <div className="pr-active-header">
+        <span className="pr-active-header-icon">
+          <span className="pr-active-pulse" />
+        </span>
+        <h3>Running Now</h3>
+        <span className="pr-active-count">{activeRuns.length}</span>
+      </div>
+      <div className="pr-list">
+        {activeRuns.map((run) => (
+          <div key={run.run_id} className={`pr-list-item pr-list-item--active pr-list-item--${run.status}`}>
+            <div className="pr-list-item-main">
+              <span className="pr-list-item-icon">
+                {run.status === "running" ? (
+                  <span className="pr-active-spinner" />
+                ) : run.status === "complete" ? (
+                  "\u2705"
+                ) : (
+                  "\u274C"
+                )}
+              </span>
+              <div className="pr-list-item-info">
+                <span className="pr-list-item-source">{run.filename}</span>
+                <span className="pr-list-item-date">
+                  {run.status === "running"
+                    ? `${PHASE_LABELS[run.current_phase] || run.current_phase} (${run.phase_index + 1}/${run.total_phases})`
+                    : run.status === "complete"
+                    ? "Completed — saving results..."
+                    : `Error: ${run.error || "Unknown"}`}
+                </span>
+              </div>
+            </div>
+            <div className="pr-list-item-verdicts">
+              {/* Mini pipeline stepper */}
+              <div className="pr-active-stepper">
+                {Array.from({ length: run.total_phases }, (_, i) => {
+                  let stepCls = "pr-active-step--pending";
+                  if (i < run.phase_index) stepCls = "pr-active-step--complete";
+                  else if (i === run.phase_index && run.status === "running") stepCls = "pr-active-step--active";
+                  return <div key={i} className={`pr-active-step ${stepCls}`} />;
+                })}
+              </div>
+              <span className="pr-active-timer">{formatElapsed(run.elapsed_seconds)}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  List view                                                          */
+/* ------------------------------------------------------------------ */
+function RunList({ runs, activeRuns, onSelect, loading, error }) {
+  if (loading) {
+    return (
+      <div className="pr-loading">
+        <span className="pr-loading-spinner" />
+        Loading past runs...
+      </div>
+    );
+  }
+
+  if (error) {
+    return <div className="pr-error">{error}</div>;
+  }
+
+  const hasContent = runs.length > 0 || (activeRuns && activeRuns.length > 0);
+
+  if (!hasContent) {
+    return (
+      <div className="pr-empty">
+        <span className="pr-empty-icon">📭</span>
+        <p>No saved runs yet.</p>
+        <p className="pr-empty-hint">
+          Run an analysis on the BetLens page — results are saved automatically when complete.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <ActiveRuns activeRuns={activeRuns} />
+      {runs.length > 0 && (
+        <div className="pr-list">
+          {runs.map((run) => {
+            const meta = parseRunMeta(run.filename);
+            return (
+              <button
+                key={run.filename}
+                className="pr-list-item"
+                onClick={() => onSelect(run.filename)}
+              >
+                <div className="pr-list-item-main">
+                  <span className="pr-list-item-icon">📊</span>
+                  <div className="pr-list-item-info">
+                    <span className="pr-list-item-source">
+                      {run.source_file || run.filename}
+                    </span>
+                    <span className="pr-list-item-date">
+                      {meta.date ? `${meta.date} at ${meta.time}` : run.filename}
+                    </span>
+                  </div>
+                </div>
+                <div className="pr-list-item-verdicts">
+                  {run.analyze_verdict && (
+                    <div className="pr-list-item-verdict">
+                      <span className="pr-verdict-label">Analyze</span>
+                      <VerdictPill verdict={run.analyze_verdict} />
+                    </div>
+                  )}
+                  {run.brief_verdict && (
+                    <div className="pr-list-item-verdict">
+                      <span className="pr-verdict-label">Brief</span>
+                      <VerdictPill verdict={run.brief_verdict} />
+                    </div>
+                  )}
+                </div>
+                <span className="pr-list-item-arrow">›</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Detail view — reuses BriefPanel, AnalyzeConversation, etc.         */
+/* ------------------------------------------------------------------ */
+function RunDetail({ filename, onBack }) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+
+    fetchWithRetry(`${API_BASE}/saved-results/${encodeURIComponent(filename)}`)
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      })
+      .then((json) => {
+        if (!cancelled) setData(json);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err.message);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+
+    return () => { cancelled = true; };
+  }, [filename]);
+
+  if (loading) {
+    return (
+      <div className="pr-loading">
+        <span className="pr-loading-spinner" />
+        Loading run details...
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div>
+        <button className="pr-back-btn" onClick={onBack}>← Back to History</button>
+        <div className="pr-error">Failed to load run: {error}</div>
+      </div>
+    );
+  }
+
+  if (!data) return null;
+
+  const pr = data.pipeline_results || {};
+  const meta = parseRunMeta(filename);
+  const savedAt = data.saved_at
+    ? new Date(data.saved_at).toLocaleString()
+    : meta.dateTime
+    ? meta.dateTime.toLocaleString()
+    : filename;
+
+  return (
+    <div className="pr-detail">
+      {/* Header bar */}
+      <div className="pr-detail-header">
+        <button className="pr-back-btn" onClick={onBack}>← Back to History</button>
+        <div className="pr-detail-meta">
+          <span className="pr-detail-source">{data.source_file || filename}</span>
+          <span className="pr-detail-date">Saved {savedAt}</span>
+        </div>
+      </div>
+
+      {/* Analyze Conversation */}
+      {pr.analyze && (
+        <AnalyzeConversation
+          analyzeResult={pr.analyze}
+          streaming={false}
+          defaultExpanded={false}
+          title="Analysis Conversation"
+        />
+      )}
+
+      {/* Audit Analyze */}
+      {pr.analyze?.verification && (
+        <div className="verification-card">
+          <div className="verification-card-header">
+            <span className="verification-card-icon">🛡</span>
+            <h3>Audit Analyze</h3>
+            {pr.analyze.verification.fix_attempts > 0 && (
+              <span className="fix-badge fix-badge--complete">
+                {pr.analyze.verification.overall_verdict === "pass"
+                  ? `Fixed in ${pr.analyze.verification.fix_attempts} attempt${pr.analyze.verification.fix_attempts > 1 ? "s" : ""}`
+                  : `${pr.analyze.verification.fix_attempts} fix attempt${pr.analyze.verification.fix_attempts > 1 ? "s" : ""} (${pr.analyze.verification.overall_verdict})`}
+              </span>
+            )}
+          </div>
+          <VerificationBadge verification={pr.analyze.verification} streaming={false} />
+          {pr.analyze.verification.fix_history?.length > 1 && (
+            <details className="fix-history">
+              <summary>Fix History ({pr.analyze.verification.fix_history.length} attempts)</summary>
+              <div className="fix-history-list">
+                {pr.analyze.verification.fix_history.map((h, idx) => (
+                  <div key={idx} className={`fix-history-item fix-history-item--${h.verdict}`}>
+                    <span className="fix-history-attempt">Attempt {h.attempt}</span>
+                    <span className={`fix-history-verdict verdict--${h.verdict}`}>{h.verdict}</span>
+                    <span className="fix-history-issues">
+                      {Object.values(h.verification?.agents || {}).reduce(
+                        (sum, a) => sum + (a.issues?.length || 0), 0
+                      )} issues
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </details>
+          )}
+        </div>
+      )}
+
+      {/* Brief Panel */}
+      {pr.brief && !pr.brief.error && (
+        <BriefPanel briefResult={pr.brief} isInterim={false} />
+      )}
+      {pr.brief?.error && (
+        <div className="error">Brief generation failed: {pr.brief.error}</div>
+      )}
+
+      {/* Audit Brief */}
+      {pr.brief?.verification && (
+        <div className="verification-card">
+          <div className="verification-card-header">
+            <span className="verification-card-icon">🛡</span>
+            <h3>Audit Brief</h3>
+            {pr.brief.verification.fix_attempts > 0 && (
+              <span className="fix-badge fix-badge--complete">
+                {pr.brief.verification.overall_verdict === "pass"
+                  ? `Fixed in ${pr.brief.verification.fix_attempts} attempt${pr.brief.verification.fix_attempts > 1 ? "s" : ""}`
+                  : `${pr.brief.verification.fix_attempts} fix attempt${pr.brief.verification.fix_attempts > 1 ? "s" : ""} (${pr.brief.verification.overall_verdict})`}
+              </span>
+            )}
+          </div>
+          <VerificationBadge verification={pr.brief.verification} streaming={false} />
+          {pr.brief.verification.fix_history?.length > 1 && (
+            <details className="fix-history">
+              <summary>Fix History ({pr.brief.verification.fix_history.length} attempts)</summary>
+              <div className="fix-history-list">
+                {pr.brief.verification.fix_history.map((h, idx) => (
+                  <div key={idx} className={`fix-history-item fix-history-item--${h.verdict}`}>
+                    <span className="fix-history-attempt">Attempt {h.attempt}</span>
+                    <span className={`fix-history-verdict verdict--${h.verdict}`}>{h.verdict}</span>
+                    <span className="fix-history-issues">
+                      {Object.values(h.verification?.agents || {}).reduce(
+                        (sum, a) => sum + (a.issues?.length || 0), 0
+                      )} issues
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </details>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Main PastRuns page                                                 */
+/* ------------------------------------------------------------------ */
+export default function PastRuns() {
+  const [runs, setRuns] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [selectedFile, setSelectedFile] = useState(null);
+  const [activeRuns, setActiveRuns] = useState([]);
+  const pollRef = useRef(null);
+  const activeRunsRef = useRef(activeRuns);
+  activeRunsRef.current = activeRuns;
+
+  const loadRuns = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetchWithRetry(`${API_BASE}/saved-results`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+
+      // Use pre-built metadata from the API if available, fallback to filenames
+      if (data.runs?.length) {
+        setRuns(data.runs);
+      } else {
+        setRuns((data.files || []).map((f) => ({ filename: f })));
+      }
+    } catch (err) {
+      setError("Failed to load saved runs: " + err.message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const pollActiveRuns = useCallback(async () => {
+    try {
+      const res = await fetchWithRetry(`${API_BASE}/active-runs`);
+      if (!res.ok) return;
+      const data = await res.json();
+      const prev = activeRunsRef.current;
+      const current = data.runs || [];
+      setActiveRuns(current);
+
+      // If a run just completed, refresh the saved runs list
+      const prevRunning = prev.filter((r) => r.status === "running");
+      const currentRunning = current.filter((r) => r.status === "running");
+      if (prevRunning.length > 0 && currentRunning.length < prevRunning.length) {
+        // A run just finished — reload saved runs after a brief delay for the auto-save
+        setTimeout(() => loadRuns(), 1500);
+      }
+    } catch {
+      // Silently ignore polling errors
+    }
+  }, [loadRuns]);
+
+  useEffect(() => {
+    loadRuns();
+    pollActiveRuns();
+  }, [loadRuns, pollActiveRuns]);
+
+  // Poll active runs every 3 seconds
+  useEffect(() => {
+    pollRef.current = setInterval(pollActiveRuns, 3000);
+    return () => clearInterval(pollRef.current);
+  }, [pollActiveRuns]);
+
+  if (selectedFile) {
+    return (
+      <RunDetail
+        filename={selectedFile}
+        onBack={() => setSelectedFile(null)}
+      />
+    );
+  }
+
+  return (
+    <div className="pr-page">
+      <div className="pr-page-header">
+        <h2>Past Runs</h2>
+        <p className="pr-page-subtitle">
+          Browse and review previous BetLens analysis results.
+          {activeRuns.some((r) => r.status === "running") && (
+            <span className="pr-page-subtitle-live"> Active runs are shown in real-time.</span>
+          )}
+        </p>
+      </div>
+      <RunList
+        runs={runs}
+        activeRuns={activeRuns.filter((r) => r.status === "running")}
+        onSelect={setSelectedFile}
+        loading={loading}
+        error={error}
+      />
+    </div>
+  );
+}
