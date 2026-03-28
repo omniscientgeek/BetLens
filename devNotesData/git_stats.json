@@ -1,12 +1,625 @@
 {
   "commits": [
     {
+      "hash": "0f83b677",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 12:16:06 -0600",
+      "subject": "Show full audit timeline with all agent results on History and Active Run pages",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "453ee21c",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 12:15:26 -0600",
+      "subject": "Add real-time MCP tool call streaming for audit verification agents",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "1045fabd",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 12:13:01 -0600",
+      "subject": "Remove hardcoded proxy URLs and centralize API config",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "57d05a3b",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 11:39:47 -0600",
+      "subject": "Add inline active run detail view on BetLens page and History page",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "cc4d0ac2",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 11:38:53 -0600",
+      "subject": "Add auto-commit for devNotesData with distinct AutoSync git identity",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "30adac8a",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 10:55:06 -0600",
+      "subject": "Add Railway deployment config, project README, and env-var support",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "183df4d8",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 10:54:28 -0600",
+      "subject": "Add active runs display and auto-refresh to History page",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "6744e72d",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 10:53:17 -0600",
+      "subject": "Add Claude skill to keep BetLens and History pages in sync",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "f7dc8f91",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 10:39:37 -0600",
+      "subject": "Display each audit attempt as separate block with draft/verified status on briefs",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "4e53448a",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 10:32:17 -0600",
+      "subject": "Fix audit_analyze step not showing as running on WebSocket reconnect",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "f6a90245",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 10:29:17 -0600",
+      "subject": "Add Requirements.pdf",
+      "is_claude": false,
+      "is_autosync": false
+    },
+    {
+      "hash": "de876dc1",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 09:42:58 -0600",
+      "subject": "Add self-healing audit loop that auto-fixes failed verifications",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "c3187bd6",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 09:39:31 -0600",
+      "subject": "Reduce brief phase audit failures with stronger prompt guardrails and data fixes",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "7a53fd89",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 01:44:41 -0600",
+      "subject": "Add real-time streaming for audit agent results in BetLens",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "266050c6",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 01:43:25 -0600",
+      "subject": "Update Bet Lens save structure: promote audit results to top-level keys and rename files to betlens_results",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "43f6ccfe",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 01:27:17 -0600",
+      "subject": "Add standalone audit cards for analyze and brief phases in BetLens pipeline",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "a99c7f92",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 01:08:49 -0600",
+      "subject": "Rename sub-agent verification phases to audit in BetLens pipeline",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "f95d662c",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 00:38:46 -0600",
+      "subject": "Redesign website with modern dark theme, full mobile/desktop responsive layout",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "4e4a621f",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 00:09:56 -0600",
+      "subject": "Fix get_market_entropy oversized response (97KB \u2192 25KB) causing SDK file spillover",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "d3bdae0e",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 00:08:26 -0600",
+      "subject": "Display failure check percentages in verification sub-agent badges",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "d5d2132d",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 00:07:07 -0600",
+      "subject": "Add VerificationBadge to AnalyzeConversation for post-analyze subagent results",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "36cf65b1",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 00:06:34 -0600",
+      "subject": "Fix fact-check failures: enforce exact quoting and anti-fabrication guards",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "7145c540",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 00:05:58 -0600",
+      "subject": "Remove unused DataExplorer, TableView, PivotView, and dataUtils files",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "033588e9",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 00:05:17 -0600",
+      "subject": "Add file upload capability to Bets Lens page",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "909f4e29",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-27 23:36:53 -0600",
+      "subject": "Fix claude-sdk-wrapper readline 64KB limit and remove maxTurns cap",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "79ba00ce",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-27 23:35:11 -0600",
+      "subject": "Fix streaming buffer overflow and improve verification agent reliability",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "e3b4e2ee",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-27 23:19:12 -0600",
+      "subject": "Add regenerate button and save results to Bet Lens page",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "6e4b2d57",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-27 23:18:23 -0600",
+      "subject": "Log sub agent verdicts (summary + issues) to per-run log files",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "4cddb057",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-27 22:31:24 -0600",
+      "subject": "Add streaming chat with real-time AI thinking display",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "c57d0805",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-27 22:29:36 -0600",
+      "subject": "Increase AI timeout from 180s to 300s to prevent analyze phase from stalling",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "73a0d7a8",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-27 22:28:11 -0600",
+      "subject": "Add pipeline resume-on-reconnect and MCP server auto-reconnect",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "065ff944",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-27 22:26:20 -0600",
+      "subject": "Enable MCP tool calls in analyze phase with real-time streaming to UI",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "b2d4a698",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-27 21:41:52 -0600",
+      "subject": "Enable MCP tool calls in analysis state and forward tool_calls in streaming providers",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "87bc173d",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-27 20:11:49 -0600",
+      "subject": "Add streaming analyze conversation panel and fix phone reconnection bug",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "be1618cd",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-27 19:47:13 -0600",
+      "subject": "Persist key UI state to sessionStorage so data survives page refresh",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "f3c2dd13",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-27 19:46:08 -0600",
+      "subject": "Fix truncated daily briefing: use compact payload for verification and chat",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "c84a91c3",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-27 19:43:14 -0600",
+      "subject": "Add 6 arithmetic MCP tools for precise calculations by AI agents",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "828a7fb4",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-27 19:41:00 -0600",
+      "subject": "Add middles, best line shopping, and fair odds sections to brief and UI",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "a9f35ca1",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-27 19:40:04 -0600",
+      "subject": "Require all 3 verification agents to use MCP tools for evidence-backed verdicts",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "612bd435",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-27 18:42:09 -0600",
+      "subject": "Move cross-book analysis from analyze phase into detect phase as step 2",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "aefc98c1",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-27 15:51:10 -0600",
+      "subject": "Fix Shin model formula: use p_i\u00b2/S instead of (p_i/S)\u00b2 per Shin (1993)",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "d203f1f0",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-27 15:45:26 -0600",
+      "subject": "Add synthetic \"perfect book\" construction to detection pipeline",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "ce2b05bb",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-27 15:44:46 -0600",
+      "subject": "Add find_cross_market_arbitrage tool \u2014 detect mispricings across market types",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "7feb1742",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-27 15:41:52 -0600",
+      "subject": "Add Bayesian updating of true probabilities (Beta-conjugate prior)",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "ba90aa6d",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-27 15:30:43 -0600",
+      "subject": "Add get_zscore_anomalies tool \u2014 z-score based anomaly detection for odds and lines",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "b8c53b7e",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-27 15:29:20 -0600",
+      "subject": "Add get_implied_scores tool \u2014 estimate implied final scores from spread + total",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "b08f426e",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-27 15:28:10 -0600",
+      "subject": "Add arbitrage profit curves \u2014 enumerate all book-pair combinations per game/market",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "bfa8ea23",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-27 15:25:31 -0600",
+      "subject": "Add get_synthetic_hold_free_market tool \u2014 build a \"perfect book\" from best odds across all sportsbooks",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "8339a860",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-27 15:23:18 -0600",
+      "subject": "Add get_power_rankings tool \u2014 market-implied team strength ratings from moneyline odds",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "f250f599",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-27 15:21:21 -0600",
+      "subject": "Add multi-agent verification system for BetLens brief and AI chat",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "8f41d8bb",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-27 15:18:48 -0600",
+      "subject": "Add Expected Value (EV) and stale line detection to detection phase",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "b3469cd6",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-27 15:18:00 -0600",
+      "subject": "Add standard deviation of lines/odds to consensus data",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "a68d16bb",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-27 15:13:53 -0600",
+      "subject": "Add custom BetStamp browser icon with brand colors",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "1ce9db31",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-27 15:02:55 -0600",
+      "subject": "Add per-run logging with debug toggle for BetLens pipeline and chat",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "6e669bb7",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-27 14:22:01 -0600",
+      "subject": "Move AI assistant (ChatPanel) above the data table",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "e25674e1",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-27 13:48:35 -0600",
+      "subject": "Fix brief phase returning plan instead of actual briefing",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "45fe1bbf",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-27 13:47:07 -0600",
+      "subject": "Update browser title to reflect current page name",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "bfc2f509",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-27 12:45:46 -0600",
+      "subject": "Add streaming AI briefing to Bet Lens brief phase",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "04904721",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-27 11:58:41 -0600",
+      "subject": "Add root .gitignore to exclude pycache, node_modules, and temp files",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "b387433f",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-27 11:57:16 -0600",
+      "subject": "Add MCP integration to Claude SDK wrapper and fix UTF-8 encoding on Windows",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "be450258",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-27 11:47:45 -0600",
+      "subject": "Fix chat panel to show after data processing and add multi-user session isolation",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "a3208f67",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-27 11:41:55 -0600",
+      "subject": "Add in-memory caching layer to MCP server for faster response times",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "2fefcf17",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-27 11:27:11 -0600",
+      "subject": "Convert Python webservice from Flask/eventlet to FastAPI/asyncio",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "928cb306",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-26 19:49:46 -0600",
+      "subject": "Add BriefPanel for AI market briefing and move ChatPanel inline",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "c77aa054",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-26 19:03:44 -0600",
+      "subject": "Add Claude Code SDK provider and conversational AI chat panel",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "b1fffe61",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-26 18:52:10 -0600",
+      "subject": "Add website source files to main project repository",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "e9d41cbd",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-26 18:51:13 -0600",
+      "subject": "Add AI service integration, detection pipeline, and project configuration",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "022c0fc6",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-26 18:50:29 -0600",
+      "subject": "Add odds math utilities and detection phase for implied probability, vig, and fair odds",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
       "hash": "ec942e70",
       "author": "Justin",
       "email": "justin@omniscientgeek.com",
       "date": "2026-03-26 12:29:34 -0600",
       "subject": "Fix devnotes not loading on Generate click",
-      "is_claude": true
+      "is_claude": true,
+      "is_autosync": false
     },
     {
       "hash": "88d8def9",
@@ -14,7 +627,8 @@
       "email": "justin@omniscientgeek.com",
       "date": "2026-03-26 11:03:04 -0600",
       "subject": "Move sample.json to dedicated data folder for JSON viewer",
-      "is_claude": true
+      "is_claude": true,
+      "is_autosync": false
     },
     {
       "hash": "059d913c",
@@ -22,7 +636,8 @@
       "email": "justin@omniscientgeek.com",
       "date": "2026-03-26 10:42:04 -0600",
       "subject": "Add git commit history analysis with Claude vs User contribution stats",
-      "is_claude": true
+      "is_claude": true,
+      "is_autosync": false
     },
     {
       "hash": "e63d48ec",
@@ -30,7 +645,8 @@
       "email": "justin@omniscientgeek.com",
       "date": "2026-03-26 09:30:09 -0600",
       "subject": "The auto commit did not work. :(",
-      "is_claude": false
+      "is_claude": false,
+      "is_autosync": false
     },
     {
       "hash": "c8f97d2b",
@@ -38,7 +654,8 @@
       "email": "justin@omniscientgeek.com",
       "date": "2026-03-26 09:28:34 -0600",
       "subject": "I am adding the DEVLOG to source control. This should be auto committed using the custom app I use for development going forward.",
-      "is_claude": false
+      "is_claude": false,
+      "is_autosync": false
     },
     {
       "hash": "91f5291c",
@@ -46,15 +663,18 @@
       "email": "justin@omniscientgeek.com",
       "date": "2026-03-26 09:06:36 -0600",
       "subject": "Persist devnotes conversations to JSON and auto-load on page view",
-      "is_claude": true
+      "is_claude": true,
+      "is_autosync": false
     }
   ],
   "summary": {
-    "total_commits": 6,
-    "claude_commits": 4,
-    "user_commits": 2,
-    "claude_percentage": 66.7,
-    "user_percentage": 33.3,
-    "generated_at": "2026-03-26T14:43:50.053464"
+    "total_commits": 74,
+    "claude_commits": 71,
+    "autosync_commits": 0,
+    "user_commits": 3,
+    "claude_percentage": 95.9,
+    "autosync_percentage": 0.0,
+    "user_percentage": 4.1,
+    "generated_at": "2026-03-28T12:26:17.484891"
   }
 }
