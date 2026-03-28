@@ -1,9 +1,10 @@
-import React, { useState, useEffect, useRef } from "react";
-import { BrowserRouter, Routes, Route, Link, useLocation } from "react-router-dom";
+import React, { useState, useEffect, useRef, useCallback } from "react";
+import { BrowserRouter, Routes, Route, Link, useLocation, useNavigate } from "react-router-dom";
 import { io } from "socket.io-client";
 import DevNotes from "./DevNotes";
 import AISettings from "./AISettings";
 import PastRuns from "./PastRuns";
+import ActiveRunDetail from "./ActiveRunDetail";
 import ChatPanel from "./ChatPanel";
 import BriefPanel, { VerificationBadge } from "./BriefPanel";
 import AnalyzeConversation from "./AnalyzeConversation";
@@ -106,6 +107,35 @@ function BetLens() {
     () => localStorage.getItem("betstamp_debug") === "true"
   );
   const [runId, setRunId] = useState(null);
+
+  // Active runs polling — shows all currently running pipelines (including from other tabs)
+  const [activeRuns, setActiveRuns] = useState([]);
+  const activeRunsPollRef = useRef(null);
+
+  // Viewing a specific active run inline
+  const [viewingActiveRun, setViewingActiveRun] = useState(null);
+
+  // Past runs — displayed inline when no file is selected
+  const [pastRuns, setPastRuns] = useState([]);
+  const [pastRunsLoading, setPastRunsLoading] = useState(false);
+  const navigate = useNavigate();
+
+  const pollActiveRuns = useCallback(async () => {
+    try {
+      const res = await fetchWithRetry(`${API_BASE}/active-runs`);
+      if (!res.ok) return;
+      const data = await res.json();
+      setActiveRuns((data.runs || []).filter((r) => r.status === "running"));
+    } catch {
+      // Silently ignore polling errors
+    }
+  }, []);
+
+  useEffect(() => {
+    pollActiveRuns();
+    activeRunsPollRef.current = setInterval(pollActiveRuns, 3000);
+    return () => clearInterval(activeRunsPollRef.current);
+  }, [pollActiveRuns]);
 
   const toggleDebug = () => {
     const next = !debugMode;
@@ -256,6 +286,23 @@ function BetLens() {
       .then((data) => setFiles(data.files || []))
       .catch((err) => setError("Failed to load file list: " + err.message));
   }, []);
+
+  // Fetch past runs when no file is selected (landing state)
+  useEffect(() => {
+    if (selectedFile) return;
+    setPastRunsLoading(true);
+    fetchWithRetry(`${API_BASE}/saved-results`)
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.runs?.length) {
+          setPastRuns(data.runs);
+        } else {
+          setPastRuns((data.files || []).map((f) => ({ filename: f })));
+        }
+      })
+      .catch(() => setPastRuns([]))
+      .finally(() => setPastRunsLoading(false));
+  }, [selectedFile]);
 
   // Cleanup socket on unmount
   useEffect(() => {
@@ -497,7 +544,25 @@ function BetLens() {
     socket.on("processing_complete", (data) => {
       if (data.run_id) setRunId(data.run_id);
       setPipelineComplete(true);
-      setPipelineResults(data.results || null);
+      // Merge streaming phaseResults verification into server results as fallback
+      // so audit data captured during streaming isn't lost
+      const serverResults = data.results || null;
+      if (serverResults) {
+        setPhaseResults((prev) => {
+          const merged = { ...serverResults };
+          // If server results lack verification but streaming captured it, fill in
+          if (!merged.analyze?.verification && prev.analyze?.verification) {
+            merged.analyze = { ...merged.analyze, verification: prev.analyze.verification };
+          }
+          if (!merged.brief?.verification && prev.brief?.verification) {
+            merged.brief = { ...merged.brief, verification: prev.brief.verification };
+          }
+          setPipelineResults(merged);
+          return prev;
+        });
+      } else {
+        setPipelineResults(null);
+      }
       setStreamingBrief(""); // Clear streaming text — final brief is in results
       setSaveStatus({ ok: true, message: "Results saved automatically" });
       setTimeout(() => setSaveStatus(null), 5000);
@@ -725,6 +790,118 @@ function BetLens() {
         )}
       </div>
 
+      {/* Active Runs — shows pipelines currently running (including from other tabs/sessions) */}
+      {activeRuns.length > 0 && !viewingActiveRun && (
+        <div className="bl-active-runs">
+          <div className="bl-active-runs-header">
+            <span className="bl-active-pulse" />
+            <span className="bl-active-runs-title">
+              {activeRuns.length} pipeline{activeRuns.length !== 1 ? "s" : ""} running
+            </span>
+          </div>
+          <div className="bl-active-runs-list">
+            {activeRuns.map((run) => (
+              <button
+                key={run.run_id}
+                className="bl-active-run"
+                onClick={() => setViewingActiveRun(run.filename)}
+              >
+                <span className="bl-active-run-spinner" />
+                <span className="bl-active-run-file">{run.filename}</span>
+                <span className="bl-active-run-phase">
+                  {run.current_phase_label || run.current_phase}
+                  {" "}({run.phase_index + 1}/{run.total_phases})
+                </span>
+                <span className="bl-active-run-timer">
+                  {(() => {
+                    const t = run.elapsed_seconds;
+                    const m = Math.floor(t / 60);
+                    const s = t % 60;
+                    return `${m}:${String(s).padStart(2, "0")}`;
+                  })()}
+                </span>
+                <span className="bl-active-run-arrow">›</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Active Run Detail — inline view when a run is selected */}
+      {viewingActiveRun && (
+        <ActiveRunDetail
+          filename={viewingActiveRun}
+          onBack={() => setViewingActiveRun(null)}
+          backLabel="Close"
+        />
+      )}
+
+      {/* Past Runs — shown inline when no file/run is selected */}
+      {!selectedFile && !pipeline && !pipelineComplete && (
+        <div className="bl-past-runs">
+          <div className="bl-past-runs-header">
+            <h3>Recent Runs</h3>
+            <Link to="/past-runs" className="bl-past-runs-link">
+              View all in History <span aria-hidden>›</span>
+            </Link>
+          </div>
+          {pastRunsLoading ? (
+            <div className="bl-past-runs-loading">
+              <span className="pr-loading-spinner" />
+              Loading past runs...
+            </div>
+          ) : pastRuns.length === 0 ? (
+            <div className="bl-past-runs-empty">
+              <span className="bl-past-runs-empty-icon">📭</span>
+              <p>No saved runs yet. Select a data file above to start your first analysis.</p>
+            </div>
+          ) : (
+            <div className="pr-list">
+              {pastRuns.slice(0, 10).map((run) => {
+                const match = run.filename.match(/(\d{4}-\d{2}-\d{2})_(\d{2})(\d{2})(\d{2})\.json$/);
+                const dateStr = match ? `${match[1]} at ${match[2]}:${match[3]}:${match[4]}` : run.filename;
+                return (
+                  <button
+                    key={run.filename}
+                    className="pr-list-item"
+                    onClick={() => navigate(`/past-runs`, { state: { openFile: run.filename } })}
+                  >
+                    <div className="pr-list-item-main">
+                      <span className="pr-list-item-icon">📊</span>
+                      <div className="pr-list-item-info">
+                        <span className="pr-list-item-source">
+                          {run.source_file || run.filename}
+                        </span>
+                        <span className="pr-list-item-date">{dateStr}</span>
+                      </div>
+                    </div>
+                    <div className="pr-list-item-verdicts">
+                      {run.analyze_verdict && (
+                        <div className="pr-list-item-verdict">
+                          <span className="pr-verdict-label">Analyze</span>
+                          <span className={`pr-verdict-pill verdict--${run.analyze_verdict}`}>
+                            {run.analyze_verdict}
+                          </span>
+                        </div>
+                      )}
+                      {run.brief_verdict && (
+                        <div className="pr-list-item-verdict">
+                          <span className="pr-verdict-label">Brief</span>
+                          <span className={`pr-verdict-pill verdict--${run.brief_verdict}`}>
+                            {run.brief_verdict}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                    <span className="pr-list-item-arrow">›</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
       {error && <div className="error">{error}</div>}
       {loading && <div className="loading">Loading...</div>}
 
@@ -783,47 +960,105 @@ function BetLens() {
       )}
 
       {/* Audit Analyze — show during processing with real-time agent updates + self-healing */}
-      {!pipelineComplete && !pipelineError && pipeline && pipeline.phaseIndex >= 2 && (
-        <div className="verification-card">
-          <div className="verification-card-header">
-            <span className="verification-card-icon">🛡</span>
-            <h3>Audit Analyze</h3>
-            {fixStatus.analyze && (
-              <span className="fix-badge">
-                {fixStatus.analyze.status === "fixing"
-                  ? `Fixing (${fixStatus.analyze.attempt}/${fixStatus.analyze.max})`
-                  : fixStatus.analyze.status === "re-auditing"
-                  ? `Re-auditing (${fixStatus.analyze.attempt}/${fixStatus.analyze.max})`
-                  : null}
-              </span>
+      {!pipelineComplete && !pipelineError && pipeline && pipeline.phaseIndex >= 2 && (() => {
+        const auditV = phaseResults.analyze?.verification;
+        const agents = auditV?.agents || {};
+        const completedCount = Object.keys(agents).length;
+        const totalAgents = 3;
+        const progressPct = (completedCount / totalAgents) * 100;
+        const isAuditing = !auditV || auditV._pending;
+
+        return (
+          <div className="verification-card">
+            <div className="verification-card-header">
+              <span className="verification-card-icon">{"\u{1F6E1}"}</span>
+              <h3>Audit Analyze</h3>
+              {isAuditing && (
+                <span className="audit-phase-badge">
+                  <span className="pipeline-step-spinner" />
+                  {completedCount}/{totalAgents} agents
+                </span>
+              )}
+              {fixStatus.analyze && (
+                <span className="fix-badge">
+                  {fixStatus.analyze.status === "fixing"
+                    ? `Fixing (${fixStatus.analyze.attempt}/${fixStatus.analyze.max})`
+                    : fixStatus.analyze.status === "re-auditing"
+                    ? `Re-auditing (${fixStatus.analyze.attempt}/${fixStatus.analyze.max})`
+                    : null}
+                </span>
+              )}
+            </div>
+
+            {/* Segmented progress bar */}
+            {isAuditing && (
+              <div className="audit-agent-progress">
+                <div className="audit-agent-progress-bar">
+                  {["reasoning", "factual", "betting"].map((name) => {
+                    const a = agents[name];
+                    const verdict = a?.verdict || "pending";
+                    return (
+                      <div
+                        key={name}
+                        className={`audit-agent-segment audit-agent-segment--${verdict}`}
+                        title={`${name}: ${a ? verdict : "running…"}`}
+                      />
+                    );
+                  })}
+                </div>
+                <span className="audit-agent-progress-label">{Math.round(progressPct)}%</span>
+              </div>
+            )}
+
+            {/* Per-agent status chips during streaming */}
+            {isAuditing && completedCount > 0 && (
+              <div className="audit-agent-chips">
+                {["reasoning", "factual", "betting"].map((name) => {
+                  const a = agents[name];
+                  const label = name === "reasoning" ? "Reasoning" : name === "factual" ? "Fact Check" : "Bet Quality";
+                  return (
+                    <div key={name} className={`audit-agent-chip audit-agent-chip--${a ? a.verdict : "pending"}`}>
+                      <span className="audit-agent-chip-icon">
+                        {a ? (a.verdict === "pass" ? "\u2705" : a.verdict === "warn" ? "\u26A0\uFE0F" : "\u274C")
+                          : <span className="pipeline-step-spinner" />}
+                      </span>
+                      <span className="audit-agent-chip-name">{label}</span>
+                      {a && <span className="audit-agent-chip-verdict">{a.verdict}</span>}
+                      {a?.summary && <span className="audit-agent-chip-summary">{a.summary}</span>}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {fixStatus.analyze?.status === "fixing" && (
+              <div className="fix-status-banner">
+                <span className="pipeline-step-spinner" />
+                <span>
+                  Audit failed with <strong>{fixStatus.analyze.previousVerdict}</strong> verdict
+                  — AI is fixing issues (attempt {fixStatus.analyze.attempt} of {fixStatus.analyze.max})…
+                </span>
+              </div>
+            )}
+
+            {auditV ? (
+              <VerificationBadge
+                verification={auditV}
+                streaming={!!auditV._pending}
+              />
+            ) : (
+              <div className="verification-card-pending">
+                <span className="pipeline-step-spinner" />
+                <span>
+                  {fixStatus.analyze?.status === "re-auditing"
+                    ? `Re-auditing after fix ${fixStatus.analyze.attempt}…`
+                    : "Auditing analysis…"}
+                </span>
+              </div>
             )}
           </div>
-          {fixStatus.analyze?.status === "fixing" && (
-            <div className="fix-status-banner">
-              <span className="pipeline-step-spinner" />
-              <span>
-                Audit failed with <strong>{fixStatus.analyze.previousVerdict}</strong> verdict
-                — AI is fixing issues (attempt {fixStatus.analyze.attempt} of {fixStatus.analyze.max})…
-              </span>
-            </div>
-          )}
-          {phaseResults.analyze?.verification ? (
-            <VerificationBadge
-              verification={phaseResults.analyze.verification}
-              streaming={!!phaseResults.analyze.verification._pending}
-            />
-          ) : (
-            <div className="verification-card-pending">
-              <span className="pipeline-step-spinner" />
-              <span>
-                {fixStatus.analyze?.status === "re-auditing"
-                  ? `Re-auditing after fix ${fixStatus.analyze.attempt}…`
-                  : "Auditing analysis…"}
-              </span>
-            </div>
-          )}
-        </div>
-      )}
+        );
+      })()}
 
       {/* Show streaming brief text as it arrives during the brief phase */}
       {!pipelineComplete && !pipelineError && streamingBrief && (
@@ -838,47 +1073,105 @@ function BetLens() {
       )}
 
       {/* Audit Brief — show during processing with real-time agent updates + self-healing */}
-      {!pipelineComplete && !pipelineError && pipeline && pipeline.phaseIndex >= 4 && (
-        <div className="verification-card">
-          <div className="verification-card-header">
-            <span className="verification-card-icon">🛡</span>
-            <h3>Audit Brief</h3>
-            {fixStatus.brief && (
-              <span className="fix-badge">
-                {fixStatus.brief.status === "fixing"
-                  ? `Fixing (${fixStatus.brief.attempt}/${fixStatus.brief.max})`
-                  : fixStatus.brief.status === "re-auditing"
-                  ? `Re-auditing (${fixStatus.brief.attempt}/${fixStatus.brief.max})`
-                  : null}
-              </span>
+      {!pipelineComplete && !pipelineError && pipeline && pipeline.phaseIndex >= 4 && (() => {
+        const auditV = phaseResults.brief?.verification;
+        const agents = auditV?.agents || {};
+        const completedCount = Object.keys(agents).length;
+        const totalAgents = 3;
+        const progressPct = (completedCount / totalAgents) * 100;
+        const isAuditing = !auditV || auditV._pending;
+
+        return (
+          <div className="verification-card">
+            <div className="verification-card-header">
+              <span className="verification-card-icon">{"\u{1F6E1}"}</span>
+              <h3>Audit Brief</h3>
+              {isAuditing && (
+                <span className="audit-phase-badge">
+                  <span className="pipeline-step-spinner" />
+                  {completedCount}/{totalAgents} agents
+                </span>
+              )}
+              {fixStatus.brief && (
+                <span className="fix-badge">
+                  {fixStatus.brief.status === "fixing"
+                    ? `Fixing (${fixStatus.brief.attempt}/${fixStatus.brief.max})`
+                    : fixStatus.brief.status === "re-auditing"
+                    ? `Re-auditing (${fixStatus.brief.attempt}/${fixStatus.brief.max})`
+                    : null}
+                </span>
+              )}
+            </div>
+
+            {/* Segmented progress bar */}
+            {isAuditing && (
+              <div className="audit-agent-progress">
+                <div className="audit-agent-progress-bar">
+                  {["reasoning", "factual", "betting"].map((name) => {
+                    const a = agents[name];
+                    const verdict = a?.verdict || "pending";
+                    return (
+                      <div
+                        key={name}
+                        className={`audit-agent-segment audit-agent-segment--${verdict}`}
+                        title={`${name}: ${a ? verdict : "running…"}`}
+                      />
+                    );
+                  })}
+                </div>
+                <span className="audit-agent-progress-label">{Math.round(progressPct)}%</span>
+              </div>
+            )}
+
+            {/* Per-agent status chips during streaming */}
+            {isAuditing && completedCount > 0 && (
+              <div className="audit-agent-chips">
+                {["reasoning", "factual", "betting"].map((name) => {
+                  const a = agents[name];
+                  const label = name === "reasoning" ? "Reasoning" : name === "factual" ? "Fact Check" : "Bet Quality";
+                  return (
+                    <div key={name} className={`audit-agent-chip audit-agent-chip--${a ? a.verdict : "pending"}`}>
+                      <span className="audit-agent-chip-icon">
+                        {a ? (a.verdict === "pass" ? "\u2705" : a.verdict === "warn" ? "\u26A0\uFE0F" : "\u274C")
+                          : <span className="pipeline-step-spinner" />}
+                      </span>
+                      <span className="audit-agent-chip-name">{label}</span>
+                      {a && <span className="audit-agent-chip-verdict">{a.verdict}</span>}
+                      {a?.summary && <span className="audit-agent-chip-summary">{a.summary}</span>}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {fixStatus.brief?.status === "fixing" && (
+              <div className="fix-status-banner">
+                <span className="pipeline-step-spinner" />
+                <span>
+                  Audit failed with <strong>{fixStatus.brief.previousVerdict}</strong> verdict
+                  — AI is fixing issues (attempt {fixStatus.brief.attempt} of {fixStatus.brief.max})…
+                </span>
+              </div>
+            )}
+
+            {auditV ? (
+              <VerificationBadge
+                verification={auditV}
+                streaming={!!auditV._pending}
+              />
+            ) : (
+              <div className="verification-card-pending">
+                <span className="pipeline-step-spinner" />
+                <span>
+                  {fixStatus.brief?.status === "re-auditing"
+                    ? `Re-auditing after fix ${fixStatus.brief.attempt}…`
+                    : "Auditing brief…"}
+                </span>
+              </div>
             )}
           </div>
-          {fixStatus.brief?.status === "fixing" && (
-            <div className="fix-status-banner">
-              <span className="pipeline-step-spinner" />
-              <span>
-                Audit failed with <strong>{fixStatus.brief.previousVerdict}</strong> verdict
-                — AI is fixing issues (attempt {fixStatus.brief.attempt} of {fixStatus.brief.max})…
-              </span>
-            </div>
-          )}
-          {phaseResults.brief?.verification ? (
-            <VerificationBadge
-              verification={phaseResults.brief.verification}
-              streaming={!!phaseResults.brief.verification._pending}
-            />
-          ) : (
-            <div className="verification-card-pending">
-              <span className="pipeline-step-spinner" />
-              <span>
-                {fixStatus.brief?.status === "re-auditing"
-                  ? `Re-auditing after fix ${fixStatus.brief.attempt}…`
-                  : "Auditing brief…"}
-              </span>
-            </div>
-          )}
-        </div>
-      )}
+        );
+      })()}
 
       {pipelineComplete && (
         <>

@@ -1007,6 +1007,35 @@ async def list_active_runs():
     return {"runs": runs}
 
 
+@app.get("/api/active-runs/{filename:path}")
+async def get_active_run_detail(filename: str):
+    """Return full detail for a single active/cached pipeline run, including accumulated results."""
+    state = _pipeline_cache.get(filename)
+    if not state or _is_cache_expired(state):
+        return JSONResponse({"error": "Active run not found"}, status_code=404)
+
+    now = time.time()
+    phase_name = PHASES[state.current_phase]["name"] if state.current_phase < len(PHASES) else "done"
+    phase_label = PHASES[state.current_phase]["label"] if state.current_phase < len(PHASES) else "Complete"
+
+    # Deep-copy results so we don't mutate live pipeline state
+    import copy
+    results_snapshot = copy.deepcopy(state.results)
+
+    return {
+        "filename": state.filename,
+        "run_id": state.run_id,
+        "status": state.status,
+        "current_phase": phase_name,
+        "current_phase_label": phase_label,
+        "phase_index": state.current_phase,
+        "total_phases": len(PHASES),
+        "elapsed_seconds": int(now - state.created_at),
+        "error": state.error,
+        "pipeline_results": results_snapshot,
+    }
+
+
 def _parse_conversation_file(filepath):
     """Parse a conversation .txt file and return its header and messages."""
     try:

@@ -1933,6 +1933,139 @@
 }
 
 /* ================================================================== */
+/*  Audit In-Progress Enhancements                                     */
+/* ================================================================== */
+
+/* Phase badge in header — shows agent count */
+.audit-phase-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: var(--radius-full);
+  background: rgba(99, 179, 237, 0.12);
+  color: var(--accent-cyan);
+  white-space: nowrap;
+  margin-left: auto;
+}
+.audit-phase-badge .pipeline-step-spinner {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+}
+
+/* Segmented progress bar — 3 segments for 3 agents */
+.audit-agent-progress {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-lg);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.audit-agent-progress-bar {
+  display: flex;
+  gap: 3px;
+  flex: 1;
+  height: 6px;
+}
+.audit-agent-segment {
+  flex: 1;
+  border-radius: 3px;
+  transition: background 0.4s var(--ease-out);
+}
+.audit-agent-segment--pending {
+  background: var(--border-subtle);
+  animation: audit-segment-pulse 1.5s ease-in-out infinite;
+}
+.audit-agent-segment--pass { background: var(--accent-green); }
+.audit-agent-segment--warn { background: var(--accent-amber); }
+.audit-agent-segment--fail { background: var(--accent-coral); }
+.audit-agent-segment--error { background: var(--text-muted); }
+.audit-agent-progress-label {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: var(--text-muted);
+  flex-shrink: 0;
+  min-width: 28px;
+  text-align: right;
+}
+
+@keyframes audit-segment-pulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 0.8; }
+}
+
+/* Agent status chips — shown during streaming as agents complete */
+.audit-agent-chips {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: var(--space-sm) var(--space-lg);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.audit-agent-chip {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-card);
+  font-size: 0.82rem;
+  animation: slideUp 0.3s var(--ease-out) both;
+}
+.audit-agent-chip--pass  { border-left: 3px solid var(--accent-green); }
+.audit-agent-chip--warn  { border-left: 3px solid var(--accent-amber); }
+.audit-agent-chip--fail  { border-left: 3px solid var(--accent-coral); }
+.audit-agent-chip--pending {
+  border-left: 3px solid var(--border-subtle);
+  opacity: 0.6;
+}
+.audit-agent-chip-icon {
+  flex-shrink: 0;
+  font-size: 0.85rem;
+  line-height: 1.3;
+}
+.audit-agent-chip-icon .pipeline-step-spinner {
+  width: 14px;
+  height: 14px;
+}
+.audit-agent-chip-name {
+  font-weight: 600;
+  color: var(--text-primary);
+  flex-shrink: 0;
+  min-width: 80px;
+}
+.audit-agent-chip-verdict {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  flex-shrink: 0;
+}
+.audit-agent-chip-summary {
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  line-height: 1.4;
+  flex: 1;
+}
+
+@media (max-width: 640px) {
+  .audit-agent-progress { padding: var(--space-sm) var(--space-md); }
+  .audit-agent-chips { padding: var(--space-sm) var(--space-md); }
+  .audit-agent-chip-name { min-width: 60px; font-size: 0.78rem; }
+}
+
+/* ================================================================== */
 /*  Self-Healing Fix UI                                                */
 /* ================================================================== */
 
@@ -2952,7 +3085,12 @@
 .pr-list-item--active {
   border-color: var(--accent-cyan-dim) !important;
   background: linear-gradient(135deg, var(--bg-elevated), rgba(0, 212, 255, 0.04)) !important;
-  cursor: default;
+  cursor: pointer;
+}
+
+.pr-list-item--active:hover {
+  border-color: var(--accent-cyan) !important;
+  background: linear-gradient(135deg, var(--bg-elevated), rgba(0, 212, 255, 0.08)) !important;
 }
 
 .pr-list-item--active.pr-list-item--error {
@@ -3013,6 +3151,55 @@
 .pr-page-subtitle-live {
   color: var(--accent-cyan);
   font-weight: 600;
+}
+
+/* Active run detail — live stepper */
+.pr-live-stepper {
+  display: flex;
+  gap: var(--space-xs);
+  padding: var(--space-md) 0;
+}
+
+.pr-live-step {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.pr-live-step .pr-active-step {
+  width: 100%;
+  height: 6px;
+}
+
+.pr-live-step-label {
+  font-size: 0.68rem;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+}
+
+.pr-live-running-phase {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-md);
+  background: var(--bg-elevated);
+  border: 1px solid var(--accent-cyan-dim);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  animation: pr-step-pulse 1.5s ease-in-out infinite;
+}
+
+.pr-live-complete-banner {
+  padding: var(--space-md);
+  background: rgba(0, 212, 255, 0.08);
+  border: 1px solid var(--accent-cyan-dim);
+  border-radius: var(--radius-md);
+  color: var(--accent-cyan);
+  text-align: center;
+  font-size: 0.85rem;
+  margin-top: var(--space-md);
 }
 
 /* List of runs */
@@ -3558,4 +3745,210 @@
     padding: 6px 12px;
     font-size: 0.75rem;
   }
+}
+
+/* ------------------------------------------------------------------ */
+/*  BetLens — Active Runs Banner                                       */
+/* ------------------------------------------------------------------ */
+.bl-active-runs {
+  margin: var(--space-md) 0;
+  padding: var(--space-md) var(--space-lg);
+  background: linear-gradient(135deg, var(--bg-elevated), rgba(0, 212, 255, 0.04));
+  border: 1px solid var(--accent-cyan-dim);
+  border-radius: var(--radius-md);
+}
+
+.bl-active-runs-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-sm);
+}
+
+.bl-active-pulse {
+  display: block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent-cyan);
+  box-shadow: 0 0 6px var(--accent-cyan);
+  animation: pr-pulse 1.5s ease-in-out infinite;
+}
+
+.bl-active-runs-title {
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--accent-cyan);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.bl-active-runs-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.bl-active-run {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: 6px var(--space-sm);
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  cursor: pointer;
+  width: 100%;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+  transition: background var(--duration-fast) var(--ease-out),
+              border-color var(--duration-fast) var(--ease-out);
+}
+
+.bl-active-run:hover {
+  background: rgba(0, 212, 255, 0.1);
+  border-color: var(--accent-cyan-dim);
+}
+
+.bl-active-run-arrow {
+  font-size: 1.1rem;
+  color: var(--text-secondary);
+  opacity: 0;
+  transition: opacity var(--duration-fast) var(--ease-out);
+  margin-left: var(--space-xs);
+}
+
+.bl-active-run:hover .bl-active-run-arrow {
+  opacity: 1;
+}
+
+.bl-active-run-spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--border-subtle);
+  border-top-color: var(--accent-cyan);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+
+.bl-active-run-file {
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
+}
+
+.bl-active-run-phase {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.bl-active-run-timer {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  min-width: 3.5em;
+  text-align: right;
+}
+
+@media (max-width: 600px) {
+  .bl-active-runs {
+    padding: var(--space-sm) var(--space-md);
+  }
+
+  .bl-active-run {
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+
+  .bl-active-run-phase {
+    order: 3;
+    flex-basis: 100%;
+    padding-left: 26px; /* align under filename */
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  BetLens — Inline Past Runs (landing state)                         */
+/* ------------------------------------------------------------------ */
+.bl-past-runs {
+  margin-top: var(--space-lg);
+  padding: var(--space-lg);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
+  border-radius: var(--radius-lg, 12px);
+}
+
+.bl-past-runs-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--space-md);
+}
+
+.bl-past-runs-header h3 {
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.bl-past-runs-link {
+  font-size: 0.85rem;
+  color: var(--accent-cyan);
+  text-decoration: none;
+  font-weight: 500;
+  transition: color 0.15s ease;
+}
+
+.bl-past-runs-link:hover {
+  color: var(--accent-cyan-bright, #5af);
+  text-decoration: underline;
+}
+
+.bl-past-runs-link span {
+  display: inline-block;
+  transition: transform 0.15s ease;
+}
+
+.bl-past-runs-link:hover span {
+  transform: translateX(3px);
+}
+
+.bl-past-runs-loading {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+  padding: var(--space-lg) 0;
+  justify-content: center;
+}
+
+.bl-past-runs-empty {
+  text-align: center;
+  padding: var(--space-xl) var(--space-md);
+  color: var(--text-secondary);
+}
+
+.bl-past-runs-empty-icon {
+  font-size: 2rem;
+  display: block;
+  margin-bottom: var(--space-sm);
+}
+
+.bl-past-runs-empty p {
+  margin: 0;
+  font-size: 0.9rem;
+  line-height: 1.5;
 }

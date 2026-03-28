@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
+import { useLocation } from "react-router-dom";
 import BriefPanel, { VerificationBadge } from "./BriefPanel";
 import AnalyzeConversation from "./AnalyzeConversation";
+import ActiveRunDetail from "./ActiveRunDetail";
 import { API_BASE, fetchWithRetry } from "./api";
 
 /* ------------------------------------------------------------------ */
@@ -66,7 +68,7 @@ function formatElapsed(totalSec) {
 /* ------------------------------------------------------------------ */
 /*  Active runs section                                                */
 /* ------------------------------------------------------------------ */
-function ActiveRuns({ activeRuns }) {
+function ActiveRuns({ activeRuns, onSelect }) {
   if (!activeRuns || activeRuns.length === 0) return null;
 
   return (
@@ -80,7 +82,11 @@ function ActiveRuns({ activeRuns }) {
       </div>
       <div className="pr-list">
         {activeRuns.map((run) => (
-          <div key={run.run_id} className={`pr-list-item pr-list-item--active pr-list-item--${run.status}`}>
+          <button
+            key={run.run_id}
+            className={`pr-list-item pr-list-item--active pr-list-item--${run.status}`}
+            onClick={() => onSelect(run.filename, { isActive: true })}
+          >
             <div className="pr-list-item-main">
               <span className="pr-list-item-icon">
                 {run.status === "running" ? (
@@ -114,7 +120,8 @@ function ActiveRuns({ activeRuns }) {
               </div>
               <span className="pr-active-timer">{formatElapsed(run.elapsed_seconds)}</span>
             </div>
-          </div>
+            <span className="pr-list-item-arrow">›</span>
+          </button>
         ))}
       </div>
     </div>
@@ -154,7 +161,7 @@ function RunList({ runs, activeRuns, onSelect, loading, error }) {
 
   return (
     <>
-      <ActiveRuns activeRuns={activeRuns} />
+      <ActiveRuns activeRuns={activeRuns} onSelect={onSelect} />
       {runs.length > 0 && (
         <div className="pr-list">
           {runs.map((run) => {
@@ -367,10 +374,13 @@ function RunDetail({ filename, onBack }) {
 /*  Main PastRuns page                                                 */
 /* ------------------------------------------------------------------ */
 export default function PastRuns() {
+  const location = useLocation();
   const [runs, setRuns] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [selectedFile, setSelectedFile] = useState(null);
+  const [selectedView, setSelectedView] = useState(
+    location.state?.openFile ? { filename: location.state.openFile, isActive: false } : null
+  );
   const [activeRuns, setActiveRuns] = useState([]);
   const pollRef = useRef(null);
   const activeRunsRef = useRef(activeRuns);
@@ -429,11 +439,24 @@ export default function PastRuns() {
     return () => clearInterval(pollRef.current);
   }, [pollActiveRuns]);
 
-  if (selectedFile) {
+  const handleSelect = useCallback((filename, opts) => {
+    setSelectedView({ filename, isActive: opts?.isActive || false });
+  }, []);
+
+  if (selectedView) {
+    if (selectedView.isActive) {
+      return (
+        <ActiveRunDetail
+          filename={selectedView.filename}
+          onBack={() => setSelectedView(null)}
+          backLabel="Back to History"
+        />
+      );
+    }
     return (
       <RunDetail
-        filename={selectedFile}
-        onBack={() => setSelectedFile(null)}
+        filename={selectedView.filename}
+        onBack={() => setSelectedView(null)}
       />
     );
   }
@@ -445,14 +468,14 @@ export default function PastRuns() {
         <p className="pr-page-subtitle">
           Browse and review previous BetLens analysis results.
           {activeRuns.some((r) => r.status === "running") && (
-            <span className="pr-page-subtitle-live"> Active runs are shown in real-time.</span>
+            <span className="pr-page-subtitle-live"> Active runs are shown in real-time. Click to view details.</span>
           )}
         </p>
       </div>
       <RunList
         runs={runs}
         activeRuns={activeRuns.filter((r) => r.status === "running")}
-        onSelect={setSelectedFile}
+        onSelect={handleSelect}
         loading={loading}
         error={error}
       />
