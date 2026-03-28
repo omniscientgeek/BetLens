@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
+import { VerificationBadge } from "./BriefPanel";
 
 /**
  * Displays the AI conversation from the Analyze pipeline phase.
@@ -85,7 +86,7 @@ function StreamingCodeBlock({ className, children }) {
   );
 }
 
-function AnalyzeConversation({ analyzeResult, streaming, defaultExpanded }) {
+function AnalyzeConversation({ analyzeResult, streaming, defaultExpanded, title }) {
   const [expanded, setExpanded] = useState(defaultExpanded || false);
 
   // Auto-expand when streaming starts
@@ -109,7 +110,7 @@ function AnalyzeConversation({ analyzeResult, streaming, defaultExpanded }) {
           className="ac-expand-btn"
           onClick={() => setExpanded(!expanded)}
         >
-          {expanded ? "\u25BC" : "\u25B6"} Analyze AI Conversation
+          {expanded ? "\u25BC" : "\u25B6"} {title || "Analyze AI Conversation"}
           {aiMeta && (
             <span className="ac-meta-inline">
               {aiMeta.provider} / {aiMeta.model}
@@ -138,7 +139,7 @@ function AnalyzeConversation({ analyzeResult, streaming, defaultExpanded }) {
         onClick={() => setExpanded(!expanded)}
       >
         <span className="ac-expand-arrow">{expanded ? "\u25BC" : "\u25B6"}</span>
-        <span>Analyze AI Conversation</span>
+        <span>{title || "Analyze AI Conversation"}</span>
         {isStreaming && <span className="ac-streaming-badge">STREAMING</span>}
         {aiMeta && (
           <span className="ac-meta-inline">
@@ -239,6 +240,11 @@ function AnalyzeConversation({ analyzeResult, streaming, defaultExpanded }) {
                 {truncateText(responseText, 30000) || "(no response)"}
               </pre>
             </CollapsibleSection>
+          )}
+
+          {/* Verification Badge — shown after verification agents complete */}
+          {!isStreaming && analyzeResult.verification && (
+            <VerificationBadge verification={analyzeResult.verification} />
           )}
         </div>
       )}
