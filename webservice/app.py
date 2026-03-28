@@ -14,7 +14,7 @@ from logging_config import setup_logging, create_run_logger, close_run_logger, R
 setup_logging()
 logger = logging.getLogger(__name__)
 
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, Query, Request, UploadFile, File
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -548,6 +548,109 @@ async def get_file(filename: str):
     data = json.loads(content)
 
     return data
+
+
+@app.post("/api/files/upload")
+async def upload_file(file: UploadFile = File(...)):
+    """Upload a new JSON data file to the data directory."""
+    if not file.filename or not file.filename.endswith(".json"):
+        return JSONResponse({"error": "Only .json files are supported"}, status_code=400)
+
+    # Sanitise filename – strip path components to prevent directory traversal
+    safe_name = os.path.basename(file.filename)
+    if not safe_name:
+        return JSONResponse({"error": "Invalid filename"}, status_code=400)
+
+    os.makedirs(DATA_DIR, exist_ok=True)
+    dest = os.path.abspath(os.path.join(DATA_DIR, safe_name))
+
+    if not dest.startswith(DATA_DIR):
+        return JSONResponse({"error": "Invalid file path"}, status_code=403)
+
+    # Read and validate JSON before writing
+    content = await file.read()
+    try:
+        json.loads(content)
+    except (json.JSONDecodeError, ValueError) as exc:
+        return JSONResponse({"error": f"File is not valid JSON: {exc}"}, status_code=400)
+
+    import aiofiles
+    async with aiofiles.open(dest, "wb") as f:
+        await f.write(content)
+
+    logger.info("Uploaded data file: %s (%d bytes)", safe_name, len(content))
+    return {"uploaded": True, "filename": safe_name, "size": len(content)}
+
+
+# ---------------------------------------------------------------------------
+# Save pipeline results
+# ---------------------------------------------------------------------------
+
+SAVED_RESULTS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "saved_results"))
+
+
+@app.post("/api/save-results")
+async def save_results(request: Request):
+    """Save pipeline results (analyze + brief + file metadata) to a JSON file."""
+    body = await request.json()
+    filename = body.get("filename")
+    pipeline_results = body.get("pipelineResults")
+    file_data = body.get("fileData")
+
+    if not filename or not pipeline_results:
+        return JSONResponse({"error": "filename and pipelineResults are required"}, status_code=400)
+
+    os.makedirs(SAVED_RESULTS_DIR, exist_ok=True)
+
+    # Build a timestamped filename: e.g. odds_data_2026-03-27_143022.json
+    base = os.path.splitext(filename)[0]
+    ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    save_filename = f"{base}_{ts}.json"
+    save_path = os.path.join(SAVED_RESULTS_DIR, save_filename)
+
+    payload = {
+        "source_file": filename,
+        "saved_at": datetime.now().isoformat(),
+        "pipeline_results": pipeline_results,
+        "file_data": file_data,
+    }
+
+    import aiofiles
+    async with aiofiles.open(save_path, "w", encoding="utf-8") as f:
+        await f.write(json.dumps(payload, indent=2, ensure_ascii=False))
+
+    logger.info("Saved pipeline results to %s", save_path)
+    return {"saved": True, "filename": save_filename, "path": save_path}
+
+
+@app.get("/api/saved-results")
+async def list_saved_results():
+    """List all previously saved result files."""
+    if not os.path.isdir(SAVED_RESULTS_DIR):
+        return {"files": []}
+    files = sorted(
+        (f for f in os.listdir(SAVED_RESULTS_DIR) if f.endswith(".json")),
+        reverse=True,
+    )
+    return {"files": files}
+
+
+@app.get("/api/saved-results/{filename}")
+async def get_saved_result(filename: str):
+    """Return the contents of a saved result file."""
+    if not filename.endswith(".json"):
+        return JSONResponse({"error": "Only .json files are supported"}, status_code=400)
+
+    filepath = os.path.abspath(os.path.join(SAVED_RESULTS_DIR, filename))
+    if not filepath.startswith(SAVED_RESULTS_DIR):
+        return JSONResponse({"error": "Invalid file path"}, status_code=403)
+    if not os.path.isfile(filepath):
+        return JSONResponse({"error": "File not found"}, status_code=404)
+
+    import aiofiles
+    async with aiofiles.open(filepath, "r", encoding="utf-8") as f:
+        content = await f.read()
+    return json.loads(content)
 
 
 def _parse_conversation_file(filepath):

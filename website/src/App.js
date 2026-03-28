@@ -2,7 +2,6 @@ import React, { useState, useEffect, useRef } from "react";
 import { BrowserRouter, Routes, Route, Link, useLocation } from "react-router-dom";
 import { io } from "socket.io-client";
 import DevNotes from "./DevNotes";
-import DataExplorer from "./DataExplorer";
 import AISettings from "./AISettings";
 import ChatPanel from "./ChatPanel";
 import BriefPanel from "./BriefPanel";
@@ -123,6 +122,61 @@ function BetLens() {
     const next = !debugMode;
     setDebugMode(next);
     localStorage.setItem("betstamp_debug", String(next));
+  };
+
+  // Upload a new data file
+  const fileInputRef = useRef(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadStatus, setUploadStatus] = useState(null); // { ok, message }
+
+  const handleUploadClick = () => {
+    if (fileInputRef.current) fileInputRef.current.click();
+  };
+
+  const handleFileUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    // Reset the input so re-selecting the same file triggers onChange
+    e.target.value = "";
+
+    if (!file.name.endsWith(".json")) {
+      setUploadStatus({ ok: false, message: "Only .json files are supported" });
+      setTimeout(() => setUploadStatus(null), 5000);
+      return;
+    }
+
+    setUploading(true);
+    setUploadStatus(null);
+
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+
+      const res = await fetchWithRetry(`${API_BASE}/files/upload`, {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: "Upload failed" }));
+        throw new Error(err.error || `HTTP ${res.status}`);
+      }
+
+      const result = await res.json();
+
+      // Refresh file list and auto-select the uploaded file
+      const listRes = await fetchWithRetry(`${API_BASE}/files`);
+      const listData = await listRes.json();
+      setFiles(listData.files || []);
+
+      setUploadStatus({ ok: true, message: `Uploaded ${result.filename}` });
+      handleFileSelect(result.filename);
+    } catch (err) {
+      setUploadStatus({ ok: false, message: err.message });
+    } finally {
+      setUploading(false);
+      setTimeout(() => setUploadStatus(null), 5000);
+    }
   };
 
   // Save pipeline results to server + trigger JSON download
@@ -549,6 +603,26 @@ function BetLens() {
             </option>
           ))}
         </select>
+        <input
+          type="file"
+          accept=".json"
+          ref={fileInputRef}
+          onChange={handleFileUpload}
+          style={{ display: "none" }}
+        />
+        <button
+          className="upload-btn"
+          onClick={handleUploadClick}
+          disabled={uploading}
+          title="Upload a new JSON data file"
+        >
+          {uploading ? "Uploading…" : "Upload File"}
+        </button>
+        {uploadStatus && (
+          <span className={`upload-status ${uploadStatus.ok ? "upload-status--ok" : "upload-status--err"}`}>
+            {uploadStatus.message}
+          </span>
+        )}
         {selectedFile && (pipeline || pipelineComplete || pipelineError) && (
           <button
             className="regenerate-btn"
@@ -687,12 +761,6 @@ function BetLens() {
         <ChatPanel key={selectedFile} pipelineResults={pipelineResults} debugMode={debugMode} />
       )}
 
-      {fileData && (
-        <div className="bet-lens">
-          <h2>{selectedFile}</h2>
-          <DataExplorer data={fileData} />
-        </div>
-      )}
     </>
   );
 }
