@@ -202,8 +202,13 @@ async def _auto_save_results(filename: str, pipeline_results: dict, run_logger):
         "file_data": file_data,
     }
 
+    # Serialize BEFORE opening the file — opening with "w" truncates to 0 bytes
+    # immediately, so if json.dumps() throws (non-serializable types), the file
+    # would be left empty.  default=str handles stray datetime / custom objects.
+    json_str = json.dumps(payload, indent=2, ensure_ascii=False, default=str)
+
     async with aiofiles.open(save_path, "w", encoding="utf-8") as f:
-        await f.write(json.dumps(payload, indent=2, ensure_ascii=False))
+        await f.write(json_str)
 
     run_logger.info("Auto-saved pipeline results to %s", save_path)
     logger.info("PIPELINE Auto-saved results to %s", save_filename)
@@ -948,9 +953,12 @@ async def save_results(request: Request):
         "file_data": file_data,
     }
 
+    # Serialize before opening — "w" mode truncates immediately, so a
+    # json.dumps failure would leave a 0-byte file.
     import aiofiles
+    json_str = json.dumps(payload, indent=2, ensure_ascii=False, default=str)
     async with aiofiles.open(save_path, "w", encoding="utf-8") as f:
-        await f.write(json.dumps(payload, indent=2, ensure_ascii=False))
+        await f.write(json_str)
 
     logger.info("Saved pipeline results to %s", save_path)
     return {"saved": True, "filename": save_filename, "path": save_path}
@@ -964,12 +972,16 @@ async def list_saved_results():
     filenames = [f for f in os.listdir(SAVED_RESULTS_DIR) if f.endswith(".json")]
 
     # Build lightweight metadata for each run (extract verdicts without
-    # loading full file_data).
+    # loading full file_data).  Skip empty or invalid files so they never
+    # appear in the history list (these are leftover from failed pipelines).
     runs = []
     for fname in filenames:
         meta = {"filename": fname}
         try:
             fpath = os.path.join(SAVED_RESULTS_DIR, fname)
+            # Skip empty files (0-byte leftovers from failed pipeline runs)
+            if os.path.getsize(fpath) == 0:
+                continue
             import aiofiles
             async with aiofiles.open(fpath, "r", encoding="utf-8") as f:
                 content = await f.read()
@@ -995,6 +1007,9 @@ async def list_saved_results():
                 total_secs += verif.get("elapsed_seconds", 0) or 0
             if total_secs > 0:
                 meta["total_runtime_seconds"] = round(total_secs, 1)
+        except (json.JSONDecodeError, OSError):
+            # Skip files with invalid JSON or read errors
+            continue
         except Exception:
             pass
         runs.append(meta)
