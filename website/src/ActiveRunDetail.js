@@ -173,23 +173,24 @@ export default function ActiveRunDetail({ filename, onBack, backLabel }) {
                 </div>
               );
             }
+            const verdict = h.verdict || "unknown";
             const isLatest = idx === analyzeHistory.length - 1 ||
               analyzeHistory.slice(idx + 1).every((e) => e.type === "fix");
-            const isPassed = h.verdict === "pass";
+            const isPassed = verdict === "pass";
             const issueCount = Object.values(h.verification?.agents || {}).reduce(
               (sum, a) => sum + (a.issues?.length || 0), 0
             );
             return (
-              <div key={`audit-${idx}`} className={`audit-block audit-block--${h.verdict} ${isLatest ? "audit-block--latest" : "audit-block--historical"}`}>
+              <div key={`audit-${idx}`} className={`audit-block audit-block--${verdict} ${isLatest ? "audit-block--latest" : "audit-block--historical"}`}>
                 <div className="audit-block-header">
-                  <span className={`audit-block-indicator audit-block-indicator--${h.verdict}`}>
-                    {isPassed ? "\u2705" : h.verdict === "warn" ? "\u26A0\uFE0F" : "\u274C"}
+                  <span className={`audit-block-indicator audit-block-indicator--${verdict}`}>
+                    {isPassed ? "\u2705" : verdict === "warn" ? "\u26A0\uFE0F" : "\u274C"}
                   </span>
                   <span className="audit-block-title">
                     {h.attempt === 0 ? "Initial Audit" : `Re-audit after Fix #${h.attempt}`}
                   </span>
-                  <span className={`audit-block-verdict verdict--${h.verdict}`}>
-                    {h.verdict.toUpperCase()}
+                  <span className={`audit-block-verdict verdict--${verdict}`}>
+                    {verdict.toUpperCase()}
                   </span>
                   {issueCount > 0 && (
                     <span className="audit-block-issues">
@@ -275,23 +276,24 @@ export default function ActiveRunDetail({ filename, onBack, backLabel }) {
                 </div>
               );
             }
+            const verdict = h.verdict || "unknown";
             const isLatest = idx === briefHistory.length - 1 ||
               briefHistory.slice(idx + 1).every((e) => e.type === "fix");
-            const isPassed = h.verdict === "pass";
+            const isPassed = verdict === "pass";
             const issueCount = Object.values(h.verification?.agents || {}).reduce(
               (sum, a) => sum + (a.issues?.length || 0), 0
             );
             return (
-              <div key={`audit-${idx}`} className={`audit-block audit-block--${h.verdict} ${isLatest ? "audit-block--latest" : "audit-block--historical"}`}>
+              <div key={`audit-${idx}`} className={`audit-block audit-block--${verdict} ${isLatest ? "audit-block--latest" : "audit-block--historical"}`}>
                 <div className="audit-block-header">
-                  <span className={`audit-block-indicator audit-block-indicator--${h.verdict}`}>
-                    {isPassed ? "\u2705" : h.verdict === "warn" ? "\u26A0\uFE0F" : "\u274C"}
+                  <span className={`audit-block-indicator audit-block-indicator--${verdict}`}>
+                    {isPassed ? "\u2705" : verdict === "warn" ? "\u26A0\uFE0F" : "\u274C"}
                   </span>
                   <span className="audit-block-title">
                     {h.attempt === 0 ? "Initial Audit" : `Re-audit after Fix #${h.attempt}`}
                   </span>
-                  <span className={`audit-block-verdict verdict--${h.verdict}`}>
-                    {h.verdict.toUpperCase()}
+                  <span className={`audit-block-verdict verdict--${verdict}`}>
+                    {verdict.toUpperCase()}
                   </span>
                   {issueCount > 0 && (
                     <span className="audit-block-issues">

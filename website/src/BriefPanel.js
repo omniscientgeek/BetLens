@@ -360,7 +360,7 @@ function VerificationBadge({ verification, streaming = false }) {
                 <div className="vb-agent-header">
                   <span className="vb-agent-icon">{ac.icon}</span>
                   <span className="vb-agent-name">{AGENT_LABELS[name] || name}</span>
-                  <span className="vb-agent-verdict">{agent.verdict.toUpperCase()}</span>
+                  <span className="vb-agent-verdict">{(agent.verdict || "unknown").toUpperCase()}</span>
                   {agentFailPct !== null && (
                     <span className={`vb-agent-fail-pct ${agentFailed === 0 ? "vb-agent-fail-pct--zero" : "vb-agent-fail-pct--nonzero"}`}>
                       {agentFailed}/{agentTotal} failed ({agentFailPct}%)
