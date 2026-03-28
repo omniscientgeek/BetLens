@@ -2092,7 +2092,177 @@ def calculate_odds(american_odds: int) -> str:
     }, indent=2)
 
 
-# 
+# ── Basic Arithmetic Tools ──────────────────────────────────────────────
+
+
+@mcp.tool()
+def arithmetic_add(a: float, b: float) -> str:
+    """Add two numbers together.
+
+    Use this for any addition calculation — bankroll totals, combined payouts,
+    summing edges, accumulating profits, etc.
+
+    Args:
+        a: First number
+        b: Second number
+    """
+    result = a + b
+    return json.dumps({
+        "operation": "add",
+        "a": a,
+        "b": b,
+        "result": result,
+        "expression": f"{a} + {b} = {result}",
+    }, indent=2)
+
+
+@mcp.tool()
+def arithmetic_subtract(a: float, b: float) -> str:
+    """Subtract b from a (a - b).
+
+    Use this for differences — edge calculations, line movement deltas,
+    profit/loss, comparing odds across books, etc.
+
+    Args:
+        a: Number to subtract from
+        b: Number to subtract
+    """
+    result = a - b
+    return json.dumps({
+        "operation": "subtract",
+        "a": a,
+        "b": b,
+        "result": result,
+        "expression": f"{a} - {b} = {result}",
+    }, indent=2)
+
+
+@mcp.tool()
+def arithmetic_multiply(a: float, b: float) -> str:
+    """Multiply two numbers (a × b).
+
+    Use this for scaling — bet sizing from percentages, payout calculations,
+    bankroll × kelly fraction, unit conversion, etc.
+
+    Args:
+        a: First number
+        b: Second number
+    """
+    result = a * b
+    return json.dumps({
+        "operation": "multiply",
+        "a": a,
+        "b": b,
+        "result": result,
+        "expression": f"{a} × {b} = {result}",
+    }, indent=2)
+
+
+@mcp.tool()
+def arithmetic_divide(a: float, b: float) -> str:
+    """Divide a by b (a ÷ b).
+
+    Use this for ratios — vig as percentage, odds conversion, ROI,
+    per-unit profit, average edge, etc.
+
+    Args:
+        a: Numerator (dividend)
+        b: Denominator (divisor) — must not be zero
+    """
+    if b == 0:
+        return json.dumps({
+            "operation": "divide",
+            "a": a,
+            "b": b,
+            "result": None,
+            "error": "Division by zero is undefined",
+        }, indent=2)
+    result = a / b
+    return json.dumps({
+        "operation": "divide",
+        "a": a,
+        "b": b,
+        "result": result,
+        "expression": f"{a} ÷ {b} = {result}",
+    }, indent=2)
+
+
+@mcp.tool()
+def arithmetic_modulo(a: float, b: float) -> str:
+    """Calculate the remainder of a ÷ b (a % b).
+
+    Use this for remainder / modulus operations — checking divisibility,
+    cyclic patterns, rounding logic, etc.
+
+    Args:
+        a: Dividend
+        b: Divisor — must not be zero
+    """
+    if b == 0:
+        return json.dumps({
+            "operation": "modulo",
+            "a": a,
+            "b": b,
+            "result": None,
+            "error": "Modulo by zero is undefined",
+        }, indent=2)
+    result = a % b
+    return json.dumps({
+        "operation": "modulo",
+        "a": a,
+        "b": b,
+        "result": result,
+        "expression": f"{a} % {b} = {result}",
+    }, indent=2)
+
+
+@mcp.tool()
+def arithmetic_evaluate(expression: str) -> str:
+    """Evaluate a multi-step arithmetic expression safely.
+
+    Supports: +, -, *, /, %, parentheses, and decimal numbers.
+    Use this for compound calculations like "(bankroll * kelly_pct) - existing_exposure"
+    or "((odds_a - odds_b) / 2) + margin".
+
+    Args:
+        expression: Arithmetic expression string, e.g. "(100 * 0.25) + 50"
+    """
+    import re
+    # Whitelist: only digits, operators, parens, decimal points, spaces
+    sanitized = expression.strip()
+    if not re.match(r'^[\d\s\+\-\*/%\.\(\)]+$', sanitized):
+        return json.dumps({
+            "operation": "evaluate",
+            "expression": expression,
+            "result": None,
+            "error": "Invalid expression — only numbers and +, -, *, /, %, () are allowed",
+        }, indent=2)
+
+    try:
+        # Safe eval with no builtins or namespace access
+        result = eval(sanitized, {"__builtins__": {}}, {})
+        return json.dumps({
+            "operation": "evaluate",
+            "expression": expression,
+            "result": result,
+        }, indent=2)
+    except ZeroDivisionError:
+        return json.dumps({
+            "operation": "evaluate",
+            "expression": expression,
+            "result": None,
+            "error": "Division by zero in expression",
+        }, indent=2)
+    except Exception as e:
+        return json.dumps({
+            "operation": "evaluate",
+            "expression": expression,
+            "result": None,
+            "error": f"Could not evaluate expression: {str(e)}",
+        }, indent=2)
+
+
+#
 
 @mcp.tool()
 def get_kelly_sizing(game_id: Optional[str] = None, filename: Optional[str] = None, kelly_fraction: float = 0.25, bankroll: float = 1000.0) -> str:

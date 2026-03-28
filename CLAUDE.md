@@ -52,7 +52,7 @@ A standalone MCP server (`mcp-server/mcp_server.py`) that exposes betting intell
 
 **Run manually:** `python mcp-server/mcp_server.py`
 
-### Available MCP Tools (34 total)
+### Available MCP Tools (40 total)
 
 | Tool | Purpose |
 |------|---------|
@@ -92,6 +92,12 @@ A standalone MCP server (`mcp-server/mcp_server.py`) that exposes betting intell
 | `get_shin_fair_odds` | Shin model margin decomposition — allocates more vig to longshots (how books actually operate) for more accurate true probabilities than naive vig removal |
 | `get_information_flow` | Map timestamp-based information flow — which sportsbook moves first (market leader/sharpest) vs followers, with exploitable laggard windows |
 | `get_daily_digest` | Structured daily briefing: must-bet, avoid, interesting, book grades, power rankings |
+| `arithmetic_add` | Add two numbers (a + b) — bankroll totals, combined payouts, summing edges |
+| `arithmetic_subtract` | Subtract two numbers (a - b) — edge calculations, line deltas, profit/loss |
+| `arithmetic_multiply` | Multiply two numbers (a × b) — bet sizing, payout calculations, bankroll × kelly |
+| `arithmetic_divide` | Divide two numbers (a ÷ b) — ratios, vig percentages, ROI, per-unit profit |
+| `arithmetic_modulo` | Remainder of division (a % b) — divisibility checks, cyclic patterns |
+| `arithmetic_evaluate` | Evaluate multi-step arithmetic expressions safely, e.g. "(100 * 0.25) + 50" |
 
 ### MCP Resources
 
