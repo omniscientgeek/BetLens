@@ -14,6 +14,21 @@ const SOCKET_URL = "";
 const PHASE_LABELS = { detect: "Detect", analyze: "Analyze", brief: "Brief" };
 const PHASE_NAMES = ["detect", "analyze", "brief"];
 
+// Session persistence helpers — survive refresh, cleared on tab close
+const SESSION_PREFIX = "betstamp_";
+function sessionGet(key, fallback = null) {
+  try {
+    const raw = sessionStorage.getItem(SESSION_PREFIX + key);
+    return raw !== null ? JSON.parse(raw) : fallback;
+  } catch { return fallback; }
+}
+function sessionSet(key, value) {
+  try { sessionStorage.setItem(SESSION_PREFIX + key, JSON.stringify(value)); } catch {}
+}
+function sessionRemove(key) {
+  try { sessionStorage.removeItem(SESSION_PREFIX + key); } catch {}
+}
+
 function Navigation() {
   const location = useLocation();
 
@@ -43,19 +58,19 @@ function Navigation() {
 
 function BetLens() {
   const [files, setFiles] = useState([]);
-  const [selectedFile, setSelectedFile] = useState("");
-  const [fileData, setFileData] = useState(null);
+  const [selectedFile, setSelectedFile] = useState(() => sessionGet("selectedFile", ""));
+  const [fileData, setFileData] = useState(() => sessionGet("fileData", null));
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
   // Pipeline state
   const [pipeline, setPipeline] = useState(null);
-  const [pipelineComplete, setPipelineComplete] = useState(false);
+  const [pipelineComplete, setPipelineComplete] = useState(() => sessionGet("pipelineComplete", false));
   const [pipelineError, setPipelineError] = useState(null);
   const socketRef = useRef(null);
 
   // Pipeline results (used by BriefPanel and ChatPanel)
-  const [pipelineResults, setPipelineResults] = useState(null);
+  const [pipelineResults, setPipelineResults] = useState(() => sessionGet("pipelineResults", null));
 
   // Incremental phase results (captured as each phase completes)
   const [phaseResults, setPhaseResults] = useState({});
@@ -74,6 +89,12 @@ function BetLens() {
     setDebugMode(next);
     localStorage.setItem("betstamp_debug", String(next));
   };
+
+  // Persist key state to sessionStorage so data survives page refresh
+  useEffect(() => { sessionSet("selectedFile", selectedFile); }, [selectedFile]);
+  useEffect(() => { sessionSet("fileData", fileData); }, [fileData]);
+  useEffect(() => { sessionSet("pipelineComplete", pipelineComplete); }, [pipelineComplete]);
+  useEffect(() => { sessionSet("pipelineResults", pipelineResults); }, [pipelineResults]);
 
   // Fetch available JSON files on mount
   useEffect(() => {
@@ -190,10 +211,59 @@ function BetLens() {
       briefText = analysis;
     } else if (analysis && typeof analysis === "object") {
       const parts = [];
-      if (analysis.summary) parts.push(`## Summary\n${analysis.summary}`);
+
+      // AI-generated summary takes priority if available
+      if (analysis.ai_summary) {
+        parts.push(`## AI Analysis Summary\n${analysis.ai_summary}`);
+      } else if (analysis.summary) {
+        parts.push(`## Summary\n${analysis.summary}`);
+      }
+
+      // Market assessment from AI
+      if (analysis.market_assessment && Object.keys(analysis.market_assessment).length > 0) {
+        const ma = analysis.market_assessment;
+        const maLines = [];
+        if (ma.overall_health) maLines.push(`**Market Health:** ${ma.overall_health}`);
+        if (ma.efficiency_score !== undefined) maLines.push(`**Efficiency Score:** ${ma.efficiency_score}/100`);
+        if (ma.key_themes?.length) maLines.push(`**Key Themes:** ${ma.key_themes.join(", ")}`);
+        if (ma.risk_flags?.length) maLines.push(`**Risk Flags:** ${ma.risk_flags.join(", ")}`);
+        if (maLines.length > 0) parts.push(`## Market Assessment\n${maLines.join("\n")}`);
+      }
+
+      // AI insights (prioritized actions & findings)
+      if (analysis.ai_insights?.length) {
+        const severityOrder = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
+        const sorted = [...analysis.ai_insights].sort(
+          (a, b) => (severityOrder[a.severity] ?? 5) - (severityOrder[b.severity] ?? 5)
+        );
+        const insightLines = sorted.map((ins) => {
+          const badge = ins.severity === "critical" ? "🔴" : ins.severity === "high" ? "🟠" : ins.severity === "medium" ? "🟡" : "🟢";
+          return `- ${badge} **${ins.title}** (${ins.confidence} confidence)\n  ${ins.description}`;
+        });
+        parts.push(`## AI Insights\n${insightLines.join("\n")}`);
+      }
+
+      // Top actions from AI
+      if (analysis.top_actions?.length) {
+        const actionLines = analysis.top_actions.map(
+          (a) => `${a.priority}. **[${(a.urgency || "").toUpperCase()}]** ${a.action}\n   _${a.reasoning}_`
+        );
+        parts.push(`## Recommended Actions\n${actionLines.join("\n")}`);
+      }
+
+      // Book grades from AI
+      if (analysis.book_grades && Object.keys(analysis.book_grades).length > 0) {
+        const gradeLines = Object.entries(analysis.book_grades).map(([book, info]) => {
+          const g = typeof info === "object" ? info : { grade: info };
+          return `- **${book}**: Grade ${g.grade || "N/A"}${g.avg_vig !== undefined ? ` (avg vig: ${g.avg_vig}%)` : ""}`;
+        });
+        parts.push(`## Sportsbook Grades\n${gradeLines.join("\n")}`);
+      }
+
+      // Original data sections (kept for completeness)
       if (analysis.best_lines?.length) {
         parts.push(
-          `## Best Lines\n${analysis.best_lines.map((l) => `- ${typeof l === "string" ? l : JSON.stringify(l)}`).join("\n")}`
+          `## Best Line Shopping\n${analysis.best_lines.map((l) => `- ${typeof l === "string" ? l : JSON.stringify(l)}`).join("\n")}`
         );
       }
       if (analysis.arbitrage?.length) {
@@ -201,11 +271,27 @@ function BetLens() {
           `## Arbitrage Opportunities\n${analysis.arbitrage.map((a) => `- ${typeof a === "string" ? a : JSON.stringify(a)}`).join("\n")}`
         );
       }
+      if (analysis.middles?.length) {
+        parts.push(
+          `## Middle Opportunities\n${analysis.middles.map((m) => `- ${typeof m === "string" ? m : JSON.stringify(m)}`).join("\n")}`
+        );
+      }
       if (analysis.outliers?.length) {
         parts.push(
           `## Outlier Lines\n${analysis.outliers.map((o) => `- ${typeof o === "string" ? o : JSON.stringify(o)}`).join("\n")}`
         );
       }
+      if (analysis.fair_odds_summary?.length) {
+        parts.push(
+          `## Fair Odds & Expected Value\n${analysis.fair_odds_summary.map((f) => `- ${typeof f === "string" ? f : JSON.stringify(f)}`).join("\n")}`
+        );
+      }
+
+      // AI verification notes
+      if (analysis.ai_verification_notes) {
+        parts.push(`## Verification Notes\n_${analysis.ai_verification_notes}_`);
+      }
+
       briefText = parts.length > 0 ? parts.join("\n\n") : JSON.stringify(analysis, null, 2);
     } else {
       briefText = "Analysis complete. Generating full briefing...";

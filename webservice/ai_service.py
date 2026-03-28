@@ -1037,6 +1037,107 @@ Return ONLY valid JSON (no markdown fences). Use this structure:
 }
 """
 
+# ---------------------------------------------------------------------------
+# AI Analyze Phase — Chain-of-Thought System Prompt
+# ---------------------------------------------------------------------------
+
+ANALYZE_COT_SYSTEM_PROMPT = """\
+You are an expert sports-betting market analyst AI. You receive pre-computed \
+cross-sportsbook analysis data (efficiency rankings, best lines, arbitrage, \
+middles, outliers, stale lines, fair odds) and your job is to produce a deep, \
+expert-level analytical interpretation.
+
+## MANDATORY: THINK STEP BY STEP
+
+You MUST use explicit chain-of-thought reasoning. Structure your response as:
+
+<thinking>
+Work through your analysis step by step here. For EVERY claim you make:
+1. Identify the specific data points you are referencing
+2. State what they mean in context
+3. Reason about implications, cross-referencing multiple data sources
+4. Consider alternative explanations or caveats
+5. Only then form your conclusion
+
+Be thorough. Check your reasoning as you go.
+</thinking>
+
+<analysis>
+Your final structured JSON analysis goes here (no markdown fences).
+</analysis>
+
+## MANDATORY: SELF-VERIFICATION CHECKLIST
+
+Before writing your <analysis> block, you MUST complete this checklist inside \
+your <thinking> block:
+
+[ ] CROSS-CHECK: Every arbitrage opportunity — verify both legs exist in the \
+    source data with the exact odds cited. Recompute combined implied probability.
+[ ] CROSS-CHECK: Every "best line" — confirm no other book in the data offers \
+    better odds for that side.
+[ ] CROSS-CHECK: Every outlier — verify it actually deviates from consensus by \
+    the amount claimed.
+[ ] CROSS-CHECK: Every middle — verify the line gap exists between the cited books.
+[ ] CROSS-CHECK: Efficiency rankings — verify the ordering matches vig data.
+[ ] SANITY CHECK: No fabricated sportsbook names — only use books present in data.
+[ ] SANITY CHECK: No fabricated games — only reference games present in data.
+[ ] SANITY CHECK: Fair odds probabilities sum to ~100% per market (before margin).
+[ ] FINAL REVIEW: Re-read your analysis and flag anything you are less than 80% \
+    confident about. Mark uncertain items with "confidence": "low".
+
+If ANY check fails, fix it before writing the <analysis> block.
+
+## Analysis Sections
+
+Your <analysis> JSON must include:
+
+{
+  "insights": [
+    {
+      "type": "arbitrage|middle|outlier|value|efficiency|stale|market_trend",
+      "severity": "critical|high|medium|low|info",
+      "title": "Short descriptive title",
+      "description": "Detailed explanation with specific numbers",
+      "games": ["game_id1"],
+      "books": ["book1", "book2"],
+      "confidence": "high|medium|low",
+      "reasoning": "Why this matters / how you verified it"
+    }
+  ],
+  "market_assessment": {
+    "overall_health": "healthy|volatile|thin|stale|anomalous",
+    "efficiency_score": 0-100,
+    "key_themes": ["theme1", "theme2"],
+    "risk_flags": ["flag1"]
+  },
+  "book_grades": {
+    "book_name": {
+      "grade": "A|B|C|D|F",
+      "avg_vig": 3.5,
+      "strengths": ["..."],
+      "weaknesses": ["..."]
+    }
+  },
+  "top_actions": [
+    {
+      "priority": 1,
+      "action": "What to do",
+      "reasoning": "Why",
+      "urgency": "immediate|today|monitor"
+    }
+  ],
+  "verification_notes": "Summary of self-check results and any caveats",
+  "summary": "2-3 sentence executive summary of the most important findings"
+}
+
+## Rules
+- Reference ONLY data that is actually present in the input. Never fabricate.
+- Every number you cite must trace back to the source data.
+- If data is insufficient for a section, say so explicitly with confidence: "low".
+- Prioritize actionable insights over exhaustive listing.
+- Grade sportsbooks relative to each other, not absolute standards.
+"""
+
 BRIEF_SYSTEM_PROMPT = """\
 You are a senior sports-betting market analyst AI. You receive raw odds data and \
 cross-sportsbook analysis results. Your job is to produce a clear, accurate daily \
@@ -1109,6 +1210,14 @@ This applies to: profit margins, vig percentages, EV edges, implied probabilitie
 payout amounts, combined implied probabilities, Kelly fractions, ROI, averages, \
 odds differences, percentage changes — ANY derivation of a number in the briefing.
 
+AI Analysis Summary:
+The data may include fields from a prior AI Analyze step: "ai_summary", "ai_insights", \
+"market_assessment", "book_grades", and "top_actions". When these are present, use them \
+as the primary basis for your briefing — they contain pre-verified chain-of-thought \
+conclusions. Summarize and reformat their findings into the briefing sections above \
+rather than re-deriving conclusions from the raw numbers. Where the AI analysis is \
+missing or empty, fall back to the raw detection data as before.
+
 Guidelines:
 - Be precise with numbers. Always cite specific odds, lines, and books.
 - Only include value bets where a quantifiable edge exists.
@@ -1118,41 +1227,240 @@ Guidelines:
 """
 
 
+def _build_analyze_payload(detection_data: dict) -> dict:
+    """Build a compact payload for the AI analyze phase from detection output.
+
+    Includes the pre-computed cross-book analysis plus key detection summaries
+    (EV, vig, stale, synthetic book) so the AI has full context to reason over.
+    """
+    analysis = detection_data.get("analysis", {})
+
+    # Include EV summary (flattened top entries)
+    ev_bets: list[dict] = []
+    for game_id, markets in detection_data.get("ev_summary", {}).items():
+        if not isinstance(markets, dict):
+            continue
+        for market_type, entries in markets.items():
+            if not isinstance(entries, list):
+                continue
+            for e in entries[:3]:
+                ev_bets.append({**e, "game_id": game_id, "market": market_type})
+    ev_bets.sort(key=lambda x: abs(x.get("ev_edge", 0)), reverse=True)
+
+    # Vig summary (top books)
+    vig_rankings = [
+        {k: v for k, v in entry.items() if k != "markets"}
+        for entry in (detection_data.get("vig_summary", {}).get("rankings", []) or [])[:10]
+    ]
+
+    # Stale lines
+    stale = detection_data.get("stale_summary", {})
+
+    # Synthetic perfect book
+    synth = detection_data.get("synthetic_perfect_book", {})
+    synth_compact = {
+        "aggregate": synth.get("aggregate", {}),
+        "arb_alerts": synth.get("arb_alerts", []),
+    }
+
+    # Arb profit curves (best pairings only)
+    arb_curves = detection_data.get("arb_profit_curves", {})
+
+    return {
+        "cross_book_analysis": {
+            "games_count": analysis.get("games_count", 0),
+            "books_count": analysis.get("books_count", 0),
+            "efficiency_ranking": analysis.get("efficiency_ranking", []),
+            "best_lines": analysis.get("best_lines", []),
+            "arbitrage": analysis.get("arbitrage", []),
+            "middles": analysis.get("middles", []),
+            "outliers": analysis.get("outliers", [])[:15],
+            "stale_lines": analysis.get("stale_lines", []),
+            "fair_odds_summary": analysis.get("fair_odds_summary", []),
+            "summary": analysis.get("summary", ""),
+        },
+        "ev_bets": ev_bets[:15],
+        "vig_rankings": vig_rankings,
+        "stale_summary": {
+            "count": stale.get("count", 0),
+            "stale_lines": stale.get("stale_lines", [])[:10],
+        },
+        "arb_best_pairings": arb_curves.get("best_pairings", [])[:10],
+        "synthetic_perfect_book": synth_compact,
+    }
+
+
+def _parse_analyze_response(raw_text: str) -> dict:
+    """Extract the JSON analysis from the AI response, handling <thinking>/<analysis> tags."""
+    import re
+
+    # Try to extract from <analysis> tags first
+    analysis_match = re.search(r"<analysis>\s*(.*?)\s*</analysis>", raw_text, re.DOTALL)
+    if analysis_match:
+        json_text = analysis_match.group(1).strip()
+    else:
+        # Fall back: try to find raw JSON object
+        json_text = raw_text.strip()
+
+    # Strip markdown code fences if present
+    json_text = re.sub(r"^```(?:json)?\s*", "", json_text)
+    json_text = re.sub(r"\s*```$", "", json_text)
+
+    # Extract <thinking> block for logging
+    thinking_match = re.search(r"<thinking>\s*(.*?)\s*</thinking>", raw_text, re.DOTALL)
+    thinking = thinking_match.group(1).strip() if thinking_match else None
+
+    try:
+        parsed = json.loads(json_text)
+    except json.JSONDecodeError:
+        # If JSON parsing fails, return the raw text as a fallback
+        parsed = {
+            "insights": [],
+            "market_assessment": {"overall_health": "unknown", "efficiency_score": 0, "key_themes": [], "risk_flags": ["AI response was not valid JSON"]},
+            "book_grades": {},
+            "top_actions": [],
+            "verification_notes": "Failed to parse AI response as JSON",
+            "summary": json_text[:500] if json_text else raw_text[:500],
+            "_parse_error": True,
+        }
+
+    if thinking:
+        parsed["_thinking"] = thinking
+
+    return parsed
+
+
 async def run_analyze_phase(detection_data: dict, run_logger=None) -> dict:
-    """Phase 2: Reserved for future AI-powered analysis.
+    """Phase 2: AI-powered deep analysis with chain-of-thought reasoning.
 
-    Cross-sportsbook analysis (efficiency ranking, best lines, middles,
-    outliers, arbitrage flattening, fair odds summary) has been moved into the
-    detect phase as its second step.  The pre-computed ``analysis`` dict is
-    passed through here so downstream consumers (brief phase, frontend) see
-    the same shape they always did.
+    Sends the pre-computed cross-book analysis data to an AI model with a
+    chain-of-thought prompt. The AI must:
+    1. Reason through the data step by step (<thinking> block)
+    2. Cross-verify every claim against the source data
+    3. Self-check via a verification checklist
+    4. Produce a structured JSON analysis (<analysis> block)
 
-    This function is intentionally kept as a lightweight pass-through so that
-    future AI-powered analysis logic can be layered in without restructuring
-    the pipeline.
+    The pre-computed analysis dict is preserved as-is for backward compatibility.
+    The AI's insights, grades, and actions are layered on top.
     """
     start = time.time()
 
-    # The detect phase now includes the analysis dict directly
-    analysis = detection_data.get("analysis", {})
+    # The detect phase includes the pre-computed analysis
+    precomputed_analysis = detection_data.get("analysis", {})
 
-    elapsed = round(time.time() - start, 2)
+    # Build the payload for the AI
+    analyze_payload = _build_analyze_payload(detection_data)
+    user_prompt = (
+        "Analyze the following betting market data. Think step by step, verify your work, "
+        "and produce your structured analysis.\n\n"
+        + json.dumps(analyze_payload, separators=(",", ":"))
+    )
+
+    # Safety cap
+    if len(user_prompt) > 80000:
+        if run_logger:
+            run_logger.warning("Analyze payload exceeded 80KB (%d chars), truncating", len(user_prompt))
+        user_prompt = user_prompt[:80000]
 
     if run_logger:
-        run_logger.info(
-            "Analyze: pass-through (analysis computed in detect phase) elapsed=%.2fs",
-            elapsed,
+        run_logger.info("Analyze: starting AI call (chain-of-thought enabled)")
+
+    # Use generous token limit — CoT thinking + full analysis
+    analyze_max_tokens = 16384
+
+    try:
+        result = await call_ai(
+            ANALYZE_COT_SYSTEM_PROMPT,
+            user_prompt,
+            run_logger=run_logger,
+            max_tokens=analyze_max_tokens,
         )
 
-    return {
-        "analysis": analysis,
-        "ai_meta": {
-            "provider": "local",
-            "model": "detect-pipeline",
-            "usage": {},
-            "elapsed_seconds": elapsed,
-        },
-    }
+        if run_logger:
+            run_logger.info(
+                "Analyze: AI complete provider=%s model=%s elapsed=%.2fs tokens_in=%d tokens_out=%d",
+                result["provider_name"], result["model"], result["elapsed_seconds"],
+                result.get("usage", {}).get("input_tokens", 0),
+                result.get("usage", {}).get("output_tokens", 0),
+            )
+
+        raw_response_text = result["text"]
+
+        # Parse the AI response (handles <thinking>/<analysis> tags)
+        ai_analysis = _parse_analyze_response(raw_response_text)
+
+        # Log thinking block if present
+        if run_logger and ai_analysis.get("_thinking"):
+            run_logger.info("Analyze: AI chain-of-thought reasoning (%d chars)", len(ai_analysis["_thinking"]))
+
+        # --- Merge: preserve backward-compatible fields from precomputed analysis ---
+        merged = {**precomputed_analysis}
+
+        # Layer on AI-generated fields
+        merged["ai_insights"] = ai_analysis.get("insights", [])
+        merged["market_assessment"] = ai_analysis.get("market_assessment", {})
+        merged["book_grades"] = ai_analysis.get("book_grades", {})
+        merged["top_actions"] = ai_analysis.get("top_actions", [])
+        merged["ai_verification_notes"] = ai_analysis.get("verification_notes", "")
+
+        # If AI produced a better summary, use it (but keep original as fallback)
+        if ai_analysis.get("summary") and not ai_analysis.get("_parse_error"):
+            merged["ai_summary"] = ai_analysis["summary"]
+
+        elapsed = round(time.time() - start, 2)
+
+        return {
+            "analysis": merged,
+            "ai_meta": {
+                "provider": result["provider_name"],
+                "model": result["model"],
+                "usage": result["usage"],
+                "elapsed_seconds": elapsed,
+                "chain_of_thought": bool(ai_analysis.get("_thinking")),
+                "self_verified": "verification_notes" in ai_analysis,
+            },
+            "conversation": {
+                "system_prompt": ANALYZE_COT_SYSTEM_PROMPT,
+                "user_prompt": user_prompt,
+                "assistant_response": raw_response_text,
+                "thinking": ai_analysis.get("_thinking"),
+                "tool_calls": result.get("tool_calls", []),
+            },
+        }
+
+    except Exception as exc:
+        # Graceful degradation: fall back to precomputed analysis
+        elapsed = round(time.time() - start, 2)
+        if run_logger:
+            run_logger.error("Analyze: AI call failed (%s), falling back to precomputed analysis", exc)
+
+        return {
+            "analysis": {
+                **precomputed_analysis,
+                "ai_insights": [],
+                "market_assessment": {},
+                "book_grades": {},
+                "top_actions": [],
+                "ai_verification_notes": f"AI analysis unavailable: {exc}",
+            },
+            "ai_meta": {
+                "provider": "local-fallback",
+                "model": "detect-pipeline",
+                "usage": {},
+                "elapsed_seconds": elapsed,
+                "chain_of_thought": False,
+                "self_verified": False,
+                "error": str(exc),
+            },
+            "conversation": {
+                "system_prompt": ANALYZE_COT_SYSTEM_PROMPT,
+                "user_prompt": user_prompt if 'user_prompt' in dir() else None,
+                "assistant_response": None,
+                "thinking": None,
+                "tool_calls": [],
+                "error": str(exc),
+            },
+        }
 
 
 def _build_brief_payload(detection_data: dict, analysis_data: dict) -> dict:
@@ -1212,6 +1520,12 @@ def _build_brief_payload(detection_data: dict, analysis_data: dict) -> dict:
             for entry in (detection_data.get("vig_summary", {}).get("rankings", []) or [])[:8]
         ],
         "synthetic_perfect_book": synth_compact,
+        # --- AI-generated insights from the Analyze phase ---
+        "ai_summary": analysis.get("ai_summary", ""),
+        "ai_insights": analysis.get("ai_insights", []),
+        "market_assessment": analysis.get("market_assessment", {}),
+        "book_grades": analysis.get("book_grades", {}),
+        "top_actions": analysis.get("top_actions", []),
     }
 
 
