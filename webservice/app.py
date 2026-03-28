@@ -381,6 +381,7 @@ async def run_processing_pipeline(filename: str, state: PipelineState):
                             )
 
                             fix_history.append({
+                                "type": "audit",
                                 "attempt": fix_attempt,
                                 "verdict": overall,
                                 "verification": verification,
@@ -431,6 +432,14 @@ async def run_processing_pipeline(filename: str, state: PipelineState):
                                 analysis["conversation"]["assistant_response"] = current_text
                                 pipeline_results["analyze"] = analysis
 
+                                # Store the fix conversation in fix_history as a separate entry
+                                fix_history.append({
+                                    "type": "fix",
+                                    "attempt": fix_attempt,
+                                    "conversation": fix_result.get("conversation"),
+                                    "ai_meta": fix_result.get("ai_meta"),
+                                })
+
                                 fix_complete_payload = {
                                     "filename": filename,
                                     "phase": "analyze",
@@ -438,6 +447,7 @@ async def run_processing_pipeline(filename: str, state: PipelineState):
                                     "max_attempts": MAX_FIX_ATTEMPTS,
                                     "run_id": run_id,
                                     "fix_ai_meta": fix_result.get("ai_meta"),
+                                    "fix_conversation": fix_result.get("conversation"),
                                 }
                                 state.replay_events.append({"type": "fix_complete", "payload": fix_complete_payload})
                                 await _safe_emit(state, "fix_complete", fix_complete_payload)
@@ -592,6 +602,7 @@ async def run_processing_pipeline(filename: str, state: PipelineState):
                             )
 
                             fix_history.append({
+                                "type": "audit",
                                 "attempt": fix_attempt,
                                 "verdict": overall,
                                 "verification": verification,
@@ -646,6 +657,14 @@ async def run_processing_pipeline(filename: str, state: PipelineState):
                                 brief["brief_text"] = current_brief_text
                                 pipeline_results["brief"] = brief
 
+                                # Store the fix conversation in fix_history as a separate entry
+                                fix_history.append({
+                                    "type": "fix",
+                                    "attempt": fix_attempt,
+                                    "conversation": fix_result.get("conversation"),
+                                    "ai_meta": fix_result.get("ai_meta"),
+                                })
+
                                 fix_complete_payload = {
                                     "filename": filename,
                                     "phase": "brief",
@@ -653,6 +672,7 @@ async def run_processing_pipeline(filename: str, state: PipelineState):
                                     "max_attempts": MAX_FIX_ATTEMPTS,
                                     "run_id": run_id,
                                     "fix_ai_meta": fix_result.get("ai_meta"),
+                                    "fix_conversation": fix_result.get("conversation"),
                                 }
                                 state.replay_events.append({"type": "fix_complete", "payload": fix_complete_payload})
                                 await _safe_emit(state, "fix_complete", fix_complete_payload)

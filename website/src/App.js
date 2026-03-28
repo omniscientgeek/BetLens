@@ -569,6 +569,8 @@ function BetLens() {
         [phase]: {
           ...prev[phase],
           status: "re-auditing",
+          fixConversation: data.fix_conversation || null,
+          fixAiMeta: data.fix_ai_meta || null,
         },
       }));
     });
@@ -1266,23 +1268,44 @@ function BetLens() {
                 )}
 
                 {/* Audit Analyze — each attempt as a separate block */}
-                {analyzeHistory.length > 0 ? (
-                  <div className="audit-timeline">
-                    <div className="audit-timeline-header">
-                      <span className="audit-timeline-icon">{"\u{1F6E1}"}</span>
-                      <h3>Audit Analyze Timeline</h3>
-                      <span className="audit-timeline-count">
-                        {analyzeHistory.length} audit{analyzeHistory.length !== 1 ? "s" : ""}
-                      </span>
-                    </div>
-                    {analyzeHistory.map((h, idx) => {
-                      const isLatest = idx === analyzeHistory.length - 1;
+                {(() => {
+                  const auditEntries = analyzeHistory.filter((h) => h.type !== "fix");
+                  const fixEntries = analyzeHistory.filter((h) => h.type === "fix");
+
+                  if (analyzeHistory.length > 0) {
+                    const timelineItems = analyzeHistory.map((h, idx) => {
+                      if (h.type === "fix") {
+                        return (
+                          <div key={`fix-${idx}`} className="fix-block">
+                            <div className="fix-block-header">
+                              <span className="fix-block-indicator">{"\u{1F527}"}</span>
+                              <span className="fix-block-title">Fix #{h.attempt}</span>
+                              {h.ai_meta && (
+                                <span className="fix-block-meta">
+                                  {h.ai_meta.provider} / {h.ai_meta.model}
+                                  {h.ai_meta.elapsed_seconds != null && ` \u00B7 ${h.ai_meta.elapsed_seconds.toFixed(1)}s`}
+                                </span>
+                              )}
+                            </div>
+                            {h.conversation && (
+                              <AnalyzeConversation
+                                analyzeResult={{ conversation: h.conversation, ai_meta: h.ai_meta }}
+                                streaming={false}
+                                defaultExpanded={false}
+                                title={`Fix #${h.attempt} Conversation`}
+                              />
+                            )}
+                          </div>
+                        );
+                      }
+                      const isLatest = idx === analyzeHistory.length - 1 ||
+                        analyzeHistory.slice(idx + 1).every((e) => e.type === "fix");
                       const isPassed = h.verdict === "pass";
                       const issueCount = Object.values(h.verification?.agents || {}).reduce(
                         (sum, a) => sum + (a.issues?.length || 0), 0
                       );
                       return (
-                        <div key={idx} className={`audit-block audit-block--${h.verdict} ${isLatest ? "audit-block--latest" : "audit-block--historical"}`}>
+                        <div key={`audit-${idx}`} className={`audit-block audit-block--${h.verdict} ${isLatest ? "audit-block--latest" : "audit-block--historical"}`}>
                           <div className="audit-block-header">
                             <span className={`audit-block-indicator audit-block-indicator--${h.verdict}`}>
                               {isPassed ? "\u2705" : h.verdict === "warn" ? "\u26A0\uFE0F" : "\u274C"}
@@ -1303,17 +1326,37 @@ function BetLens() {
                           <VerificationBadge verification={h.verification} />
                         </div>
                       );
-                    })}
-                  </div>
-                ) : analyzeV && (
-                  <div className="verification-card">
-                    <div className="verification-card-header">
-                      <span className="verification-card-icon">{"\u{1F6E1}"}</span>
-                      <h3>Audit Analyze</h3>
-                    </div>
-                    <VerificationBadge verification={analyzeV} />
-                  </div>
-                )}
+                    });
+
+                    return (
+                      <div className="audit-timeline">
+                        <div className="audit-timeline-header">
+                          <span className="audit-timeline-icon">{"\u{1F6E1}"}</span>
+                          <h3>Audit Analyze Timeline</h3>
+                          <span className="audit-timeline-count">
+                            {auditEntries.length} audit{auditEntries.length !== 1 ? "s" : ""}
+                            {fixEntries.length > 0 && `, ${fixEntries.length} fix${fixEntries.length !== 1 ? "es" : ""}`}
+                          </span>
+                        </div>
+                        {timelineItems}
+                      </div>
+                    );
+                  }
+
+                  if (analyzeV) {
+                    return (
+                      <div className="verification-card">
+                        <div className="verification-card-header">
+                          <span className="verification-card-icon">{"\u{1F6E1}"}</span>
+                          <h3>Audit Analyze</h3>
+                        </div>
+                        <VerificationBadge verification={analyzeV} />
+                      </div>
+                    );
+                  }
+
+                  return null;
+                })()}
               </>
             );
           })()}
@@ -1388,23 +1431,44 @@ function BetLens() {
                 )}
 
                 {/* Audit Brief — each attempt as a separate block */}
-                {briefHistory.length > 0 ? (
-                  <div className="audit-timeline">
-                    <div className="audit-timeline-header">
-                      <span className="audit-timeline-icon">{"\u{1F6E1}"}</span>
-                      <h3>Audit Brief Timeline</h3>
-                      <span className="audit-timeline-count">
-                        {briefHistory.length} audit{briefHistory.length !== 1 ? "s" : ""}
-                      </span>
-                    </div>
-                    {briefHistory.map((h, idx) => {
-                      const isLatest = idx === briefHistory.length - 1;
+                {(() => {
+                  const briefAuditEntries = briefHistory.filter((h) => h.type !== "fix");
+                  const briefFixEntries = briefHistory.filter((h) => h.type === "fix");
+
+                  if (briefHistory.length > 0) {
+                    const timelineItems = briefHistory.map((h, idx) => {
+                      if (h.type === "fix") {
+                        return (
+                          <div key={`fix-${idx}`} className="fix-block">
+                            <div className="fix-block-header">
+                              <span className="fix-block-indicator">{"\u{1F527}"}</span>
+                              <span className="fix-block-title">Fix #{h.attempt}</span>
+                              {h.ai_meta && (
+                                <span className="fix-block-meta">
+                                  {h.ai_meta.provider} / {h.ai_meta.model}
+                                  {h.ai_meta.elapsed_seconds != null && ` \u00B7 ${h.ai_meta.elapsed_seconds.toFixed(1)}s`}
+                                </span>
+                              )}
+                            </div>
+                            {h.conversation && (
+                              <AnalyzeConversation
+                                analyzeResult={{ conversation: h.conversation, ai_meta: h.ai_meta }}
+                                streaming={false}
+                                defaultExpanded={false}
+                                title={`Fix #${h.attempt} Conversation`}
+                              />
+                            )}
+                          </div>
+                        );
+                      }
+                      const isLatest = idx === briefHistory.length - 1 ||
+                        briefHistory.slice(idx + 1).every((e) => e.type === "fix");
                       const isPassed = h.verdict === "pass";
                       const issueCount = Object.values(h.verification?.agents || {}).reduce(
                         (sum, a) => sum + (a.issues?.length || 0), 0
                       );
                       return (
-                        <div key={idx} className={`audit-block audit-block--${h.verdict} ${isLatest ? "audit-block--latest" : "audit-block--historical"}`}>
+                        <div key={`audit-${idx}`} className={`audit-block audit-block--${h.verdict} ${isLatest ? "audit-block--latest" : "audit-block--historical"}`}>
                           <div className="audit-block-header">
                             <span className={`audit-block-indicator audit-block-indicator--${h.verdict}`}>
                               {isPassed ? "\u2705" : h.verdict === "warn" ? "\u26A0\uFE0F" : "\u274C"}
@@ -1425,17 +1489,37 @@ function BetLens() {
                           <VerificationBadge verification={h.verification} />
                         </div>
                       );
-                    })}
-                  </div>
-                ) : briefV && (
-                  <div className="verification-card">
-                    <div className="verification-card-header">
-                      <span className="verification-card-icon">{"\u{1F6E1}"}</span>
-                      <h3>Audit Brief</h3>
-                    </div>
-                    <VerificationBadge verification={briefV} />
-                  </div>
-                )}
+                    });
+
+                    return (
+                      <div className="audit-timeline">
+                        <div className="audit-timeline-header">
+                          <span className="audit-timeline-icon">{"\u{1F6E1}"}</span>
+                          <h3>Audit Brief Timeline</h3>
+                          <span className="audit-timeline-count">
+                            {briefAuditEntries.length} audit{briefAuditEntries.length !== 1 ? "s" : ""}
+                            {briefFixEntries.length > 0 && `, ${briefFixEntries.length} fix${briefFixEntries.length !== 1 ? "es" : ""}`}
+                          </span>
+                        </div>
+                        {timelineItems}
+                      </div>
+                    );
+                  }
+
+                  if (briefV) {
+                    return (
+                      <div className="verification-card">
+                        <div className="verification-card-header">
+                          <span className="verification-card-icon">{"\u{1F6E1}"}</span>
+                          <h3>Audit Brief</h3>
+                        </div>
+                        <VerificationBadge verification={briefV} />
+                      </div>
+                    );
+                  }
+
+                  return null;
+                })()}
               </>
             );
           })()}
