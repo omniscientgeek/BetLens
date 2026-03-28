@@ -1,6 +1,24 @@
 {
   "commits": [
     {
+      "hash": "344f0acc",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 16:25:26 -0600",
+      "subject": "Update dev notes, git stats, and combined devnotes MD",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "e28b55f9",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 16:21:56 -0600",
+      "subject": "Add rate-limit backoff and reduce payload sizes to stay within 30K token/min limit",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
       "hash": "8cd7ab64",
       "author": "Justin",
       "email": "justin@omniscientgeek.com",
@@ -965,13 +983,13 @@
     }
   ],
   "summary": {
-    "total_commits": 107,
-    "claude_commits": 96,
+    "total_commits": 109,
+    "claude_commits": 98,
     "autosync_commits": 9,
     "user_commits": 2,
-    "claude_percentage": 89.7,
-    "autosync_percentage": 8.4,
-    "user_percentage": 1.9,
-    "generated_at": "2026-03-28T16:09:40.665128"
+    "claude_percentage": 89.9,
+    "autosync_percentage": 8.3,
+    "user_percentage": 1.8,
+    "generated_at": "2026-03-28T16:26:08.295114"
   }
 }
