@@ -2962,6 +2962,46 @@ def simulate_bankroll_kelly(
     return json.dumps(result, indent=2)
 
 
+def _compact_entropy_result(result: dict) -> dict:
+    """Strip per-book detail arrays from entropy results to keep response compact.
+
+    When querying all games, the per-book implied probability lists for every
+    game × market × side can balloon the response to 90KB+.  This helper
+    preserves the summary stats (entropy bits, efficiency ratio, prob range/spread)
+    while dropping the individual book arrays (~80% size reduction).
+    """
+    compact_games = []
+    for g in result.get("entropy_by_game", []):
+        cg = {
+            "game_id": g["game_id"],
+            "sport": g.get("sport"),
+            "home_team": g.get("home_team"),
+            "away_team": g.get("away_team"),
+            "avg_entropy": g.get("avg_entropy", 0),
+            "avg_efficiency_ratio": g.get("avg_efficiency_ratio", 0),
+            "markets": {},
+        }
+        for mkt_name, mkt_data in g.get("markets", {}).items():
+            cg["markets"][mkt_name] = {
+                "avg_entropy_bits": mkt_data.get("avg_entropy_bits", 0),
+                "avg_efficiency_ratio": mkt_data.get("avg_efficiency_ratio", 0),
+                "sides": {
+                    side: {
+                        "entropy_bits": sd["entropy_bits"],
+                        "efficiency_ratio": sd["efficiency_ratio"],
+                        "book_count": sd["book_count"],
+                        "prob_range": sd["prob_range"],
+                        "prob_spread": sd["prob_spread"],
+                    }
+                    for side, sd in mkt_data.get("sides", {}).items()
+                },
+            }
+        compact_games.append(cg)
+    compacted = dict(result)
+    compacted["entropy_by_game"] = compact_games
+    return compacted
+
+
 @mcp.tool()
 def get_market_entropy(game_id: Optional[str] = None, filename: Optional[str] = None) -> str:
     """Measure market efficiency via Shannon entropy of implied probabilities across books.
@@ -2992,6 +3032,9 @@ def get_market_entropy(game_id: Optional[str] = None, filename: Optional[str] = 
     cache_key = f"entropy:{game_id or 'all'}"
     cached = _cache.get_analysis(filename, cache_key)
     if cached is not None:
+        # Apply compaction for all-games queries (strip per-book detail)
+        if not game_id:
+            cached = _compact_entropy_result(cached)
         return json.dumps(cached, indent=2)
 
     enriched = _cache.load_enriched(filename)
@@ -3141,11 +3184,17 @@ def get_market_entropy(game_id: Optional[str] = None, filename: Optional[str] = 
             f"Shannon entropy across {len(entropy_by_game)} games (avg {round(overall_avg, 4)} bits). "
             f"Higher entropy = more book disagreement = potentially exploitable. "
             f"Most inefficient: {top_exploitable[0]['matchup']} ({top_exploitable[0]['avg_entropy']:.4f} bits)."
+            f"{' Pass game_id to get full per-book breakdowns.' if not game_id else ''}"
             if top_exploitable else "No games with sufficient data for entropy analysis."
         ),
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
+    # Cache stores the FULL result (with per-book detail); compaction is applied on read.
     _cache.set_analysis(filename, cache_key, result)
+
+    # For all-games queries, compact before returning (strips per-book arrays)
+    if not game_id:
+        result = _compact_entropy_result(result)
     return json.dumps(result, indent=2)
 
 
