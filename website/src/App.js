@@ -11,8 +11,14 @@ import "./App.css"; // updated
 const API_BASE = "";
 const SOCKET_URL = "";
 
-const PHASE_LABELS = { detect: "Detect", analyze: "Analyze", brief: "Brief" };
-const PHASE_NAMES = ["detect", "analyze", "brief"];
+const PHASE_LABELS = {
+  detect: "Detect",
+  analyze: "Analyze",
+  audit_analyze: "Audit Analyze",
+  brief: "Brief",
+  audit_brief: "Audit Brief",
+};
+const PHASE_NAMES = ["detect", "analyze", "audit_analyze", "brief", "audit_brief"];
 
 // Retry-enabled fetch: retries on network errors / 5xx with exponential backoff
 async function fetchWithRetry(url, options = {}, maxRetries = 3) {
@@ -552,9 +558,9 @@ function BetLens() {
         );
       }
 
-      // AI verification notes
+      // AI audit notes
       if (analysis.ai_verification_notes) {
-        parts.push(`## Verification Notes\n_${analysis.ai_verification_notes}_`);
+        parts.push(`## Audit Notes\n_${analysis.ai_verification_notes}_`);
       }
 
       briefText = parts.length > 0 ? parts.join("\n\n") : JSON.stringify(analysis, null, 2);
@@ -577,7 +583,8 @@ function BetLens() {
     return `${mins}:${String(secs).padStart(2, "0")}`;
   };
 
-  // Determine step status for the pipeline stepper
+  // Determine step status for the 5-step pipeline
+  // Server sends 5 phases: 0=Detect, 1=Analyze, 2=Audit Analyze, 3=Brief, 4=Audit Brief
   const getStepStatus = (idx) => {
     if (!pipeline) return "pending";
     if (idx < pipeline.phaseIndex) return "complete";
@@ -749,12 +756,12 @@ function BetLens() {
             <BriefPanel briefResult={pipelineResults.brief} />
           )}
 
-          {/* Sub-Agent Verification — standalone card */}
+          {/* Audit Brief — standalone card */}
           {pipelineResults?.brief?.verification && (
             <div className="verification-card">
               <div className="verification-card-header">
                 <span className="verification-card-icon">🛡</span>
-                <h3>Sub-Agent Review</h3>
+                <h3>Audit Brief</h3>
               </div>
               <VerificationBadge verification={pipelineResults.brief.verification} />
             </div>

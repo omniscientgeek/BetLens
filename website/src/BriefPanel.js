@@ -205,7 +205,7 @@ function renderBriefMarkdown(text) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Verification Badge — shows agent verification status                */
+/*  Audit Badge — shows audit agent results                              */
 /* ------------------------------------------------------------------ */
 
 const VERDICT_CONFIG = {
@@ -247,7 +247,7 @@ function VerificationBadge({ verification }) {
       <button
         className="vb-summary-btn"
         onClick={() => setExpanded(!expanded)}
-        title="Click to expand verification details"
+        title="Click to expand audit details"
       >
         <span className="vb-icon">{cfg.icon}</span>
         <span className="vb-label">{cfg.label}</span>

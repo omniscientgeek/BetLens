@@ -242,7 +242,7 @@ function AnalyzeConversation({ analyzeResult, streaming, defaultExpanded, title 
             </CollapsibleSection>
           )}
 
-          {/* Verification Badge — shown after verification agents complete */}
+          {/* Audit Analyze — shown after audit agents complete */}
           {!isStreaming && analyzeResult.verification && (
             <VerificationBadge verification={analyzeResult.verification} />
           )}
