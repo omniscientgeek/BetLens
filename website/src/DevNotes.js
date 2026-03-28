@@ -11,6 +11,7 @@ function DevNotes() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [generated, setGenerated] = useState(false);
+  const [mdReady, setMdReady] = useState(false);
   const [expandedId, setExpandedId] = useState(null);
   const [sortOrder, setSortOrder] = useState("newest");
   const [filter, setFilter] = useState("both"); // "both", "conversations", "notes"
@@ -67,6 +68,7 @@ function DevNotes() {
     setConversations([]);
     setNotes([]);
     setGenerated(false);
+    setMdReady(false);
 
     try {
       // Fetch conversations, git stats, devnotes, and generate combined MD in parallel
@@ -94,7 +96,9 @@ function DevNotes() {
         setNotes(notesData.notes || []);
       }
 
-      if (!mdRes.ok) {
+      if (mdRes.ok) {
+        setMdReady(true);
+      } else {
         console.warn("Failed to generate combined MD file");
       }
 
@@ -157,6 +161,17 @@ function DevNotes() {
         >
           {loading ? "Generating..." : isRailway ? "Unavailable" : "Generate"}
         </button>
+
+        {mdReady && (
+          <a
+            className="generate-btn"
+            href={`${API_BASE}/download-devnotes-md`}
+            download="devnotes_combined.MD"
+            style={{ textDecoration: "none" }}
+          >
+            ⬇ Download MD
+          </a>
+        )}
 
         <div className="filter-group">
           {[

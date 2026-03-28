@@ -16,7 +16,7 @@ setup_logging()
 logger = logging.getLogger(__name__)
 
 from fastapi import FastAPI, Query, Request, UploadFile, File
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import StreamingResponse
@@ -1497,7 +1497,7 @@ async def generate_devnotes_md(project_id: int = Query(default=10)):
 
     # Write to devNotesData/
     os.makedirs(DEV_NOTES_DIR, exist_ok=True)
-    md_filename = f"devnotes_combined_project_{project_id}.md"
+    md_filename = "devnotes_combined.MD"
     md_path = os.path.join(DEV_NOTES_DIR, md_filename)
 
     import aiofiles
@@ -1514,6 +1514,15 @@ async def generate_devnotes_md(project_id: int = Query(default=10)):
         "conversations_count": len(conversations),
         "notes_count": len(notes),
     }
+
+
+@app.get("/api/download-devnotes-md")
+async def download_devnotes_md():
+    """Serve the combined devnotes MD file for download."""
+    md_path = os.path.join(DEV_NOTES_DIR, "devnotes_combined.MD")
+    if not os.path.isfile(md_path):
+        return JSONResponse({"error": "File not found. Generate it first."}, status_code=404)
+    return FileResponse(md_path, filename="devnotes_combined.MD", media_type="text/markdown")
 
 
 REPO_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
