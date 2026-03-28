@@ -28,6 +28,7 @@ from ai_service import (
     run_brief_phase,
     call_ai_chat,
     CHAT_SYSTEM_PROMPT,
+    _build_brief_payload,
 )
 from verification_agents import run_verification
 
@@ -154,10 +155,13 @@ async def run_processing_pipeline(filename, sid):
                     # --- Verification: run 3 agents in parallel to double-check the brief ---
                     try:
                         run_logger.info("Starting verification agents for brief...")
-                        source_data = json.dumps({
-                            "detect": pipeline_results.get("detect", {}),
-                            "analyze": pipeline_results.get("analyze", {}),
-                        }, indent=2)[:20000]
+                        source_data = json.dumps(
+                            _build_brief_payload(
+                                pipeline_results.get("detect", {}),
+                                pipeline_results.get("analyze", {}),
+                            ),
+                            separators=(",", ":"),
+                        )
 
                         verification = await run_verification(
                             text_to_verify=brief["brief_text"],
@@ -741,10 +745,10 @@ async def chat(request: Request):
     # Build system prompt with optional pipeline context
     system_prompt = CHAT_SYSTEM_PROMPT
     if session.get("pipeline_context"):
-        context_str = json.dumps(session["pipeline_context"], indent=2)
-        # Truncate to 20KB
-        if len(context_str) > 20480:
-            context_str = context_str[:20480] + "\n... (truncated)"
+        context_str = json.dumps(session["pipeline_context"], separators=(",", ":"))
+        # Truncate to 60KB (compact JSON keeps payload small)
+        if len(context_str) > 61440:
+            context_str = context_str[:61440] + "\n... (truncated)"
         system_prompt += (
             "\n\n=== PIPELINE CONTEXT ===\n"
             + context_str
