@@ -210,7 +210,7 @@ def _find_node() -> str:
     )
 
 
-async def _call_claude_sdk(provider: dict, system_prompt: str, user_prompt: str, config: dict, *, use_mcp: bool = False, max_turns: int = 1) -> dict:
+async def _call_claude_sdk(provider: dict, system_prompt: str, user_prompt: str, config: dict, *, use_mcp: bool = False, max_turns: Optional[int] = None) -> dict:
     """
     Call Claude via the Agent SDK wrapper (Node.js subprocess).
 
@@ -234,7 +234,7 @@ async def _call_claude_sdk(provider: dict, system_prompt: str, user_prompt: str,
     rl = _current_run_logger.get(None)
     if rl:
         rl.info("=" * 60)
-        rl.info("CLAUDE SDK REQUEST (use_mcp=%s, max_turns=%d)", use_mcp, max_turns)
+        rl.info("CLAUDE SDK REQUEST (use_mcp=%s, max_turns=%s)", use_mcp, max_turns or "unlimited")
         rl.info("-" * 40 + " SYSTEM PROMPT " + "-" * 40)
         rl.info("%s", system_prompt)
         rl.info("-" * 40 + " USER PROMPT " + "-" * 40)
@@ -246,11 +246,12 @@ async def _call_claude_sdk(provider: dict, system_prompt: str, user_prompt: str,
         "system_prompt": system_prompt,
         "user_prompt": user_prompt,
         "model": provider.get("model", "claude-sonnet-4-20250514"),
-        "max_turns": max_turns,
         "cwd": service_dir,
         "timeout_seconds": timeout_seconds,
         "use_mcp": use_mcp,
     }
+    if max_turns is not None:
+        command_payload["max_turns"] = max_turns
 
     start = time.time()
 
@@ -274,6 +275,7 @@ async def _call_claude_sdk(provider: dict, system_prompt: str, user_prompt: str,
         stderr=asyncio.subprocess.PIPE,
         cwd=service_dir,
         env=child_env,
+        limit=4_194_304,  # 4 MB – MCP tool results can produce large single-line JSON
     )
 
     input_bytes = json.dumps(command_payload).encode("utf-8")
@@ -386,11 +388,13 @@ async def _call_claude_sdk_stream(provider: dict, system_prompt: str, user_promp
         "system_prompt": system_prompt,
         "user_prompt": user_prompt,
         "model": provider.get("model", "claude-sonnet-4-20250514"),
-        "max_turns": provider.get("max_turns", 25) if use_mcp else 1,
         "cwd": service_dir,
         "timeout_seconds": timeout_seconds,
         "use_mcp": use_mcp,
     }
+    # Only set max_turns for non-MCP calls (default 1); MCP calls run unlimited
+    if not use_mcp:
+        command_payload["max_turns"] = 1
 
     start = time.time()
 
@@ -406,6 +410,7 @@ async def _call_claude_sdk_stream(provider: dict, system_prompt: str, user_promp
         stderr=asyncio.subprocess.PIPE,
         cwd=service_dir,
         env=child_env,
+        limit=4_194_304,  # 4 MB – MCP tool results can produce large single-line JSON
     )
 
     # Send command and close stdin so the wrapper starts processing
@@ -418,10 +423,35 @@ async def _call_claude_sdk_stream(provider: dict, system_prompt: str, user_promp
     # Read stdout line-by-line for streaming chunks
     try:
         while True:
-            line_bytes = await asyncio.wait_for(
-                proc.stdout.readline(),
-                timeout=timeout_seconds + 30,
-            )
+            try:
+                line_bytes = await asyncio.wait_for(
+                    proc.stdout.readline(),
+                    timeout=timeout_seconds + 30,
+                )
+            except asyncio.LimitOverrunError as overrun_exc:
+                # A single line exceeded the buffer limit (e.g. huge MCP tool result).
+                # Drain the oversized data so the stream can continue.
+                consumed = getattr(overrun_exc, "consumed", 0)
+                logger.warning(
+                    "Streaming readline hit LimitOverrunError (%d bytes consumed) — draining oversized line",
+                    consumed,
+                )
+                rl = _current_run_logger.get(None)
+                if rl:
+                    rl.warning(
+                        "Streaming readline hit LimitOverrunError (%d bytes consumed) — draining oversized line",
+                        consumed,
+                    )
+                # After LimitOverrunError the separator wasn't found within the
+                # buffer limit.  Read until we find the newline (end of this
+                # oversized JSON line) so subsequent lines parse normally.
+                try:
+                    await proc.stdout.readuntil(b"\n")
+                except (asyncio.LimitOverrunError, asyncio.IncompleteReadError):
+                    # If still too large or EOF, just drain what we can
+                    pass
+                continue
+
             if not line_bytes:
                 break  # EOF
 
@@ -850,7 +880,7 @@ async def _call_claude_sdk_chat(provider: dict, system_prompt: str, messages: li
     # Log individual messages to run logger before concatenation
     rl = _current_run_logger.get(None)
     if rl:
-        rl.info("CLAUDE SDK CHAT: %d messages, MCP=True, max_turns=10", len(messages))
+        rl.info("CLAUDE SDK CHAT: %d messages, MCP=True, max_turns=unlimited", len(messages))
         for i, msg in enumerate(messages):
             rl.info("  Message[%d] %s: %s", i, msg["role"].upper(), msg["content"][:500])
 
@@ -861,7 +891,7 @@ async def _call_claude_sdk_chat(provider: dict, system_prompt: str, messages: li
         parts.append(f"{role_label}: {msg['content']}")
     combined_prompt = "\n\n".join(parts)
 
-    return await _call_claude_sdk(provider, system_prompt, combined_prompt, config, use_mcp=True, max_turns=10)
+    return await _call_claude_sdk(provider, system_prompt, combined_prompt, config, use_mcp=True)
 
 
 # Map provider types to their async chat functions

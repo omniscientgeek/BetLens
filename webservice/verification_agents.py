@@ -171,13 +171,20 @@ Return ONLY valid JSON (no markdown fences, no extra text) with this exact struc
 {
   "verdict": "pass" | "warn" | "fail",
   "confidence": 0.0-1.0,
+  "checks_total": <number of individual claims/facts you verified>,
+  "checks_failed": <number of checks that found errors or warnings>,
   "issues": [
     {"severity": "info"|"warning"|"error", "claim": "the specific claim", "finding": "MCP tool result proving the inconsistency"}
   ],
   "summary": "1-2 sentence summary of your verification"
 }
 
-If everything checks out, return verdict "pass" with an empty issues array.
+IMPORTANT: checks_total must reflect every individual claim you verified (including \
+ones that passed). checks_failed must count only checks that resulted in a "warning" \
+or "error" severity issue. For example, if you verified 12 claims and 3 had problems, \
+checks_total=12, checks_failed=3.
+
+If everything checks out, return verdict "pass" with an empty issues array and checks_failed=0.
 Use "warn" if there are minor inconsistencies. Use "fail" for clear logical errors.
 
 CRITICAL FINAL INSTRUCTION — OUTPUT FORMAT:
@@ -257,11 +264,18 @@ Return ONLY valid JSON (no markdown fences, no extra text) with this exact struc
 {
   "verdict": "pass" | "warn" | "fail",
   "confidence": 0.0-1.0,
+  "checks_total": <number of individual claims/facts you verified>,
+  "checks_failed": <number of checks that found errors or warnings>,
   "issues": [
     {"severity": "info"|"warning"|"error", "claim": "the specific claim checked", "finding": "MCP tool name + exact result that proves/disproves the claim"}
   ],
   "summary": "1-2 sentence summary of fact-check results"
 }
+
+IMPORTANT: checks_total must reflect every individual claim you verified (including \
+ones that passed). checks_failed must count only checks that resulted in a "warning" \
+or "error" severity issue. For example, if you verified 15 claims and 2 had problems, \
+checks_total=15, checks_failed=2.
 
 Use "pass" if all checked claims are accurate within thresholds. Use "warn" for \
 minor discrepancies within warning thresholds. Use "fail" for material errors that \
@@ -341,11 +355,18 @@ Return ONLY valid JSON (no markdown fences, no extra text) with this exact struc
 {
   "verdict": "pass" | "warn" | "fail",
   "confidence": 0.0-1.0,
+  "checks_total": <number of individual recommendations/principles you verified>,
+  "checks_failed": <number of checks that found errors or warnings>,
   "issues": [
     {"severity": "info"|"warning"|"error", "claim": "the specific recommendation or pattern", "finding": "MCP tool evidence + your assessment"}
   ],
   "summary": "1-2 sentence summary of recommendation quality"
 }
+
+IMPORTANT: checks_total must reflect every individual recommendation/principle you \
+verified (including ones that passed). checks_failed must count only checks that \
+resulted in a "warning" or "error" severity issue. For example, if you verified 8 \
+recommendations and 1 had a problem, checks_total=8, checks_failed=1.
 
 Use "pass" if recommendations follow sound betting principles and are backed by data. \
 Use "warn" for minor concerns (e.g., missing risk disclaimers, sizing not specified). \
@@ -401,11 +422,14 @@ async def _run_reasoning_agent(
         run_logger.info("VERIFICATION [reasoning] complete in %.2fs", elapsed)
 
     parsed = _parse_agent_response(result["text"], "reasoning")
+    issues = parsed.get("issues", [])
     return {
         "agent": "reasoning",
         "verdict": parsed.get("verdict", "warn"),
         "confidence": parsed.get("confidence", 0.5),
-        "issues": parsed.get("issues", []),
+        "checks_total": parsed.get("checks_total") or len(issues) or 0,
+        "checks_failed": parsed.get("checks_failed") or sum(1 for i in issues if i.get("severity") in ("warning", "error")),
+        "issues": issues,
         "summary": parsed.get("summary", ""),
         "ai_meta": {
             "provider": result["provider_name"],
@@ -457,11 +481,14 @@ async def _run_factual_agent(
         run_logger.info("VERIFICATION [factual] complete in %.2fs", elapsed)
 
     parsed = _parse_agent_response(result["text"], "factual")
+    issues = parsed.get("issues", [])
     return {
         "agent": "factual",
         "verdict": parsed.get("verdict", "warn"),
         "confidence": parsed.get("confidence", 0.5),
-        "issues": parsed.get("issues", []),
+        "checks_total": parsed.get("checks_total") or len(issues) or 0,
+        "checks_failed": parsed.get("checks_failed") or sum(1 for i in issues if i.get("severity") in ("warning", "error")),
+        "issues": issues,
         "summary": parsed.get("summary", ""),
         "ai_meta": {
             "provider": result["provider_name"],
@@ -513,11 +540,14 @@ async def _run_betting_agent(
         run_logger.info("VERIFICATION [betting] complete in %.2fs", elapsed)
 
     parsed = _parse_agent_response(result["text"], "betting")
+    issues = parsed.get("issues", [])
     return {
         "agent": "betting",
         "verdict": parsed.get("verdict", "warn"),
         "confidence": parsed.get("confidence", 0.5),
-        "issues": parsed.get("issues", []),
+        "checks_total": parsed.get("checks_total") or len(issues) or 0,
+        "checks_failed": parsed.get("checks_failed") or sum(1 for i in issues if i.get("severity") in ("warning", "error")),
+        "issues": issues,
         "summary": parsed.get("summary", ""),
         "ai_meta": {
             "provider": result["provider_name"],
