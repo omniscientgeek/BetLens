@@ -961,10 +961,7 @@ async def list_saved_results():
     """List all previously saved result files with lightweight metadata."""
     if not os.path.isdir(SAVED_RESULTS_DIR):
         return {"files": [], "runs": []}
-    filenames = sorted(
-        (f for f in os.listdir(SAVED_RESULTS_DIR) if f.endswith(".json")),
-        reverse=True,
-    )
+    filenames = [f for f in os.listdir(SAVED_RESULTS_DIR) if f.endswith(".json")]
 
     # Build lightweight metadata for each run (extract verdicts without
     # loading full file_data).
@@ -991,6 +988,11 @@ async def list_saved_results():
         except Exception:
             pass
         runs.append(meta)
+
+    # Sort by saved_at date (newest first), falling back to filename for
+    # entries that lack a saved_at timestamp.
+    runs.sort(key=lambda r: r.get("saved_at") or r.get("filename", ""), reverse=True)
+    filenames = [r["filename"] for r in runs]
 
     return {"files": filenames, "runs": runs}
 

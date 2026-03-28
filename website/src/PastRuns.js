@@ -486,12 +486,18 @@ export default function PastRuns() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
 
-      // Use pre-built metadata from the API if available, fallback to filenames
-      if (data.runs?.length) {
-        setRuns(data.runs);
-      } else {
-        setRuns((data.files || []).map((f) => ({ filename: f })));
-      }
+      // Use pre-built metadata from the API if available, fallback to filenames.
+      // Sort by date (newest first) using saved_at or the date parsed from filename.
+      const rawRuns = data.runs?.length
+        ? data.runs
+        : (data.files || []).map((f) => ({ filename: f }));
+
+      const sorted = [...rawRuns].sort((a, b) => {
+        const dateA = a.saved_at || parseRunMeta(a.filename).dateTime?.toISOString() || "";
+        const dateB = b.saved_at || parseRunMeta(b.filename).dateTime?.toISOString() || "";
+        return dateB.localeCompare(dateA); // newest first
+      });
+      setRuns(sorted);
     } catch (err) {
       setError("Failed to load saved runs: " + err.message);
     } finally {
