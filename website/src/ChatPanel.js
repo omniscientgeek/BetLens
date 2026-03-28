@@ -3,6 +3,18 @@ import { VerificationBadge } from "./BriefPanel";
 
 const API_BASE = "";
 
+// Session persistence helpers
+const SESSION_PREFIX = "betstamp_";
+function sessionGet(key, fallback = null) {
+  try {
+    const raw = sessionStorage.getItem(SESSION_PREFIX + key);
+    return raw !== null ? JSON.parse(raw) : fallback;
+  } catch { return fallback; }
+}
+function sessionSet(key, value) {
+  try { sessionStorage.setItem(SESSION_PREFIX + key, JSON.stringify(value)); } catch {}
+}
+
 function formatTime(date) {
   return new Date(date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
@@ -132,14 +144,18 @@ function TypingIndicator() {
 }
 
 function ChatPanel({ pipelineResults, debugMode }) {
-  const [messages, setMessages] = useState([]);
+  const [messages, setMessages] = useState(() => sessionGet("chatMessages", []));
   const [input, setInput] = useState("");
-  const [conversationId, setConversationId] = useState(null);
+  const [conversationId, setConversationId] = useState(() => sessionGet("chatConversationId", null));
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
   const prevPipelineRef = useRef(null);
+
+  // Persist chat state to sessionStorage
+  useEffect(() => { sessionSet("chatMessages", messages); }, [messages]);
+  useEffect(() => { sessionSet("chatConversationId", conversationId); }, [conversationId]);
 
   // Auto-scroll to bottom on new messages
   useEffect(() => {
@@ -173,6 +189,8 @@ function ChatPanel({ pipelineResults, debugMode }) {
     setConversationId(null);
     setError(null);
     setInput("");
+    sessionSet("chatMessages", []);
+    sessionSet("chatConversationId", null);
   };
 
   const handleSend = async (messageText) => {

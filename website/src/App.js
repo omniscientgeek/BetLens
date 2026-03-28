@@ -6,6 +6,7 @@ import DataExplorer from "./DataExplorer";
 import AISettings from "./AISettings";
 import ChatPanel from "./ChatPanel";
 import BriefPanel from "./BriefPanel";
+import AnalyzeConversation from "./AnalyzeConversation";
 import "./App.css";
 
 const API_BASE = "";
@@ -125,7 +126,13 @@ function BetLens() {
     setStreamingBrief("");
     setRunId(null);
 
-    if (!filename) return;
+    if (!filename) {
+      sessionRemove("selectedFile");
+      sessionRemove("fileData");
+      sessionRemove("pipelineComplete");
+      sessionRemove("pipelineResults");
+      return;
+    }
 
     // Disconnect any previous socket
     if (socketRef.current) {
@@ -400,6 +407,9 @@ function BetLens() {
           )}
           {pipelineResults?.analyze?.error && (
             <div className="error">Analysis failed: {pipelineResults.analyze.error}</div>
+          )}
+          {pipelineResults?.analyze && (
+            <AnalyzeConversation analyzeResult={pipelineResults.analyze} />
           )}
           {pipelineResults?.brief && !pipelineResults.brief.error && (
             <BriefPanel briefResult={pipelineResults.brief} />
