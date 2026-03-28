@@ -80,7 +80,7 @@ function BetLens() {
   // Reconnection tracking
   const [reconnecting, setReconnecting] = useState(false);
   const reconnectAttemptsRef = useRef(0);
-  const MAX_RECONNECT_RESTARTS = 3; // max times we'll auto-restart the pipeline
+  const MAX_RECONNECT_RESTARTS = 6; // max times we'll auto-reconnect (audit phases can run 5+ min)
 
   // Pipeline results (used by BriefPanel and ChatPanel)
   const [pipelineResults, setPipelineResults] = useState(() => sessionGet("pipelineResults", null));

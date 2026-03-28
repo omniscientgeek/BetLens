@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import copy
 import uuid
 import time
 import asyncio
@@ -123,17 +124,41 @@ async def _replay_completed_phases(sid: str, state: PipelineState):
     hundreds of streaming chunks.
     """
     for event in state.replay_events:
-        await sio.emit(event["type"], event["payload"], to=sid)
+        await sio.emit(event["type"], _remove_circular_refs(event["payload"]), to=sid)
 
 
 async def _replay_completed_pipeline(sid: str, state: PipelineState):
     """Pipeline already done — replay every phase result + processing_complete."""
     await _replay_completed_phases(sid, state)
-    await sio.emit("processing_complete", {
+    await sio.emit("processing_complete", _remove_circular_refs({
         "filename": state.filename,
         "results": state.results,
         "run_id": state.run_id,
-    }, to=sid)
+    }), to=sid)
+
+
+def _remove_circular_refs(obj, _ancestors=None):
+    """Recursively clone a nested dict/list, replacing circular references.
+
+    Uses an ancestor-set approach: only objects on the current root→node path
+    are tracked, so the same dict appearing in two *sibling* branches is kept
+    intact — only true cycles (ancestor == descendant) are replaced.
+    """
+    if _ancestors is None:
+        _ancestors = set()
+    if isinstance(obj, dict):
+        obj_id = id(obj)
+        if obj_id in _ancestors:
+            return "[circular reference removed]"
+        new_ancestors = _ancestors | {obj_id}
+        return {k: _remove_circular_refs(v, new_ancestors) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        obj_id = id(obj)
+        if obj_id in _ancestors:
+            return "[circular reference removed]"
+        new_ancestors = _ancestors | {obj_id}
+        return [_remove_circular_refs(item, new_ancestors) for item in obj]
+    return obj
 
 
 async def _safe_emit(state: PipelineState, event: str, payload: dict):
@@ -141,7 +166,7 @@ async def _safe_emit(state: PipelineState, event: str, payload: dict):
     sid = state.attached_sid
     if sid:
         try:
-            await sio.emit(event, payload, to=sid)
+            await sio.emit(event, _remove_circular_refs(payload), to=sid)
         except Exception:
             pass  # Client may have just disconnected — non-fatal
 
@@ -185,9 +210,10 @@ async def _auto_save_results(filename: str, pipeline_results: dict, run_logger):
         file_data = json.loads(content)
 
     # Restructure verification to top-level audit_analyze / audit_brief.
-    # Deep-copy so we never mutate the live pipeline_results / state.results.
-    import copy
-    structured_results = copy.deepcopy(pipeline_results)
+    # Use _remove_circular_refs instead of copy.deepcopy — it produces a new
+    # dict tree (safe to mutate) AND breaks any circular references that would
+    # crash json.dumps (e.g. verification → fix_history → entry → verification).
+    structured_results = _remove_circular_refs(pipeline_results)
     analyze = structured_results.get("analyze")
     if isinstance(analyze, dict) and "verification" in analyze:
         structured_results["audit_analyze"] = analyze.pop("verification")
@@ -318,6 +344,23 @@ async def run_processing_pipeline(filename: str, state: PipelineState):
                 analysis = pipeline_results.get("analyze", {})
                 analyze_text = (analysis.get("conversation") or {}).get("assistant_response", "")
                 if analyze_text and not analysis.get("error"):
+                    # Heartbeat to keep Socket.IO alive during long audit phases
+                    audit_analyze_hb_active = True
+
+                    async def _audit_analyze_heartbeat():
+                        while audit_analyze_hb_active:
+                            await asyncio.sleep(10)
+                            if audit_analyze_hb_active:
+                                elapsed = int(time.time() - phase_start)
+                                try:
+                                    await _safe_emit(state, "heartbeat", {
+                                        "phase": "audit_analyze", "elapsed": elapsed,
+                                        "run_id": run_id,
+                                    })
+                                except Exception:
+                                    pass
+
+                    audit_analyze_hb_task = asyncio.create_task(_audit_analyze_heartbeat())
                     try:
                         run_logger.info("Starting audit agents for analysis...")
                         source_data = json.dumps(
@@ -482,6 +525,9 @@ async def run_processing_pipeline(filename: str, state: PipelineState):
                         run_logger.error("Analysis audit FAILED (non-blocking): %s", vex)
                         logger.error("PIPELINE Analysis audit FAILED: %s", vex)
                         await _emit_phase(state, filename, phase, i, "error", run_id=run_id)
+                    finally:
+                        audit_analyze_hb_active = False
+                        audit_analyze_hb_task.cancel()
                 else:
                     # No analysis text to audit — skip
                     run_logger.info("Skipping audit_analyze — no analysis text available")
@@ -543,6 +589,23 @@ async def run_processing_pipeline(filename: str, state: PipelineState):
                 # Self-healing loop: if audit fails, AI fixes the text and re-audits
                 brief = pipeline_results.get("brief", {})
                 if brief.get("brief_text") and not brief.get("error"):
+                    # Heartbeat to keep Socket.IO alive during long audit phases
+                    audit_brief_hb_active = True
+
+                    async def _audit_brief_heartbeat():
+                        while audit_brief_hb_active:
+                            await asyncio.sleep(10)
+                            if audit_brief_hb_active:
+                                elapsed = int(time.time() - phase_start)
+                                try:
+                                    await _safe_emit(state, "heartbeat", {
+                                        "phase": "audit_brief", "elapsed": elapsed,
+                                        "run_id": run_id,
+                                    })
+                                except Exception:
+                                    pass
+
+                    audit_brief_hb_task = asyncio.create_task(_audit_brief_heartbeat())
                     try:
                         run_logger.info("Starting audit agents for brief...")
                         source_data = json.dumps(
@@ -710,6 +773,9 @@ async def run_processing_pipeline(filename: str, state: PipelineState):
                         run_logger.error("Brief audit FAILED (non-blocking): %s", vex)
                         logger.error("PIPELINE Brief audit FAILED: %s", vex)
                         await _emit_phase(state, filename, phase, i, "error", run_id=run_id)
+                    finally:
+                        audit_brief_hb_active = False
+                        audit_brief_hb_task.cancel()
                 else:
                     # No brief text to audit — skip
                     run_logger.info("Skipping audit_brief — no brief text available")
@@ -965,7 +1031,8 @@ async def save_results(request: Request):
     # Restructure: promote sub-agent verification results from nested
     # analyze.verification / brief.verification to top-level audit_analyze / audit_brief
     # so the saved file mirrors the 5-phase pipeline structure.
-    structured_results = dict(pipeline_results)
+    # Use _remove_circular_refs to break any cycles (same as auto-save).
+    structured_results = _remove_circular_refs(pipeline_results)
 
     analyze = structured_results.get("analyze")
     if isinstance(analyze, dict) and "verification" in analyze:
@@ -1138,9 +1205,8 @@ async def get_active_run_detail(filename: str):
     phase_name = PHASES[state.current_phase]["name"] if state.current_phase < len(PHASES) else "done"
     phase_label = PHASES[state.current_phase]["label"] if state.current_phase < len(PHASES) else "Complete"
 
-    # Deep-copy results so we don't mutate live pipeline state
-    import copy
-    results_snapshot = copy.deepcopy(state.results)
+    # Clone results, breaking any circular references so FastAPI can serialize
+    results_snapshot = _remove_circular_refs(state.results)
 
     return {
         "filename": state.filename,
