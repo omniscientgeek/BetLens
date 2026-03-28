@@ -15,14 +15,15 @@
     {
       "api_key_env": "ANTHROPIC_API_KEY",
       "api_key_set": false,
-      "enabled": false,
+      "enabled": true,
       "id": "claude",
       "max_tokens": 4096,
       "model": "claude-sonnet-4-20250514",
       "name": "Claude (Anthropic)",
       "priority": 1,
       "temperature": 0.3,
-      "type": "anthropic"
+      "type": "anthropic",
+      "use_mcp": true
     },
     {
       "api_key_env": "OPENAI_API_KEY",

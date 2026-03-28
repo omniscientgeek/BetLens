@@ -20,6 +20,8 @@ import shutil
 import contextvars
 from typing import Optional
 
+from mcp_client import mcp_client as _mcp
+
 logger = logging.getLogger(__name__)
 
 # Context variable for per-run logger — set by call_ai/call_ai_stream/call_ai_chat
@@ -29,6 +31,9 @@ _current_run_logger: contextvars.ContextVar[Optional[logging.Logger]] = contextv
 )
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "ai_config.json")
+
+# Maximum number of tool-use round-trips before stopping (safety limit)
+_MAX_TOOL_TURNS = 50
 
 
 def load_config() -> dict:
@@ -43,11 +48,24 @@ def save_config(config: dict) -> None:
         json.dump(config, f, indent=2)
 
 
+# Detect Railway environment (Railway sets RAILWAY_ENVIRONMENT automatically)
+_IS_RAILWAY = bool(os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("RAILWAY_PROJECT_ID"))
+
+
 def get_enabled_providers(config: Optional[dict] = None) -> list:
-    """Return enabled providers sorted by priority (lowest number = highest priority)."""
+    """Return enabled providers sorted by priority (lowest number = highest priority).
+
+    On Railway, ``claude_sdk`` providers are automatically excluded because
+    the Claude Code CLI is not available in that environment.
+    """
     if config is None:
         config = load_config()
     providers = [p for p in config["providers"] if p.get("enabled")]
+    if _IS_RAILWAY:
+        skipped = [p["id"] for p in providers if p.get("type") == "claude_sdk"]
+        if skipped:
+            logger.info("Railway environment detected — disabling claude_sdk providers: %s", skipped)
+        providers = [p for p in providers if p.get("type") != "claude_sdk"]
     providers.sort(key=lambda p: p.get("priority", 999))
     return providers
 
@@ -68,7 +86,12 @@ def _get_api_key(provider: dict) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 async def _call_anthropic(provider: dict, system_prompt: str, user_prompt: str, config: dict) -> dict:
-    """Call the Anthropic Messages API asynchronously."""
+    """Call the Anthropic Messages API asynchronously.
+
+    When ``provider["use_mcp"]`` is truthy, MCP tools are loaded from the
+    betstamp-intelligence server and a multi-turn tool-use loop is executed
+    until the model stops requesting tools (or ``_MAX_TOOL_TURNS`` is reached).
+    """
     try:
         import anthropic
     except ImportError:
@@ -78,11 +101,13 @@ async def _call_anthropic(provider: dict, system_prompt: str, user_prompt: str, 
     if not api_key:
         raise RuntimeError(f"No API key found for {provider['id']} (env: {provider.get('api_key_env')})")
 
+    use_mcp = provider.get("use_mcp", False)
+
     # Log request to per-run log
     rl = _current_run_logger.get(None)
     if rl:
         rl.info("=" * 60)
-        rl.info("ANTHROPIC API REQUEST (model=%s)", provider.get("model"))
+        rl.info("ANTHROPIC API REQUEST (model=%s, use_mcp=%s)", provider.get("model"), use_mcp)
         rl.info("-" * 40 + " SYSTEM PROMPT " + "-" * 40)
         rl.info("%s", system_prompt)
         rl.info("-" * 40 + " USER PROMPT " + "-" * 40)
@@ -94,17 +119,85 @@ async def _call_anthropic(provider: dict, system_prompt: str, user_prompt: str, 
         timeout=config.get("timeout_seconds", 60),
     )
 
+    messages = [{"role": "user", "content": user_prompt}]
     start = time.time()
-    response = await client.messages.create(
+    total_input_tokens = 0
+    total_output_tokens = 0
+    all_tool_calls = []
+
+    # ---- Build base kwargs (shared across turns) ----
+    base_kwargs = dict(
         model=provider.get("model", "claude-sonnet-4-20250514"),
         max_tokens=provider.get("max_tokens", 4096),
         temperature=provider.get("temperature", 0.3),
         system=system_prompt,
-        messages=[{"role": "user", "content": user_prompt}],
     )
+
+    # ---- Optional MCP setup ----
+    async def _run(mcp_session=None, anthropic_tools=None):
+        nonlocal messages, total_input_tokens, total_output_tokens, all_tool_calls
+        turn = 0
+
+        while True:
+            turn += 1
+            call_kwargs = {**base_kwargs, "messages": messages}
+            if anthropic_tools:
+                call_kwargs["tools"] = anthropic_tools
+
+            response = await client.messages.create(**call_kwargs)
+            total_input_tokens += response.usage.input_tokens
+            total_output_tokens += response.usage.output_tokens
+
+            # Collect tool_use blocks
+            tool_use_blocks = [b for b in (response.content or []) if getattr(b, "type", None) == "tool_use"]
+
+            if response.stop_reason == "tool_use" and tool_use_blocks and mcp_session and turn < _MAX_TOOL_TURNS:
+                # Append assistant response (including tool_use) to messages
+                messages.append({"role": "assistant", "content": response.content})
+
+                # Execute each tool call and collect results
+                tool_results_content = []
+                for block in tool_use_blocks:
+                    tc = {"id": block.id, "name": block.name, "input": block.input}
+                    if rl:
+                        rl.info("[MCP tool_call] %s(%s)", block.name, json.dumps(block.input)[:300])
+                    result_text = await _mcp.call_tool(mcp_session, block.name, block.input)
+                    tc["result"] = result_text
+                    tc["is_error"] = False
+                    all_tool_calls.append(tc)
+                    if rl:
+                        rl.info("[MCP tool_result] %s -> %d chars", block.name, len(result_text))
+                    tool_results_content.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": result_text,
+                    })
+
+                messages.append({"role": "user", "content": tool_results_content})
+                continue  # next turn
+
+            # Done — extract final text
+            for block in tool_use_blocks:
+                all_tool_calls.append({"id": block.id, "name": block.name, "input": block.input})
+            return response
+
+    if use_mcp:
+        async with _mcp.connect() as mcp_session:
+            mcp_tools = await _mcp.get_tools(mcp_session)
+            anthropic_tools = _mcp.tools_to_anthropic_format(mcp_tools)
+            if rl:
+                rl.info("Loaded %d MCP tools for Anthropic API", len(anthropic_tools))
+            response = await _run(mcp_session=mcp_session, anthropic_tools=anthropic_tools)
+    else:
+        response = await _run()
+
     elapsed = round(time.time() - start, 2)
 
-    text = response.content[0].text if response.content else ""
+    text = ""
+    for block in (response.content or []):
+        if getattr(block, "type", None) == "text":
+            text = block.text
+            break
 
     # Log response to per-run log
     if rl:
@@ -112,27 +205,17 @@ async def _call_anthropic(provider: dict, system_prompt: str, user_prompt: str, 
         rl.info("%s", text)
         rl.info("-" * 40 + " END RESPONSE " + "-" * 40)
 
-    # Extract any tool_use blocks from the response
-    tool_calls = []
-    for block in (response.content or []):
-        if getattr(block, "type", None) == "tool_use":
-            tool_calls.append({
-                "id": block.id,
-                "name": block.name,
-                "input": block.input,
-            })
-
     return {
         "text": text,
         "provider_id": provider["id"],
         "provider_name": provider["name"],
         "model": response.model,
         "usage": {
-            "input_tokens": response.usage.input_tokens,
-            "output_tokens": response.usage.output_tokens,
+            "input_tokens": total_input_tokens,
+            "output_tokens": total_output_tokens,
         },
         "elapsed_seconds": elapsed,
-        "tool_calls": tool_calls,
+        "tool_calls": all_tool_calls,
     }
 
 
@@ -533,8 +616,12 @@ async def _call_claude_sdk_stream(provider: dict, system_prompt: str, user_promp
     }
 
 
-async def _call_anthropic_stream(provider: dict, system_prompt: str, user_prompt: str, config: dict, on_chunk=None) -> dict:
-    """Call Anthropic Messages API with streaming."""
+async def _call_anthropic_stream(provider: dict, system_prompt: str, user_prompt: str, config: dict, on_chunk=None, on_tool_event=None) -> dict:
+    """Call Anthropic Messages API with streaming.
+
+    When ``provider["use_mcp"]`` is truthy, MCP tools are loaded and a
+    multi-turn tool-use loop is executed with streaming text output.
+    """
     try:
         import anthropic
     except ImportError:
@@ -544,62 +631,118 @@ async def _call_anthropic_stream(provider: dict, system_prompt: str, user_prompt
     if not api_key:
         raise RuntimeError(f"No API key found for {provider['id']}")
 
+    use_mcp = provider.get("use_mcp", False)
+    rl = _current_run_logger.get(None)
+
     client = anthropic.AsyncAnthropic(api_key=api_key, timeout=config.get("timeout_seconds", 60))
 
     start = time.time()
     full_text = ""
-    input_tokens = 0
-    output_tokens = 0
+    total_input_tokens = 0
+    total_output_tokens = 0
+    all_tool_calls = []
+
+    messages = [{"role": "user", "content": user_prompt}]
 
     # Overall timeout for the entire streaming call (generous for large CoT outputs)
     stream_timeout = config.get("timeout_seconds", 180) + 120
 
-    async def _do_stream():
-        nonlocal full_text, input_tokens, output_tokens
-        async with client.messages.stream(
-            model=provider.get("model", "claude-sonnet-4-20250514"),
-            max_tokens=provider.get("max_tokens", 4096),
-            temperature=provider.get("temperature", 0.3),
-            system=system_prompt,
-            messages=[{"role": "user", "content": user_prompt}],
-        ) as stream:
-            async for text in stream.text_stream:
-                full_text += text
-                if on_chunk:
-                    await on_chunk(text)
+    base_kwargs = dict(
+        model=provider.get("model", "claude-sonnet-4-20250514"),
+        max_tokens=provider.get("max_tokens", 4096),
+        temperature=provider.get("temperature", 0.3),
+        system=system_prompt,
+    )
 
-        final = await stream.get_final_message()
-        if final and final.usage:
-            input_tokens = final.usage.input_tokens
-            output_tokens = final.usage.output_tokens
-        return final
+    async def _run(mcp_session=None, anthropic_tools=None):
+        nonlocal full_text, total_input_tokens, total_output_tokens, all_tool_calls, messages
+        turn = 0
+
+        while True:
+            turn += 1
+            call_kwargs = {**base_kwargs, "messages": messages}
+            if anthropic_tools:
+                call_kwargs["tools"] = anthropic_tools
+
+            async with client.messages.stream(**call_kwargs) as stream:
+                async for text in stream.text_stream:
+                    full_text += text
+                    if on_chunk:
+                        await on_chunk(text)
+
+            final = await stream.get_final_message()
+            if final and final.usage:
+                total_input_tokens += final.usage.input_tokens
+                total_output_tokens += final.usage.output_tokens
+
+            # Check for tool_use blocks
+            tool_use_blocks = [b for b in (final.content or []) if getattr(b, "type", None) == "tool_use"]
+
+            if final.stop_reason == "tool_use" and tool_use_blocks and mcp_session and turn < _MAX_TOOL_TURNS:
+                # Append assistant response to messages
+                messages.append({"role": "assistant", "content": final.content})
+
+                tool_results_content = []
+                for block in tool_use_blocks:
+                    tc = {"id": block.id, "name": block.name, "input": block.input}
+                    if on_tool_event:
+                        await on_tool_event("tool_call", tc)
+                    if rl:
+                        rl.info("[MCP tool_call] %s(%s)", block.name, json.dumps(block.input)[:300])
+
+                    result_text = await _mcp.call_tool(mcp_session, block.name, block.input)
+                    tc["result"] = result_text
+                    tc["is_error"] = False
+                    all_tool_calls.append(tc)
+
+                    if on_tool_event:
+                        await on_tool_event("tool_result", {
+                            "tool_use_id": block.id,
+                            "result": result_text,
+                            "is_error": False,
+                        })
+                    if rl:
+                        rl.info("[MCP tool_result] %s -> %d chars", block.name, len(result_text))
+
+                    tool_results_content.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": result_text,
+                    })
+
+                messages.append({"role": "user", "content": tool_results_content})
+                # Reset full_text for the next turn — we only want the final text response
+                full_text = ""
+                continue
+
+            # Done — collect any remaining tool_use blocks
+            for block in tool_use_blocks:
+                all_tool_calls.append({"id": block.id, "name": block.name, "input": block.input})
+            return
 
     try:
-        final_message = await asyncio.wait_for(_do_stream(), timeout=stream_timeout)
+        if use_mcp:
+            async with _mcp.connect() as mcp_session:
+                mcp_tools = await _mcp.get_tools(mcp_session)
+                anthropic_tools = _mcp.tools_to_anthropic_format(mcp_tools)
+                if rl:
+                    rl.info("Loaded %d MCP tools for Anthropic stream", len(anthropic_tools))
+                await asyncio.wait_for(_run(mcp_session=mcp_session, anthropic_tools=anthropic_tools), timeout=stream_timeout)
+        else:
+            await asyncio.wait_for(_run(), timeout=stream_timeout)
     except asyncio.TimeoutError:
         raise RuntimeError(f"Anthropic stream timed out after {stream_timeout}s")
 
     elapsed = round(time.time() - start, 2)
-
-    # Extract any tool_use blocks from the final message
-    tool_calls = []
-    if final_message and final_message.content:
-        for block in final_message.content:
-            if getattr(block, "type", None) == "tool_use":
-                tool_calls.append({
-                    "id": block.id,
-                    "name": block.name,
-                    "input": block.input,
-                })
 
     return {
         "text": full_text,
         "provider_id": provider["id"],
         "provider_name": provider["name"],
         "model": provider.get("model", "claude-sonnet-4-20250514"),
-        "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
+        "usage": {"input_tokens": total_input_tokens, "output_tokens": total_output_tokens},
         "elapsed_seconds": elapsed,
-        "tool_calls": tool_calls,
+        "tool_calls": all_tool_calls,
     }
 
 
@@ -714,9 +857,9 @@ async def call_ai_stream(system_prompt: str, user_prompt: str, on_chunk=None, on
                 logger.info(log_msg, *log_args)
                 if run_logger:
                     run_logger.info(log_msg, *log_args)
-                # Pass on_tool_event only to providers that support it (claude_sdk)
+                # Pass on_tool_event to providers that support it (claude_sdk, anthropic)
                 call_kwargs = {"on_chunk": on_chunk}
-                if on_tool_event and provider.get("type") == "claude_sdk":
+                if on_tool_event and provider.get("type") in ("claude_sdk", "anthropic"):
                     call_kwargs["on_tool_event"] = on_tool_event
                 result = await call_fn(provider, system_prompt, user_prompt, config, **call_kwargs)
                 success_msg = "AI stream SUCCESS: provider=%s model=%s elapsed=%.2fs tokens_in=%d tokens_out=%d"
@@ -749,7 +892,11 @@ async def call_ai_stream(system_prompt: str, user_prompt: str, on_chunk=None, on
 # ---------------------------------------------------------------------------
 
 async def _call_anthropic_chat(provider: dict, system_prompt: str, messages: list[dict], config: dict) -> dict:
-    """Call the Anthropic Messages API with a full messages array asynchronously."""
+    """Call the Anthropic Messages API with a full messages array asynchronously.
+
+    When ``provider["use_mcp"]`` is truthy, MCP tools are loaded and a
+    multi-turn tool-use loop is executed.
+    """
     try:
         import anthropic
     except ImportError:
@@ -759,16 +906,19 @@ async def _call_anthropic_chat(provider: dict, system_prompt: str, messages: lis
     if not api_key:
         raise RuntimeError(f"No API key found for {provider['id']} (env: {provider.get('api_key_env')})")
 
+    use_mcp = provider.get("use_mcp", False)
+
     # Log request to per-run log
     rl = _current_run_logger.get(None)
     if rl:
         rl.info("=" * 60)
-        rl.info("ANTHROPIC CHAT REQUEST (model=%s, messages=%d)", provider.get("model"), len(messages))
+        rl.info("ANTHROPIC CHAT REQUEST (model=%s, messages=%d, use_mcp=%s)", provider.get("model"), len(messages), use_mcp)
         rl.info("-" * 40 + " SYSTEM PROMPT " + "-" * 40)
         rl.info("%s", system_prompt)
         rl.info("-" * 40 + " MESSAGES " + "-" * 40)
         for m in messages:
-            rl.info("[%s]: %s", m["role"].upper(), m["content"][:1000])
+            content_preview = m["content"] if isinstance(m["content"], str) else str(m["content"])
+            rl.info("[%s]: %s", m["role"].upper(), content_preview[:1000])
         rl.info("=" * 60)
 
     client = anthropic.AsyncAnthropic(
@@ -777,16 +927,77 @@ async def _call_anthropic_chat(provider: dict, system_prompt: str, messages: lis
     )
 
     start = time.time()
-    response = await client.messages.create(
+    total_input_tokens = 0
+    total_output_tokens = 0
+    all_tool_calls = []
+
+    base_kwargs = dict(
         model=provider.get("model", "claude-sonnet-4-20250514"),
         max_tokens=provider.get("max_tokens", 64000),
         temperature=provider.get("temperature", 0.3),
         system=system_prompt,
-        messages=messages,
     )
+
+    async def _run(mcp_session=None, anthropic_tools=None):
+        nonlocal messages, total_input_tokens, total_output_tokens, all_tool_calls
+        turn = 0
+
+        while True:
+            turn += 1
+            call_kwargs = {**base_kwargs, "messages": messages}
+            if anthropic_tools:
+                call_kwargs["tools"] = anthropic_tools
+
+            response = await client.messages.create(**call_kwargs)
+            total_input_tokens += response.usage.input_tokens
+            total_output_tokens += response.usage.output_tokens
+
+            tool_use_blocks = [b for b in (response.content or []) if getattr(b, "type", None) == "tool_use"]
+
+            if response.stop_reason == "tool_use" and tool_use_blocks and mcp_session and turn < _MAX_TOOL_TURNS:
+                messages.append({"role": "assistant", "content": response.content})
+
+                tool_results_content = []
+                for block in tool_use_blocks:
+                    tc = {"id": block.id, "name": block.name, "input": block.input}
+                    if rl:
+                        rl.info("[MCP tool_call] %s(%s)", block.name, json.dumps(block.input)[:300])
+                    result_text = await _mcp.call_tool(mcp_session, block.name, block.input)
+                    tc["result"] = result_text
+                    tc["is_error"] = False
+                    all_tool_calls.append(tc)
+                    if rl:
+                        rl.info("[MCP tool_result] %s -> %d chars", block.name, len(result_text))
+                    tool_results_content.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": result_text,
+                    })
+
+                messages.append({"role": "user", "content": tool_results_content})
+                continue
+
+            for block in tool_use_blocks:
+                all_tool_calls.append({"id": block.id, "name": block.name, "input": block.input})
+            return response
+
+    if use_mcp:
+        async with _mcp.connect() as mcp_session:
+            mcp_tools = await _mcp.get_tools(mcp_session)
+            anthropic_tools = _mcp.tools_to_anthropic_format(mcp_tools)
+            if rl:
+                rl.info("Loaded %d MCP tools for Anthropic chat", len(anthropic_tools))
+            response = await _run(mcp_session=mcp_session, anthropic_tools=anthropic_tools)
+    else:
+        response = await _run()
+
     elapsed = round(time.time() - start, 2)
 
-    text = response.content[0].text if response.content else ""
+    text = ""
+    for block in (response.content or []):
+        if getattr(block, "type", None) == "text":
+            text = block.text
+            break
 
     # Detect truncation due to max_tokens limit
     if response.stop_reason == "max_tokens":
@@ -805,10 +1016,11 @@ async def _call_anthropic_chat(provider: dict, system_prompt: str, messages: lis
         "provider_name": provider["name"],
         "model": response.model,
         "usage": {
-            "input_tokens": response.usage.input_tokens,
-            "output_tokens": response.usage.output_tokens,
+            "input_tokens": total_input_tokens,
+            "output_tokens": total_output_tokens,
         },
         "elapsed_seconds": elapsed,
+        "tool_calls": all_tool_calls,
     }
 
 
@@ -908,7 +1120,12 @@ _CHAT_CALL_MAP = {
 # ---------------------------------------------------------------------------
 
 async def _call_anthropic_chat_stream(provider: dict, system_prompt: str, messages: list[dict], config: dict, on_chunk=None, on_tool_event=None) -> dict:
-    """Call Anthropic Messages API with streaming for multi-turn chat."""
+    """Call Anthropic Messages API with streaming for multi-turn chat.
+
+    When ``provider["use_mcp"]`` is truthy, MCP tools are loaded and a
+    multi-turn tool-use loop is executed with streaming text output and
+    live tool event callbacks.
+    """
     try:
         import anthropic
     except ImportError:
@@ -918,53 +1135,116 @@ async def _call_anthropic_chat_stream(provider: dict, system_prompt: str, messag
     if not api_key:
         raise RuntimeError(f"No API key found for {provider['id']}")
 
+    use_mcp = provider.get("use_mcp", False)
     rl = _current_run_logger.get(None)
     if rl:
         rl.info("=" * 60)
-        rl.info("ANTHROPIC CHAT STREAM REQUEST (model=%s, messages=%d)", provider.get("model"), len(messages))
+        rl.info("ANTHROPIC CHAT STREAM REQUEST (model=%s, messages=%d, use_mcp=%s)", provider.get("model"), len(messages), use_mcp)
         rl.info("-" * 40 + " SYSTEM PROMPT " + "-" * 40)
         rl.info("%s", system_prompt)
         rl.info("-" * 40 + " MESSAGES " + "-" * 40)
         for m in messages:
-            rl.info("[%s]: %s", m["role"].upper(), m["content"][:1000])
+            content_preview = m["content"] if isinstance(m["content"], str) else str(m["content"])
+            rl.info("[%s]: %s", m["role"].upper(), content_preview[:1000])
         rl.info("=" * 60)
 
     client = anthropic.AsyncAnthropic(api_key=api_key, timeout=config.get("timeout_seconds", 60))
 
     start = time.time()
     full_text = ""
-    input_tokens = 0
-    output_tokens = 0
+    total_input_tokens = 0
+    total_output_tokens = 0
+    all_tool_calls = []
     stream_timeout = config.get("timeout_seconds", 180) + 120
 
-    async def _do_stream():
-        nonlocal full_text, input_tokens, output_tokens
-        async with client.messages.stream(
-            model=provider.get("model", "claude-sonnet-4-20250514"),
-            max_tokens=provider.get("max_tokens", 64000),
-            temperature=provider.get("temperature", 0.3),
-            system=system_prompt,
-            messages=messages,
-        ) as stream:
-            async for text in stream.text_stream:
-                full_text += text
+    base_kwargs = dict(
+        model=provider.get("model", "claude-sonnet-4-20250514"),
+        max_tokens=provider.get("max_tokens", 64000),
+        temperature=provider.get("temperature", 0.3),
+        system=system_prompt,
+    )
+
+    async def _run(mcp_session=None, anthropic_tools=None):
+        nonlocal full_text, total_input_tokens, total_output_tokens, all_tool_calls, messages
+        turn = 0
+
+        while True:
+            turn += 1
+            call_kwargs = {**base_kwargs, "messages": messages}
+            if anthropic_tools:
+                call_kwargs["tools"] = anthropic_tools
+
+            async with client.messages.stream(**call_kwargs) as stream:
+                async for text in stream.text_stream:
+                    full_text += text
+                    if on_chunk:
+                        await on_chunk(text)
+
+            final = await stream.get_final_message()
+            if final and final.usage:
+                total_input_tokens += final.usage.input_tokens
+                total_output_tokens += final.usage.output_tokens
+
+            tool_use_blocks = [b for b in (final.content or []) if getattr(b, "type", None) == "tool_use"]
+
+            if final.stop_reason == "tool_use" and tool_use_blocks and mcp_session and turn < _MAX_TOOL_TURNS:
+                messages.append({"role": "assistant", "content": final.content})
+
+                tool_results_content = []
+                for block in tool_use_blocks:
+                    tc = {"id": block.id, "name": block.name, "input": block.input}
+                    if on_tool_event:
+                        await on_tool_event("tool_call", tc)
+                    if rl:
+                        rl.info("[MCP tool_call] %s(%s)", block.name, json.dumps(block.input)[:300])
+
+                    result_text = await _mcp.call_tool(mcp_session, block.name, block.input)
+                    tc["result"] = result_text
+                    tc["is_error"] = False
+                    all_tool_calls.append(tc)
+
+                    if on_tool_event:
+                        await on_tool_event("tool_result", {
+                            "tool_use_id": block.id,
+                            "result": result_text,
+                            "is_error": False,
+                        })
+                    if rl:
+                        rl.info("[MCP tool_result] %s -> %d chars", block.name, len(result_text))
+
+                    tool_results_content.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": result_text,
+                    })
+
+                messages.append({"role": "user", "content": tool_results_content})
+                # Reset text for next turn — we want the final text response
+                full_text = ""
+                continue
+
+            # Done
+            for block in tool_use_blocks:
+                all_tool_calls.append({"id": block.id, "name": block.name, "input": block.input})
+
+            # Detect truncation
+            if final and final.stop_reason == "max_tokens":
+                truncation_notice = "\n\n*(Response was truncated due to length. Ask a follow-up to continue.)*"
+                full_text += truncation_notice
                 if on_chunk:
-                    await on_chunk(text)
-
-        final = await stream.get_final_message()
-        if final and final.usage:
-            input_tokens = final.usage.input_tokens
-            output_tokens = final.usage.output_tokens
-
-        # Detect truncation
-        if final and final.stop_reason == "max_tokens":
-            truncation_notice = "\n\n*(Response was truncated due to length. Ask a follow-up to continue.)*"
-            full_text += truncation_notice
-            if on_chunk:
-                await on_chunk(truncation_notice)
+                    await on_chunk(truncation_notice)
+            return
 
     try:
-        await asyncio.wait_for(_do_stream(), timeout=stream_timeout)
+        if use_mcp:
+            async with _mcp.connect() as mcp_session:
+                mcp_tools = await _mcp.get_tools(mcp_session)
+                anthropic_tools = _mcp.tools_to_anthropic_format(mcp_tools)
+                if rl:
+                    rl.info("Loaded %d MCP tools for Anthropic chat stream", len(anthropic_tools))
+                await asyncio.wait_for(_run(mcp_session=mcp_session, anthropic_tools=anthropic_tools), timeout=stream_timeout)
+        else:
+            await asyncio.wait_for(_run(), timeout=stream_timeout)
     except asyncio.TimeoutError:
         raise RuntimeError(f"Anthropic chat stream timed out after {stream_timeout}s")
 
@@ -980,8 +1260,9 @@ async def _call_anthropic_chat_stream(provider: dict, system_prompt: str, messag
         "provider_id": provider["id"],
         "provider_name": provider["name"],
         "model": provider.get("model", "claude-sonnet-4-20250514"),
-        "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
+        "usage": {"input_tokens": total_input_tokens, "output_tokens": total_output_tokens},
         "elapsed_seconds": elapsed,
+        "tool_calls": all_tool_calls,
     }
 
 

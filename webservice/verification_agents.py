@@ -429,7 +429,7 @@ async def _run_reasoning_agent(
         messages=messages,
         system_prompt=REASONING_SYSTEM_PROMPT,
         on_tool_event=on_tool_event,
-        provider_id="claude-sdk",  # MCP tools required for data verification
+        provider_id=None,  # Uses highest-priority enabled provider (Anthropic API or Claude SDK both support MCP)
         run_logger=run_logger,
     )
 
@@ -495,7 +495,7 @@ async def _run_factual_agent(
         messages=messages,
         system_prompt=FACTUAL_SYSTEM_PROMPT,
         on_tool_event=on_tool_event,
-        provider_id="claude-sdk",  # Only claude_sdk supports MCP tools
+        provider_id=None,  # Uses highest-priority enabled provider (Anthropic API or Claude SDK both support MCP)
         run_logger=run_logger,
     )
 
@@ -556,7 +556,7 @@ async def _run_betting_agent(
         messages=messages,
         system_prompt=BETTING_SYSTEM_PROMPT,
         on_tool_event=on_tool_event,
-        provider_id="claude-sdk",  # MCP tools required for data verification
+        provider_id=None,  # Uses highest-priority enabled provider (Anthropic API or Claude SDK both support MCP)
         run_logger=run_logger,
     )
 
