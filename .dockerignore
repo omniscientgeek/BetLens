@@ -1,0 +1,46 @@
+# Dependencies (installed in Docker)
+node_modules/
+website/node_modules/
+webservice/node_modules/
+
+# Build artifacts
+website/build/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Logs
+logs/
+*.log
+webservice/logs/
+
+# Environment files
+.env
+.env.local
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp files
+_sdk_in_*.json
+*.tmp
+
+# Saved results (start fresh on deploy)
+saved_results/
+
+# Dev notes
+devNotesData/
+
+# PDF
+*.pdf

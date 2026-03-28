@@ -1769,5 +1769,7 @@ async def get_run_log(run_id: str):
 
 if __name__ == "__main__":
     import uvicorn
+    port = int(os.environ.get("PORT", 8191))
     logger.info("Serving JSON files from: %s", DATA_DIR)
-    uvicorn.run(socket_app, host="0.0.0.0", port=8191, log_level="info")
+    logger.info("Starting server on port %d", port)
+    uvicorn.run(socket_app, host="0.0.0.0", port=port, log_level="info")
