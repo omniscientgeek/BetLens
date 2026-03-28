@@ -714,6 +714,18 @@ async def handle_start_processing(sid, data):
         else:
             # Pipeline still running — replay completed phases, then live-stream picks up
             await _replay_completed_phases(sid, existing)
+            # Emit the current running phase as "in_progress" so the stepper shows it active
+            if existing.current_phase < len(PHASES):
+                current = PHASES[existing.current_phase]
+                await sio.emit("phase_update", {
+                    "filename": existing.filename,
+                    "phase": current["name"],
+                    "label": current["label"],
+                    "status": "in_progress",
+                    "phaseIndex": existing.current_phase,
+                    "totalPhases": len(PHASES),
+                    "run_id": existing.run_id,
+                }, to=sid)
             # The running pipeline now emits to this sid via state.attached_sid
         return
 
