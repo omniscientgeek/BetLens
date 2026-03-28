@@ -73,9 +73,11 @@ class McpClient:
                     logger.info("MCP session initialized")
                     yield session
         except BaseExceptionGroup as eg:
-            # anyio TaskGroup wraps subprocess/connection errors in an
-            # ExceptionGroup — unwrap to surface the real cause.
-            real = eg.exceptions[0] if len(eg.exceptions) == 1 else eg
+            # anyio TaskGroup wraps subprocess/connection errors in nested
+            # ExceptionGroups — recursively unwrap to surface the real cause.
+            real = eg
+            while isinstance(real, BaseExceptionGroup) and len(real.exceptions) == 1:
+                real = real.exceptions[0]
             logger.error("MCP connection failed (unwrapped): %s: %s", type(real).__name__, real)
             raise RuntimeError(f"MCP connection failed: {type(real).__name__}: {real}") from real
 
