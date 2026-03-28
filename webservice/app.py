@@ -166,6 +166,49 @@ async def _emit_phase(state, filename, phase, i, status, result=None, run_id=Non
     await _safe_emit(state, "phase_update", payload)
 
 
+async def _auto_save_results(filename: str, pipeline_results: dict, run_logger):
+    """Automatically save pipeline results after completion (no browser download)."""
+    import aiofiles
+
+    os.makedirs(SAVED_RESULTS_DIR, exist_ok=True)
+
+    ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    save_filename = f"betlens_results_{ts}.json"
+    save_path = os.path.join(SAVED_RESULTS_DIR, save_filename)
+
+    # Load the original file data from disk
+    file_data = None
+    data_path = os.path.join(DATA_DIR, filename)
+    if os.path.isfile(data_path):
+        async with aiofiles.open(data_path, "r", encoding="utf-8") as f:
+            content = await f.read()
+        file_data = json.loads(content)
+
+    # Restructure verification to top-level audit_analyze / audit_brief
+    structured_results = dict(pipeline_results)
+    analyze = structured_results.get("analyze")
+    if isinstance(analyze, dict) and "verification" in analyze:
+        structured_results["audit_analyze"] = analyze.pop("verification")
+        structured_results["analyze"] = analyze
+    brief = structured_results.get("brief")
+    if isinstance(brief, dict) and "verification" in brief:
+        structured_results["audit_brief"] = brief.pop("verification")
+        structured_results["brief"] = brief
+
+    payload = {
+        "source_file": filename,
+        "saved_at": datetime.now().isoformat(),
+        "pipeline_results": structured_results,
+        "file_data": file_data,
+    }
+
+    async with aiofiles.open(save_path, "w", encoding="utf-8") as f:
+        await f.write(json.dumps(payload, indent=2, ensure_ascii=False))
+
+    run_logger.info("Auto-saved pipeline results to %s", save_path)
+    logger.info("PIPELINE Auto-saved results to %s", save_filename)
+
+
 async def run_processing_pipeline(filename: str, state: PipelineState):
     """Execute the 5-phase pipeline, emitting status updates via WebSocket.
 
@@ -321,6 +364,7 @@ async def run_processing_pipeline(filename: str, state: PipelineState):
                                 "attempt": fix_attempt,
                                 "verdict": overall,
                                 "verification": verification,
+                                "text": current_text,
                             })
 
                             # If pass, or we've hit max retries, stop the loop
@@ -516,6 +560,7 @@ async def run_processing_pipeline(filename: str, state: PipelineState):
                                 "attempt": fix_attempt,
                                 "verdict": overall,
                                 "verification": verification,
+                                "text": current_brief_text,
                             })
 
                             # If pass, or we've hit max retries, stop the loop
@@ -617,6 +662,12 @@ async def run_processing_pipeline(filename: str, state: PipelineState):
             "results": pipeline_results,
             "run_id": run_id,
         })
+
+        # Auto-save results to saved_results/ directory
+        try:
+            await _auto_save_results(filename, pipeline_results, run_logger)
+        except Exception as save_exc:
+            run_logger.error("Auto-save failed: %s", save_exc)
     except asyncio.CancelledError:
         state.status = "error"
         state.error = "Pipeline cancelled"
@@ -877,14 +928,41 @@ async def save_results(request: Request):
 
 @app.get("/api/saved-results")
 async def list_saved_results():
-    """List all previously saved result files."""
+    """List all previously saved result files with lightweight metadata."""
     if not os.path.isdir(SAVED_RESULTS_DIR):
-        return {"files": []}
-    files = sorted(
+        return {"files": [], "runs": []}
+    filenames = sorted(
         (f for f in os.listdir(SAVED_RESULTS_DIR) if f.endswith(".json")),
         reverse=True,
     )
-    return {"files": files}
+
+    # Build lightweight metadata for each run (extract verdicts without
+    # loading full file_data).
+    runs = []
+    for fname in filenames:
+        meta = {"filename": fname}
+        try:
+            fpath = os.path.join(SAVED_RESULTS_DIR, fname)
+            import aiofiles
+            async with aiofiles.open(fpath, "r", encoding="utf-8") as f:
+                content = await f.read()
+            data = json.loads(content)
+            meta["source_file"] = data.get("source_file")
+            meta["saved_at"] = data.get("saved_at")
+            pr = data.get("pipeline_results", {})
+            meta["analyze_verdict"] = (
+                pr.get("analyze", {}).get("verification", {}).get("overall_verdict")
+                or pr.get("audit_analyze", {}).get("overall_verdict")
+            )
+            meta["brief_verdict"] = (
+                pr.get("brief", {}).get("verification", {}).get("overall_verdict")
+                or pr.get("audit_brief", {}).get("overall_verdict")
+            )
+        except Exception:
+            pass
+        runs.append(meta)
+
+    return {"files": filenames, "runs": runs}
 
 
 @app.get("/api/saved-results/{filename}")
@@ -903,6 +981,30 @@ async def get_saved_result(filename: str):
     async with aiofiles.open(filepath, "r", encoding="utf-8") as f:
         content = await f.read()
     return json.loads(content)
+
+
+@app.get("/api/active-runs")
+async def list_active_runs():
+    """Return currently running (or recently completed) pipelines from the cache."""
+    runs = []
+    now = time.time()
+    for filename, state in _pipeline_cache.items():
+        if _is_cache_expired(state):
+            continue
+        phase_name = PHASES[state.current_phase]["name"] if state.current_phase < len(PHASES) else "done"
+        phase_label = PHASES[state.current_phase]["label"] if state.current_phase < len(PHASES) else "Complete"
+        runs.append({
+            "filename": state.filename,
+            "run_id": state.run_id,
+            "status": state.status,
+            "current_phase": phase_name,
+            "current_phase_label": phase_label,
+            "phase_index": state.current_phase,
+            "total_phases": len(PHASES),
+            "elapsed_seconds": int(now - state.created_at),
+            "error": state.error,
+        })
+    return {"runs": runs}
 
 
 def _parse_conversation_file(filepath):

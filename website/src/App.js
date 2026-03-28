@@ -3,13 +3,12 @@ import { BrowserRouter, Routes, Route, Link, useLocation } from "react-router-do
 import { io } from "socket.io-client";
 import DevNotes from "./DevNotes";
 import AISettings from "./AISettings";
+import PastRuns from "./PastRuns";
 import ChatPanel from "./ChatPanel";
 import BriefPanel, { VerificationBadge } from "./BriefPanel";
 import AnalyzeConversation from "./AnalyzeConversation";
+import { API_BASE, SOCKET_URL, fetchWithRetry } from "./api";
 import "./App.css"; // updated
-
-const API_BASE = "";
-const SOCKET_URL = "";
 
 const PHASE_LABELS = {
   detect: "Detect",
@@ -19,24 +18,6 @@ const PHASE_LABELS = {
   audit_brief: "Audit Brief",
 };
 const PHASE_NAMES = ["detect", "analyze", "audit_analyze", "brief", "audit_brief"];
-
-// Retry-enabled fetch: retries on network errors / 5xx with exponential backoff
-async function fetchWithRetry(url, options = {}, maxRetries = 3) {
-  let lastError;
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
-      const res = await fetch(url, options);
-      if (res.ok || res.status < 500) return res; // success or client error (no retry)
-      lastError = new Error(`HTTP ${res.status}`);
-    } catch (err) {
-      lastError = err;
-    }
-    if (attempt < maxRetries) {
-      await new Promise((r) => setTimeout(r, 1000 * Math.pow(2, attempt))); // 1s, 2s, 4s
-    }
-  }
-  throw lastError;
-}
 
 // Session persistence helpers — survive refresh, cleared on tab close
 const SESSION_PREFIX = "betstamp_";
@@ -58,6 +39,7 @@ function Navigation() {
 
   const NAV_ITEMS = [
     { path: "/", label: "BetLens", icon: "◎" },
+    { path: "/past-runs", label: "History", icon: "▤" },
     { path: "/devnotes", label: "Notes", icon: "◆" },
     { path: "/ai-settings", label: "Settings", icon: "⚙" },
   ];
@@ -517,6 +499,8 @@ function BetLens() {
       setPipelineComplete(true);
       setPipelineResults(data.results || null);
       setStreamingBrief(""); // Clear streaming text — final brief is in results
+      setSaveStatus({ ok: true, message: "Results saved automatically" });
+      setTimeout(() => setSaveStatus(null), 5000);
       socket.disconnect();
       socketRef.current = null;
     });
@@ -900,19 +884,19 @@ function BetLens() {
         <>
           <div className="pipeline-done">
             Processing complete in {formatElapsed(elapsedSeconds)}
-            <button
-              className="save-results-btn"
-              onClick={handleSaveResults}
-              disabled={saving || !pipelineResults}
-              title="Save analysis results to server and download as JSON"
-            >
-              {saving ? "Saving..." : "Save Results"}
-            </button>
             {saveStatus && (
               <span className={`save-status ${saveStatus.ok ? "save-status--ok" : "save-status--err"}`}>
                 {saveStatus.message}
               </span>
             )}
+            <button
+              className="save-results-btn"
+              onClick={handleSaveResults}
+              disabled={saving || !pipelineResults}
+              title="Save results to server and download as JSON"
+            >
+              {saving ? "Saving..." : "Download Results"}
+            </button>
           </div>
           {pipelineResults?.brief?.error && (
             <div className="error">Brief generation failed: {pipelineResults.brief.error}</div>
@@ -920,85 +904,208 @@ function BetLens() {
           {pipelineResults?.analyze?.error && (
             <div className="error">Analysis failed: {pipelineResults.analyze.error}</div>
           )}
-          {pipelineResults?.analyze && (
-            <AnalyzeConversation analyzeResult={pipelineResults.analyze} />
-          )}
 
-          {/* Audit Analyze — standalone card with fix history */}
-          {pipelineResults?.analyze?.verification && (
-            <div className="verification-card">
-              <div className="verification-card-header">
-                <span className="verification-card-icon">🛡</span>
-                <h3>Audit Analyze</h3>
-                {pipelineResults.analyze.verification.fix_attempts > 0 && (
-                  <span className="fix-badge fix-badge--complete">
-                    {pipelineResults.analyze.verification.overall_verdict === "pass"
-                      ? `Fixed in ${pipelineResults.analyze.verification.fix_attempts} attempt${pipelineResults.analyze.verification.fix_attempts > 1 ? "s" : ""}`
-                      : `${pipelineResults.analyze.verification.fix_attempts} fix attempt${pipelineResults.analyze.verification.fix_attempts > 1 ? "s" : ""} (${pipelineResults.analyze.verification.overall_verdict})`}
-                  </span>
+          {/* === ANALYSIS SECTION === */}
+          {(() => {
+            const analyzeV = pipelineResults?.analyze?.verification;
+            const analyzeHistory = analyzeV?.fix_history || [];
+            const analyzeIsDraft = analyzeV && analyzeV.overall_verdict !== "pass";
+
+            return (
+              <>
+                {/* Analysis — with draft/verified badge */}
+                {pipelineResults?.analyze && (
+                  <div className={`draft-wrapper ${analyzeIsDraft ? "draft-wrapper--draft" : analyzeV ? "draft-wrapper--verified" : ""}`}>
+                    {analyzeIsDraft && (
+                      <div className="draft-badge">
+                        <span className="draft-badge-icon">{"\u26A0\uFE0F"}</span>
+                        <span>DRAFT — Analysis did not pass all audits</span>
+                      </div>
+                    )}
+                    {!analyzeIsDraft && analyzeV && (
+                      <div className="verified-badge">
+                        <span className="verified-badge-icon">{"\u2705"}</span>
+                        <span>VERIFIED — Analysis passed all audits</span>
+                      </div>
+                    )}
+                    <AnalyzeConversation analyzeResult={pipelineResults.analyze} />
+                  </div>
                 )}
-              </div>
-              <VerificationBadge verification={pipelineResults.analyze.verification} />
-              {pipelineResults.analyze.verification.fix_history?.length > 1 && (
-                <details className="fix-history">
-                  <summary>Fix History ({pipelineResults.analyze.verification.fix_history.length} attempts)</summary>
-                  <div className="fix-history-list">
-                    {pipelineResults.analyze.verification.fix_history.map((h, idx) => (
-                      <div key={idx} className={`fix-history-item fix-history-item--${h.verdict}`}>
-                        <span className="fix-history-attempt">Attempt {h.attempt}</span>
-                        <span className={`fix-history-verdict verdict--${h.verdict}`}>{h.verdict}</span>
-                        <span className="fix-history-issues">
-                          {Object.values(h.verification?.agents || {}).reduce(
-                            (sum, a) => sum + (a.issues?.length || 0), 0
-                          )} issues
-                        </span>
+
+                {/* Audit Analyze — each attempt as a separate block */}
+                {analyzeHistory.length > 0 ? (
+                  <div className="audit-timeline">
+                    <div className="audit-timeline-header">
+                      <span className="audit-timeline-icon">{"\u{1F6E1}"}</span>
+                      <h3>Audit Analyze Timeline</h3>
+                      <span className="audit-timeline-count">
+                        {analyzeHistory.length} audit{analyzeHistory.length !== 1 ? "s" : ""}
+                      </span>
+                    </div>
+                    {analyzeHistory.map((h, idx) => {
+                      const isLatest = idx === analyzeHistory.length - 1;
+                      const isPassed = h.verdict === "pass";
+                      const issueCount = Object.values(h.verification?.agents || {}).reduce(
+                        (sum, a) => sum + (a.issues?.length || 0), 0
+                      );
+                      return (
+                        <div key={idx} className={`audit-block audit-block--${h.verdict} ${isLatest ? "audit-block--latest" : "audit-block--historical"}`}>
+                          <div className="audit-block-header">
+                            <span className={`audit-block-indicator audit-block-indicator--${h.verdict}`}>
+                              {isPassed ? "\u2705" : h.verdict === "warn" ? "\u26A0\uFE0F" : "\u274C"}
+                            </span>
+                            <span className="audit-block-title">
+                              {h.attempt === 0 ? "Initial Audit" : `Re-audit after Fix #${h.attempt}`}
+                            </span>
+                            <span className={`audit-block-verdict verdict--${h.verdict}`}>
+                              {h.verdict.toUpperCase()}
+                            </span>
+                            {issueCount > 0 && (
+                              <span className="audit-block-issues">
+                                {issueCount} issue{issueCount !== 1 ? "s" : ""}
+                              </span>
+                            )}
+                            {isLatest && <span className="audit-block-latest-tag">Latest</span>}
+                          </div>
+                          <VerificationBadge verification={h.verification} />
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : analyzeV && (
+                  <div className="verification-card">
+                    <div className="verification-card-header">
+                      <span className="verification-card-icon">{"\u{1F6E1}"}</span>
+                      <h3>Audit Analyze</h3>
+                    </div>
+                    <VerificationBadge verification={analyzeV} />
+                  </div>
+                )}
+              </>
+            );
+          })()}
+
+          {/* === BRIEF SECTION === */}
+          {(() => {
+            const briefV = pipelineResults?.brief?.verification;
+            const briefHistory = briefV?.fix_history || [];
+            const briefIsDraft = briefV && briefV.overall_verdict !== "pass";
+            const hasRevisions = briefHistory.length > 1;
+
+            return (
+              <>
+                {/* Brief revisions — each superseded version as a separate block */}
+                {hasRevisions && (
+                  <div className="brief-revisions">
+                    <div className="brief-revisions-header">
+                      <span className="brief-revisions-icon">{"\u{1F4DD}"}</span>
+                      <h3>Brief Revisions</h3>
+                      <span className="brief-revisions-count">
+                        {briefHistory.length} version{briefHistory.length !== 1 ? "s" : ""}
+                      </span>
+                    </div>
+                    {briefHistory.slice(0, -1).map((h, idx) => (
+                      <div key={idx} className="brief-revision-block brief-revision-block--superseded">
+                        <div className="brief-revision-header">
+                          <span className="brief-revision-indicator">{"\u{1F4C4}"}</span>
+                          <span className="brief-revision-title">
+                            {h.attempt === 0 ? "Original Brief" : `Revision #${h.attempt}`}
+                          </span>
+                          <span className={`brief-revision-verdict verdict--${h.verdict}`}>
+                            Audit: {h.verdict.toUpperCase()}
+                          </span>
+                          <span className="brief-revision-superseded-tag">Superseded</span>
+                        </div>
+                        {h.text && (
+                          <BriefPanel
+                            briefResult={{
+                              brief_text: h.text,
+                              generated_at: pipelineResults.brief.generated_at,
+                              ai_meta: null,
+                            }}
+                          />
+                        )}
                       </div>
                     ))}
                   </div>
-                </details>
-              )}
-            </div>
-          )}
-
-          {pipelineResults?.brief && !pipelineResults.brief.error && (
-            <BriefPanel briefResult={pipelineResults.brief} />
-          )}
-
-          {/* Audit Brief — standalone card with fix history */}
-          {pipelineResults?.brief?.verification && (
-            <div className="verification-card">
-              <div className="verification-card-header">
-                <span className="verification-card-icon">🛡</span>
-                <h3>Audit Brief</h3>
-                {pipelineResults.brief.verification.fix_attempts > 0 && (
-                  <span className="fix-badge fix-badge--complete">
-                    {pipelineResults.brief.verification.overall_verdict === "pass"
-                      ? `Fixed in ${pipelineResults.brief.verification.fix_attempts} attempt${pipelineResults.brief.verification.fix_attempts > 1 ? "s" : ""}`
-                      : `${pipelineResults.brief.verification.fix_attempts} fix attempt${pipelineResults.brief.verification.fix_attempts > 1 ? "s" : ""} (${pipelineResults.brief.verification.overall_verdict})`}
-                  </span>
                 )}
-              </div>
-              <VerificationBadge verification={pipelineResults.brief.verification} />
-              {pipelineResults.brief.verification.fix_history?.length > 1 && (
-                <details className="fix-history">
-                  <summary>Fix History ({pipelineResults.brief.verification.fix_history.length} attempts)</summary>
-                  <div className="fix-history-list">
-                    {pipelineResults.brief.verification.fix_history.map((h, idx) => (
-                      <div key={idx} className={`fix-history-item fix-history-item--${h.verdict}`}>
-                        <span className="fix-history-attempt">Attempt {h.attempt}</span>
-                        <span className={`fix-history-verdict verdict--${h.verdict}`}>{h.verdict}</span>
-                        <span className="fix-history-issues">
-                          {Object.values(h.verification?.agents || {}).reduce(
-                            (sum, a) => sum + (a.issues?.length || 0), 0
-                          )} issues
-                        </span>
+
+                {/* Current/final brief — with draft or verified badge */}
+                {pipelineResults?.brief && !pipelineResults.brief.error && (
+                  <div className={`draft-wrapper ${briefIsDraft ? "draft-wrapper--draft" : briefV ? "draft-wrapper--verified" : ""}`}>
+                    {briefIsDraft && (
+                      <div className="draft-badge">
+                        <span className="draft-badge-icon">{"\u26A0\uFE0F"}</span>
+                        <span>DRAFT — Brief did not pass all audits</span>
                       </div>
-                    ))}
+                    )}
+                    {!briefIsDraft && briefV && (
+                      <div className="verified-badge">
+                        <span className="verified-badge-icon">{"\u2705"}</span>
+                        <span>VERIFIED — Brief passed all audits</span>
+                      </div>
+                    )}
+                    {hasRevisions && (
+                      <div className="brief-revision-current-tag">
+                        Current Version (Revision #{briefHistory[briefHistory.length - 1]?.attempt || 0})
+                      </div>
+                    )}
+                    <BriefPanel briefResult={pipelineResults.brief} />
                   </div>
-                </details>
-              )}
-            </div>
-          )}
+                )}
+
+                {/* Audit Brief — each attempt as a separate block */}
+                {briefHistory.length > 0 ? (
+                  <div className="audit-timeline">
+                    <div className="audit-timeline-header">
+                      <span className="audit-timeline-icon">{"\u{1F6E1}"}</span>
+                      <h3>Audit Brief Timeline</h3>
+                      <span className="audit-timeline-count">
+                        {briefHistory.length} audit{briefHistory.length !== 1 ? "s" : ""}
+                      </span>
+                    </div>
+                    {briefHistory.map((h, idx) => {
+                      const isLatest = idx === briefHistory.length - 1;
+                      const isPassed = h.verdict === "pass";
+                      const issueCount = Object.values(h.verification?.agents || {}).reduce(
+                        (sum, a) => sum + (a.issues?.length || 0), 0
+                      );
+                      return (
+                        <div key={idx} className={`audit-block audit-block--${h.verdict} ${isLatest ? "audit-block--latest" : "audit-block--historical"}`}>
+                          <div className="audit-block-header">
+                            <span className={`audit-block-indicator audit-block-indicator--${h.verdict}`}>
+                              {isPassed ? "\u2705" : h.verdict === "warn" ? "\u26A0\uFE0F" : "\u274C"}
+                            </span>
+                            <span className="audit-block-title">
+                              {h.attempt === 0 ? "Initial Audit" : `Re-audit after Fix #${h.attempt}`}
+                            </span>
+                            <span className={`audit-block-verdict verdict--${h.verdict}`}>
+                              {h.verdict.toUpperCase()}
+                            </span>
+                            {issueCount > 0 && (
+                              <span className="audit-block-issues">
+                                {issueCount} issue{issueCount !== 1 ? "s" : ""}
+                              </span>
+                            )}
+                            {isLatest && <span className="audit-block-latest-tag">Latest</span>}
+                          </div>
+                          <VerificationBadge verification={h.verification} />
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : briefV && (
+                  <div className="verification-card">
+                    <div className="verification-card-header">
+                      <span className="verification-card-icon">{"\u{1F6E1}"}</span>
+                      <h3>Audit Brief</h3>
+                    </div>
+                    <VerificationBadge verification={briefV} />
+                  </div>
+                )}
+              </>
+            );
+          })()}
         </>
       )}
 
@@ -1016,6 +1123,7 @@ function BetLens() {
 
 const PAGE_TITLES = {
   "/": "BetLens",
+  "/past-runs": "History",
   "/devnotes": "Notes",
   "/ai-settings": "Settings",
 };
@@ -1038,6 +1146,7 @@ function AppContent() {
       <main className="App-main">
         <Routes>
           <Route path="/" element={<BetLens />} />
+          <Route path="/past-runs" element={<PastRuns />} />
           <Route path="/devnotes" element={<DevNotes />} />
           <Route path="/ai-settings" element={<AISettings />} />
         </Routes>
