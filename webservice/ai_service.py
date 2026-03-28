@@ -579,11 +579,12 @@ _STREAM_CALL_MAP = {
 }
 
 
-async def call_ai_stream(system_prompt: str, user_prompt: str, on_chunk=None, provider_id: Optional[str] = None, run_logger=None) -> dict:
+async def call_ai_stream(system_prompt: str, user_prompt: str, on_chunk=None, provider_id: Optional[str] = None, run_logger=None, max_tokens: Optional[int] = None) -> dict:
     """
     Send a prompt with streaming support.
 
     ``on_chunk(text_delta)`` is called for each text fragment as it arrives.
+    ``max_tokens`` overrides the provider's configured max_tokens when set.
     Returns the full result dict when complete.
     """
     if run_logger:
@@ -601,6 +602,10 @@ async def call_ai_stream(system_prompt: str, user_prompt: str, on_chunk=None, pr
         providers = get_enabled_providers(config)
         if not providers:
             raise RuntimeError("No AI providers are enabled.")
+
+    # Apply per-call max_tokens override (e.g. brief phase needs more output room)
+    if max_tokens is not None:
+        providers = [{**p, "max_tokens": max_tokens} for p in providers]
 
     errors = []
 
@@ -806,12 +811,13 @@ _CHAT_CALL_MAP = {
 # Main entry point — async call with failover
 # ---------------------------------------------------------------------------
 
-async def call_ai(system_prompt: str, user_prompt: str, provider_id: Optional[str] = None, run_logger=None) -> dict:
+async def call_ai(system_prompt: str, user_prompt: str, provider_id: Optional[str] = None, run_logger=None, max_tokens: Optional[int] = None) -> dict:
     """
     Send a prompt to an AI provider and return the response.
 
     If ``provider_id`` is given, only that provider is tried.
     Otherwise, enabled providers are tried in priority order with failover.
+    ``max_tokens`` overrides the provider's configured max_tokens when set.
 
     Returns a dict with keys: text, provider_id, provider_name, model, usage, elapsed_seconds.
     On total failure raises RuntimeError.
@@ -832,6 +838,10 @@ async def call_ai(system_prompt: str, user_prompt: str, provider_id: Optional[st
         providers = get_enabled_providers(config)
         if not providers:
             raise RuntimeError("No AI providers are enabled. Configure at least one in AI Settings.")
+
+    # Apply per-call max_tokens override (e.g. brief phase needs more output room)
+    if max_tokens is not None:
+        providers = [{**p, "max_tokens": max_tokens} for p in providers]
 
     errors = []
 
@@ -959,6 +969,25 @@ When pipeline context is provided, reference specific data points, game IDs, spo
 and numbers in your answers. Be precise and quantitative. If the user asks about something \
 not in the data, say so clearly.
 
+MANDATORY — NO MENTAL MATH — ZERO TOLERANCE
+You must NEVER perform arithmetic, math, or statistical calculations yourself — \
+not even simple ones like adding two numbers or computing a percentage. Every \
+number you derive MUST come from calling an MCP arithmetic tool. If you produce \
+a calculated number without a tool call it is assumed WRONG and will be flagged \
+as an error. Do NOT estimate, round in your head, or "quickly" compute anything.
+
+Arithmetic MCP tools (you MUST use these for ALL math):
+- arithmetic_add(a, b) — addition
+- arithmetic_subtract(a, b) — subtraction (a - b)
+- arithmetic_multiply(a, b) — multiplication (a * b)
+- arithmetic_divide(a, b) — division (a / b)
+- arithmetic_modulo(a, b) — remainder (a % b)
+- arithmetic_evaluate(expression) — multi-step, e.g. "(100 * 0.25) + 50"
+
+This applies to ALL numerical work: payouts, edges, bankroll impacts, ROI, vig \
+differences, profit/loss, implied probabilities, EV percentages, Kelly fractions, \
+averages, odds differences, percentage changes — ANY derivation of a number.
+
 Keep responses concise but thorough. Use bullet points for lists of findings.
 """
 
@@ -975,17 +1004,35 @@ Your job is to perform cross-sportsbook analysis and produce structured JSON out
 Analyze the data for:
 1. **Best Lines** — Which sportsbook has the best line for each side of each market.
 2. **Arbitrage Opportunities** — Any combination of bets across books that guarantee profit.
-3. **Outlier Lines** — Lines that deviate significantly from the consensus.
-4. **Market Efficiency** — How tight/wide each book's vig is relative to others.
-5. **Stale Lines** — Books whose lines haven't updated recently.
+3. **Middle Opportunities** — Spread/total line gaps across books that allow winning both sides.
+4. **Outlier Lines** — Lines that deviate significantly from the consensus.
+5. **Market Efficiency** — How tight/wide each book's vig is relative to others.
+6. **Stale Lines** — Books whose lines haven't updated recently.
+7. **Fair Odds** — Consensus no-vig fair probabilities per game/market.
+
+MANDATORY — NO MENTAL MATH — ZERO TOLERANCE
+You must NEVER perform arithmetic, math, or statistical calculations yourself — \
+not even simple ones. Every derived number in your output MUST come from an MCP \
+arithmetic tool call. If you produce a calculated number without a tool call it \
+is assumed WRONG. Do NOT estimate, round in your head, or "quickly" compute anything.
+
+Arithmetic MCP tools (you MUST use these for ALL math):
+- arithmetic_add(a, b), arithmetic_subtract(a, b), arithmetic_multiply(a, b)
+- arithmetic_divide(a, b), arithmetic_modulo(a, b)
+- arithmetic_evaluate(expression) — multi-step, e.g. "(100 * 0.25) + 50"
+
+This applies to: vig percentages, edge sizes, implied probabilities, profit \
+margins, combined implied probabilities, EV edges, averages — every number.
 
 Return ONLY valid JSON (no markdown fences). Use this structure:
 {
   "best_lines": [...],
   "arbitrage": [...],
+  "middles": [...],
   "outliers": [...],
   "efficiency_ranking": [...],
   "stale_lines": [...],
+  "fair_odds_summary": [...],
   "summary": "One paragraph executive summary"
 }
 """
@@ -1010,14 +1057,30 @@ sportsbook has the best odds, the odds themselves, and why this is a value play 
 (reference fair odds, vig, or consensus). Rate confidence as HIGH, MEDIUM, or LOW \
 with a brief justification.
 
+## Best Line Shopping
+For key games, show which sportsbook offers the best odds on each side. Highlight \
+cases where the best line is meaningfully better than the next-best (>5 cents in \
+American odds). This tells the reader where to place each bet for maximum value.
+
 ## Arbitrage Opportunities
-List any genuine arbitrage or middle opportunities across sportsbooks. For each, \
-specify both legs (side, book, odds) and the estimated profit percentage. If none \
+List any genuine arbitrage opportunities across sportsbooks. For each, specify both \
+legs (side, book, odds), the combined implied probability, and the estimated profit \
+percentage. If none exist, say so clearly.
+
+## Middle Opportunities
+List any middle opportunities where spread or total lines differ across sportsbooks \
+enough to allow winning both sides. For each, state the game, both legs (side, line, \
+book, odds), the gap size, and the range of outcomes where both bets win. If none \
 exist, say so clearly.
 
 ## Stale & Suspect Lines
 Flag any lines that appear significantly outdated, are outliers from consensus, or \
 carry unusually high vig. Name the sportsbook, game, and explain the concern.
+
+## Fair Odds & Expected Value
+Summarize the consensus no-vig fair probabilities for each game. Highlight any \
+sportsbook lines that offer positive expected value (+EV) against the consensus \
+fair odds. Include the EV edge percentage and the relevant fair probability.
 
 ## Sportsbook Rankings
 Rank all sportsbooks in the data by average vig percentage. For each, note whether \
@@ -1030,6 +1093,22 @@ Note any notable cross-book discrepancies, line movements, or anomalies worth wa
 2-4 sentences of overall takeaways, things to watch, or caveats a human reviewer \
 should keep in mind before acting on this briefing.
 
+MANDATORY — NO MENTAL MATH — ZERO TOLERANCE
+You must NEVER perform arithmetic, math, or statistical calculations yourself — \
+not even simple ones like adding two numbers or computing a percentage. Every \
+number you derive MUST come from calling an MCP arithmetic tool. If you produce \
+a calculated number without a tool call it is assumed WRONG and will be flagged \
+as an error. Do NOT estimate, round in your head, or "quickly" compute anything.
+
+Arithmetic MCP tools (you MUST use these for ALL math):
+- arithmetic_add(a, b), arithmetic_subtract(a, b), arithmetic_multiply(a, b)
+- arithmetic_divide(a, b), arithmetic_modulo(a, b)
+- arithmetic_evaluate(expression) — multi-step, e.g. "(100 * 0.25) + 50"
+
+This applies to: profit margins, vig percentages, EV edges, implied probabilities, \
+payout amounts, combined implied probabilities, Kelly fractions, ROI, averages, \
+odds differences, percentage changes — ANY derivation of a number in the briefing.
+
 Guidelines:
 - Be precise with numbers. Always cite specific odds, lines, and books.
 - Only include value bets where a quantifiable edge exists.
@@ -1040,471 +1119,29 @@ Guidelines:
 
 
 async def run_analyze_phase(detection_data: dict, run_logger=None) -> dict:
-    """Phase 2: Local cross-sportsbook analysis (no AI call).
+    """Phase 2: Reserved for future AI-powered analysis.
 
-    Performs comprehensive cross-sportsbook calculations:
-    1. No-Vig / Fair Odds (already in enriched data from detect phase)
-    2. Vig / Efficiency Ranking per sportsbook
-    3. Best Line Shopping — best odds for each game+market+side
-    4. Arbitrage Detection — combined implied prob < 100%
-    5. Middles Detection — spread/total line gaps allowing both-side wins
-    6. Outlier / Anomaly Detection — lines deviating from consensus
-    7. Stale Lines Detection — outdated last_updated timestamps
+    Cross-sportsbook analysis (efficiency ranking, best lines, middles,
+    outliers, arbitrage flattening, fair odds summary) has been moved into the
+    detect phase as its second step.  The pre-computed ``analysis`` dict is
+    passed through here so downstream consumers (brief phase, frontend) see
+    the same shape they always did.
+
+    This function is intentionally kept as a lightweight pass-through so that
+    future AI-powered analysis logic can be layered in without restructuring
+    the pipeline.
     """
-    from odds_math import implied_probability
-    from datetime import datetime, timezone as tz
-
     start = time.time()
 
-    # Pull the enriched odds and vig summary from detection
-    odds = detection_data.get("enriched_odds", detection_data.get("odds", []))
-    vig_summary = detection_data.get("vig_summary", {})
-
-    # ── Group odds by game ──────────────────────────────────────────────
-    games: dict[str, dict] = {}
-    all_books: set[str] = set()
-    for row in odds:
-        gid = row.get("game_id", "")
-        book = row.get("sportsbook", "")
-        all_books.add(book)
-        if gid not in games:
-            games[gid] = {
-                "home": row.get("home_team", ""),
-                "away": row.get("away_team", ""),
-                "rows": [],
-            }
-        games[gid]["rows"].append(row)
-
-    # ── 1. Vig / Efficiency Ranking (per sportsbook) ───────────────────
-    book_vigs: dict[str, list[float]] = {}
-    for row in odds:
-        book = row.get("sportsbook", "")
-        markets = row.get("markets", {})
-        for mkt in markets.values():
-            v = mkt.get("vig")
-            if v is not None:
-                book_vigs.setdefault(book, []).append(v)
-
-    efficiency = []
-    for book, vigs in book_vigs.items():
-        avg = sum(vigs) / len(vigs) if vigs else 0
-        efficiency.append({
-            "book": book,
-            "avg_vig": round(avg, 6),
-            "avg_vig_pct": f"{round(avg * 100, 2)}%",
-            "markets_counted": len(vigs),
-        })
-    efficiency.sort(key=lambda x: x["avg_vig"])
-
-    # ── 2. Best Line Shopping ──────────────────────────────────────────
-    best_lines = []
-    for gid, gdata in games.items():
-        rows = gdata["rows"]
-        # Spread: home side & away side
-        spread_rows = [(r["sportsbook"], r["markets"]["spread"]) for r in rows if "spread" in r.get("markets", {})]
-        if spread_rows:
-            best_home = max(spread_rows, key=lambda x: x[1]["home_odds"])
-            best_away = max(spread_rows, key=lambda x: x[1]["away_odds"])
-            best_lines.append({
-                "game_id": gid, "market": "spread", "side": "home",
-                "line": best_home[1].get("home_line"),
-                "best_odds": best_home[1]["home_odds"],
-                "best_book": best_home[0],
-                "home_team": gdata["home"],
-            })
-            best_lines.append({
-                "game_id": gid, "market": "spread", "side": "away",
-                "line": best_away[1].get("away_line"),
-                "best_odds": best_away[1]["away_odds"],
-                "best_book": best_away[0],
-                "away_team": gdata["away"],
-            })
-
-        # Moneyline: home & away
-        ml_rows = [(r["sportsbook"], r["markets"]["moneyline"]) for r in rows if "moneyline" in r.get("markets", {})]
-        if ml_rows:
-            best_home = max(ml_rows, key=lambda x: x[1]["home_odds"])
-            best_away = max(ml_rows, key=lambda x: x[1]["away_odds"])
-            best_lines.append({
-                "game_id": gid, "market": "moneyline", "side": "home",
-                "best_odds": best_home[1]["home_odds"],
-                "best_book": best_home[0],
-                "home_team": gdata["home"],
-            })
-            best_lines.append({
-                "game_id": gid, "market": "moneyline", "side": "away",
-                "best_odds": best_away[1]["away_odds"],
-                "best_book": best_away[0],
-                "away_team": gdata["away"],
-            })
-
-        # Totals: over & under
-        total_rows = [(r["sportsbook"], r["markets"]["total"]) for r in rows if "total" in r.get("markets", {})]
-        if total_rows:
-            best_over = max(total_rows, key=lambda x: x[1]["over_odds"])
-            best_under = max(total_rows, key=lambda x: x[1]["under_odds"])
-            best_lines.append({
-                "game_id": gid, "market": "total", "side": "over",
-                "line": best_over[1].get("line"),
-                "best_odds": best_over[1]["over_odds"],
-                "best_book": best_over[0],
-            })
-            best_lines.append({
-                "game_id": gid, "market": "total", "side": "under",
-                "line": best_under[1].get("line"),
-                "best_odds": best_under[1]["under_odds"],
-                "best_book": best_under[0],
-            })
-
-    # ── 3. Arbitrage Detection ─────────────────────────────────────────
-    arbitrage = []
-    for gid, gdata in games.items():
-        rows = gdata["rows"]
-
-        # Check spread arb
-        spread_rows = [(r["sportsbook"], r["markets"]["spread"]) for r in rows if "spread" in r.get("markets", {})]
-        if len(spread_rows) >= 2:
-            best_home = max(spread_rows, key=lambda x: x[1]["home_odds"])
-            best_away = max(spread_rows, key=lambda x: x[1]["away_odds"])
-            # Only valid arb if lines are the same (or both sides at same spread number)
-            prob_home = implied_probability(best_home[1]["home_odds"])
-            prob_away = implied_probability(best_away[1]["away_odds"])
-            combined = prob_home + prob_away
-            if combined < 1.0:
-                profit_pct = round((1.0 - combined) * 100, 3)
-                arbitrage.append({
-                    "game_id": gid, "market": "spread",
-                    "home_team": gdata["home"], "away_team": gdata["away"],
-                    "leg_1": {"side": "home", "line": best_home[1].get("home_line"),
-                              "odds": best_home[1]["home_odds"], "book": best_home[0],
-                              "implied_prob": round(prob_home, 4)},
-                    "leg_2": {"side": "away", "line": best_away[1].get("away_line"),
-                              "odds": best_away[1]["away_odds"], "book": best_away[0],
-                              "implied_prob": round(prob_away, 4)},
-                    "combined_implied": round(combined, 4),
-                    "profit_pct": profit_pct,
-                })
-
-        # Check moneyline arb
-        ml_rows = [(r["sportsbook"], r["markets"]["moneyline"]) for r in rows if "moneyline" in r.get("markets", {})]
-        if len(ml_rows) >= 2:
-            best_home = max(ml_rows, key=lambda x: x[1]["home_odds"])
-            best_away = max(ml_rows, key=lambda x: x[1]["away_odds"])
-            prob_home = implied_probability(best_home[1]["home_odds"])
-            prob_away = implied_probability(best_away[1]["away_odds"])
-            combined = prob_home + prob_away
-            if combined < 1.0:
-                profit_pct = round((1.0 - combined) * 100, 3)
-                arbitrage.append({
-                    "game_id": gid, "market": "moneyline",
-                    "home_team": gdata["home"], "away_team": gdata["away"],
-                    "leg_1": {"side": "home", "odds": best_home[1]["home_odds"],
-                              "book": best_home[0], "implied_prob": round(prob_home, 4)},
-                    "leg_2": {"side": "away", "odds": best_away[1]["away_odds"],
-                              "book": best_away[0], "implied_prob": round(prob_away, 4)},
-                    "combined_implied": round(combined, 4),
-                    "profit_pct": profit_pct,
-                })
-
-        # Check total arb
-        total_rows = [(r["sportsbook"], r["markets"]["total"]) for r in rows if "total" in r.get("markets", {})]
-        if len(total_rows) >= 2:
-            best_over = max(total_rows, key=lambda x: x[1]["over_odds"])
-            best_under = max(total_rows, key=lambda x: x[1]["under_odds"])
-            prob_over = implied_probability(best_over[1]["over_odds"])
-            prob_under = implied_probability(best_under[1]["under_odds"])
-            combined = prob_over + prob_under
-            if combined < 1.0:
-                profit_pct = round((1.0 - combined) * 100, 3)
-                arbitrage.append({
-                    "game_id": gid, "market": "total",
-                    "home_team": gdata["home"], "away_team": gdata["away"],
-                    "leg_1": {"side": "over", "line": best_over[1].get("line"),
-                              "odds": best_over[1]["over_odds"], "book": best_over[0],
-                              "implied_prob": round(prob_over, 4)},
-                    "leg_2": {"side": "under", "line": best_under[1].get("line"),
-                              "odds": best_under[1]["under_odds"], "book": best_under[0],
-                              "implied_prob": round(prob_under, 4)},
-                    "combined_implied": round(combined, 4),
-                    "profit_pct": profit_pct,
-                })
-
-    arbitrage.sort(key=lambda x: x["profit_pct"], reverse=True)
-
-    # ── 4. Middles Detection ───────────────────────────────────────────
-    middles = []
-    for gid, gdata in games.items():
-        rows = gdata["rows"]
-
-        # Spread middles: find pairs where one book's home_line differs enough
-        spread_rows = [(r["sportsbook"], r["markets"]["spread"]) for r in rows if "spread" in r.get("markets", {})]
-        if len(spread_rows) >= 2:
-            for i in range(len(spread_rows)):
-                for j in range(i + 1, len(spread_rows)):
-                    book_a, mkt_a = spread_rows[i]
-                    book_b, mkt_b = spread_rows[j]
-                    # Middle exists when: book_a home_line < book_b away_line
-                    # i.e., line gap allows winning both
-                    home_line_a = mkt_a.get("home_line", 0)
-                    away_line_b = mkt_b.get("away_line", 0)
-                    home_line_b = mkt_b.get("home_line", 0)
-                    away_line_a = mkt_a.get("away_line", 0)
-
-                    # Check: bet home at book_a (line = home_line_a) and away at book_b (line = away_line_b)
-                    # Middle if |home_line_a| < away_line_b (gap exists)
-                    gap = away_line_b - abs(home_line_a) if home_line_a < 0 else away_line_b + home_line_a
-                    # Simpler: middle exists when the absolute spread differs
-                    if abs(home_line_a) != abs(home_line_b):
-                        spread_gap = abs(home_line_a) - abs(home_line_b)
-                        if abs(spread_gap) >= 1.0:
-                            # Determine direction: bet the smaller spread side
-                            if abs(home_line_a) < abs(home_line_b):
-                                middles.append({
-                                    "game_id": gid, "market": "spread",
-                                    "home_team": gdata["home"], "away_team": gdata["away"],
-                                    "leg_1": {"side": "home", "line": home_line_a,
-                                              "odds": mkt_a["home_odds"], "book": book_a},
-                                    "leg_2": {"side": "away", "line": away_line_b,
-                                              "odds": mkt_b["away_odds"], "book": book_b},
-                                    "middle_gap": abs(spread_gap),
-                                    "middle_range": f"Result lands between {home_line_a} and {home_line_b}",
-                                })
-                            else:
-                                middles.append({
-                                    "game_id": gid, "market": "spread",
-                                    "home_team": gdata["home"], "away_team": gdata["away"],
-                                    "leg_1": {"side": "home", "line": home_line_b,
-                                              "odds": mkt_b["home_odds"], "book": book_b},
-                                    "leg_2": {"side": "away", "line": away_line_a,
-                                              "odds": mkt_a["away_odds"], "book": book_a},
-                                    "middle_gap": abs(spread_gap),
-                                    "middle_range": f"Result lands between {home_line_b} and {home_line_a}",
-                                })
-
-        # Total middles: different O/U lines across books
-        total_rows = [(r["sportsbook"], r["markets"]["total"]) for r in rows if "total" in r.get("markets", {})]
-        if len(total_rows) >= 2:
-            for i in range(len(total_rows)):
-                for j in range(i + 1, len(total_rows)):
-                    book_a, mkt_a = total_rows[i]
-                    book_b, mkt_b = total_rows[j]
-                    line_a = mkt_a.get("line", 0)
-                    line_b = mkt_b.get("line", 0)
-                    if line_a != line_b:
-                        gap = abs(line_a - line_b)
-                        if gap >= 1.0:
-                            # Bet over on lower line, under on higher line
-                            if line_a < line_b:
-                                middles.append({
-                                    "game_id": gid, "market": "total",
-                                    "home_team": gdata["home"], "away_team": gdata["away"],
-                                    "leg_1": {"side": "over", "line": line_a,
-                                              "odds": mkt_a["over_odds"], "book": book_a},
-                                    "leg_2": {"side": "under", "line": line_b,
-                                              "odds": mkt_b["under_odds"], "book": book_b},
-                                    "middle_gap": gap,
-                                    "middle_range": f"Total lands between {line_a} and {line_b}",
-                                })
-                            else:
-                                middles.append({
-                                    "game_id": gid, "market": "total",
-                                    "home_team": gdata["home"], "away_team": gdata["away"],
-                                    "leg_1": {"side": "over", "line": line_b,
-                                              "odds": mkt_b["over_odds"], "book": book_b},
-                                    "leg_2": {"side": "under", "line": line_a,
-                                              "odds": mkt_a["under_odds"], "book": book_a},
-                                    "middle_gap": gap,
-                                    "middle_range": f"Total lands between {line_b} and {line_a}",
-                                })
-
-    # Deduplicate middles (same game+market pairs appear twice in nested loop)
-    seen_middles = set()
-    unique_middles = []
-    for m in middles:
-        key = (m["game_id"], m["market"], m["leg_1"]["book"], m["leg_2"]["book"])
-        rev_key = (m["game_id"], m["market"], m["leg_2"]["book"], m["leg_1"]["book"])
-        if key not in seen_middles and rev_key not in seen_middles:
-            seen_middles.add(key)
-            unique_middles.append(m)
-    middles = sorted(unique_middles, key=lambda x: x["middle_gap"], reverse=True)
-
-    # ── 5. Outlier / Anomaly Detection ─────────────────────────────────
-    outliers = []
-    OUTLIER_THRESHOLD = 15  # American odds points deviation from consensus
-
-    for gid, gdata in games.items():
-        rows = gdata["rows"]
-        # Compute consensus (average) for each market's odds
-        for market_name in ("spread", "moneyline", "total"):
-            market_rows = [(r["sportsbook"], r["markets"][market_name])
-                           for r in rows if market_name in r.get("markets", {})]
-            if len(market_rows) < 3:
-                continue
-
-            if market_name in ("spread", "moneyline"):
-                odds_keys = [("home_odds", "home"), ("away_odds", "away")]
-            else:
-                odds_keys = [("over_odds", "over"), ("under_odds", "under")]
-
-            for odds_key, side_label in odds_keys:
-                values = [m[1][odds_key] for m in market_rows]
-                avg_odds = sum(values) / len(values)
-
-                for book, mkt in market_rows:
-                    deviation = abs(mkt[odds_key] - avg_odds)
-                    if deviation >= OUTLIER_THRESHOLD:
-                        outliers.append({
-                            "game_id": gid,
-                            "home_team": gdata["home"],
-                            "away_team": gdata["away"],
-                            "market": market_name,
-                            "side": side_label,
-                            "sportsbook": book,
-                            "odds": mkt[odds_key],
-                            "consensus_avg": round(avg_odds, 1),
-                            "deviation": round(deviation, 1),
-                            "type": "odds_outlier",
-                        })
-
-            # Line outliers for spread and total
-            if market_name == "spread":
-                lines = [m[1].get("home_line", 0) for m in market_rows]
-                avg_line = sum(lines) / len(lines)
-                for book, mkt in market_rows:
-                    line_dev = abs(mkt.get("home_line", 0) - avg_line)
-                    if line_dev >= 1.0:
-                        outliers.append({
-                            "game_id": gid,
-                            "home_team": gdata["home"],
-                            "away_team": gdata["away"],
-                            "market": "spread",
-                            "sportsbook": book,
-                            "line": mkt.get("home_line"),
-                            "consensus_line": round(avg_line, 1),
-                            "deviation": round(line_dev, 1),
-                            "type": "line_outlier",
-                        })
-            elif market_name == "total":
-                lines = [m[1].get("line", 0) for m in market_rows]
-                avg_line = sum(lines) / len(lines)
-                for book, mkt in market_rows:
-                    line_dev = abs(mkt.get("line", 0) - avg_line)
-                    if line_dev >= 1.0:
-                        outliers.append({
-                            "game_id": gid,
-                            "home_team": gdata["home"],
-                            "away_team": gdata["away"],
-                            "market": "total",
-                            "sportsbook": book,
-                            "line": mkt.get("line"),
-                            "consensus_line": round(avg_line, 1),
-                            "deviation": round(line_dev, 1),
-                            "type": "line_outlier",
-                        })
-
-    outliers.sort(key=lambda x: x["deviation"], reverse=True)
-
-    # ── 6. Stale Lines Detection ───────────────────────────────────────
-    stale_lines = []
-    STALE_THRESHOLD_MINUTES = 30
-
-    for gid, gdata in games.items():
-        rows = gdata["rows"]
-        timestamps = []
-        for r in rows:
-            ts_str = r.get("last_updated", "")
-            if ts_str:
-                try:
-                    ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-                    timestamps.append((r["sportsbook"], ts, r))
-                except (ValueError, TypeError):
-                    pass
-
-        if not timestamps:
-            continue
-
-        newest = max(ts for _, ts, _ in timestamps)
-        for book, ts, row in timestamps:
-            age_minutes = (newest - ts).total_seconds() / 60
-            if age_minutes >= STALE_THRESHOLD_MINUTES:
-                stale_lines.append({
-                    "game_id": gid,
-                    "home_team": gdata["home"],
-                    "away_team": gdata["away"],
-                    "sportsbook": book,
-                    "last_updated": ts.isoformat(),
-                    "newest_update": newest.isoformat(),
-                    "age_vs_newest_minutes": round(age_minutes, 1),
-                    "concern": (
-                        f"{book} is {round(age_minutes, 0):.0f} min behind the newest "
-                        f"update for this game — lines may be stale"
-                    ),
-                })
-
-    stale_lines.sort(key=lambda x: x["age_vs_newest_minutes"], reverse=True)
-
-    # ── 7. Fair Odds Summary (consensus no-vig lines) ──────────────────
-    fair_odds_summary = []
-    for gid, gdata in games.items():
-        rows = gdata["rows"]
-        game_fair: dict = {"game_id": gid, "home_team": gdata["home"], "away_team": gdata["away"]}
-        for market_name in ("spread", "moneyline", "total"):
-            market_rows = [r["markets"][market_name]
-                           for r in rows if market_name in r.get("markets", {})]
-            if not market_rows:
-                continue
-            if market_name in ("spread", "moneyline"):
-                fair_home = [m.get("home_fair_prob") or m.get("home_fair_odds") for m in market_rows
-                             if m.get("home_fair_prob") is not None or m.get("home_fair_odds") is not None]
-                fair_away = [m.get("away_fair_prob") or m.get("away_fair_odds") for m in market_rows
-                             if m.get("away_fair_prob") is not None or m.get("away_fair_odds") is not None]
-                if fair_home and fair_away:
-                    avg_h = sum(fair_home) / len(fair_home)
-                    avg_a = sum(fair_away) / len(fair_away)
-                    game_fair[f"{market_name}_home_fair_prob"] = round(avg_h, 4)
-                    game_fair[f"{market_name}_away_fair_prob"] = round(avg_a, 4)
-            else:
-                fair_over = [m.get("over_fair_prob") or m.get("over_fair_odds") for m in market_rows
-                             if m.get("over_fair_prob") is not None or m.get("over_fair_odds") is not None]
-                fair_under = [m.get("under_fair_prob") or m.get("under_fair_odds") for m in market_rows
-                              if m.get("under_fair_prob") is not None or m.get("under_fair_odds") is not None]
-                if fair_over and fair_under:
-                    avg_o = sum(fair_over) / len(fair_over)
-                    avg_u = sum(fair_under) / len(fair_under)
-                    game_fair["total_over_fair_prob"] = round(avg_o, 4)
-                    game_fair["total_under_fair_prob"] = round(avg_u, 4)
-        fair_odds_summary.append(game_fair)
-
-    # ── Build final analysis ───────────────────────────────────────────
-    summary_parts = [f"Analyzed {len(games)} games across {len(all_books)} sportsbooks."]
-    if arbitrage:
-        summary_parts.append(f"Found {len(arbitrage)} arbitrage opportunity(ies).")
-    if middles:
-        summary_parts.append(f"Found {len(middles)} middle opportunity(ies).")
-    if outliers:
-        summary_parts.append(f"Detected {len(outliers)} outlier(s).")
-    if stale_lines:
-        summary_parts.append(f"Detected {len(stale_lines)} stale line(s).")
-
-    analysis = {
-        "games_count": len(games),
-        "books_count": len(all_books),
-        "efficiency_ranking": efficiency,
-        "best_lines": best_lines,
-        "arbitrage": arbitrage,
-        "middles": middles,
-        "outliers": outliers,
-        "stale_lines": stale_lines,
-        "fair_odds_summary": fair_odds_summary,
-        "summary": " ".join(summary_parts),
-    }
+    # The detect phase now includes the analysis dict directly
+    analysis = detection_data.get("analysis", {})
 
     elapsed = round(time.time() - start, 2)
 
     if run_logger:
         run_logger.info(
-            "Analyze: games=%d books=%d arbs=%d outliers=%d stale=%d elapsed=%.2fs",
-            len(games), len(all_books), len(arbitrage), len(outliers), len(stale_lines), elapsed,
+            "Analyze: pass-through (analysis computed in detect phase) elapsed=%.2fs",
+            elapsed,
         )
 
     return {
@@ -1518,6 +1155,66 @@ async def run_analyze_phase(detection_data: dict, run_logger=None) -> dict:
     }
 
 
+def _build_brief_payload(detection_data: dict, analysis_data: dict) -> dict:
+    """Build a compact, briefing-optimized payload from raw pipeline output.
+
+    Strips bulk arrays (enriched_odds, arb_profit_curves, per-game synthetic
+    book detail) and keeps only the top-N items the AI needs for each section
+    of the daily market briefing.
+    """
+    analysis = analysis_data.get("analysis", analysis_data)
+
+    # --- Flatten ev_summary (nested dict) into a sorted top-10 list ---
+    ev_bets: list[dict] = []
+    for game_id, markets in detection_data.get("ev_summary", {}).items():
+        if not isinstance(markets, dict):
+            continue
+        for market_type, entries in markets.items():
+            if not isinstance(entries, list):
+                continue
+            for e in entries[:3]:  # top 3 per game/market
+                ev_bets.append({**e, "game_id": game_id, "market": market_type})
+    ev_bets.sort(key=lambda x: abs(x.get("ev_edge", 0)), reverse=True)
+
+    # --- Synthetic perfect book: aggregate + arb alerts only ---
+    synth = detection_data.get("synthetic_perfect_book", {})
+    synth_compact = {
+        "aggregate": synth.get("aggregate", {}),
+        "arb_alerts": synth.get("arb_alerts", []),
+    }
+
+    # --- Stale lines: top 10 ---
+    stale = detection_data.get("stale_summary", {})
+    stale_lines = stale.get("stale_lines", [])[:10]
+
+    # --- Arb profit curves: best pairings only (skip per-game O(n^2) detail) ---
+    arb_curves = detection_data.get("arb_profit_curves", {})
+    arb_best_pairings = arb_curves.get("best_pairings", [])[:10]
+
+    return {
+        "snapshot": {
+            "games_count": analysis.get("games_count", 0),
+            "books_count": analysis.get("books_count", 0),
+            "summary": analysis.get("summary", ""),
+        },
+        "top_ev_bets": ev_bets[:10],
+        "best_lines": analysis.get("best_lines", []),
+        "arbitrage": analysis.get("arbitrage", []),
+        "arb_best_pairings": arb_best_pairings,
+        "middles": analysis.get("middles", []),
+        "stale_lines": stale_lines,
+        "stale_count": stale.get("count", 0),
+        "outliers": analysis.get("outliers", [])[:10],
+        "fair_odds_summary": analysis.get("fair_odds_summary", []),
+        "efficiency_ranking": analysis.get("efficiency_ranking", []),
+        "vig_summary_top": [
+            {k: v for k, v in entry.items() if k != "markets"}
+            for entry in (detection_data.get("vig_summary", {}).get("rankings", []) or [])[:8]
+        ],
+        "synthetic_perfect_book": synth_compact,
+    }
+
+
 async def run_brief_phase(detection_data: dict, analysis_data: dict, on_chunk=None, run_logger=None) -> dict:
     """Phase 3: AI-powered daily market briefing (readable text).
 
@@ -1526,21 +1223,27 @@ async def run_brief_phase(detection_data: dict, analysis_data: dict, on_chunk=No
     """
     from datetime import datetime, timezone
 
+    brief_data = _build_brief_payload(detection_data, analysis_data)
     user_prompt = (
         "Generate a daily market briefing from the following data.\n\n"
-        "=== DETECTION DATA (enriched odds with implied probabilities, vig, fair odds) ===\n"
-        + json.dumps(detection_data, indent=2)[:15000]
-        + "\n\n=== CROSS-SPORTSBOOK ANALYSIS ===\n"
-        + json.dumps(analysis_data, indent=2)[:15000]
+        + json.dumps(brief_data, separators=(",", ":"))
     )
+    # Safety cap — should not trigger with properly summarized data
+    if len(user_prompt) > 60000:
+        logger.warning("Brief payload exceeded 60KB (%d chars), truncating", len(user_prompt))
+        user_prompt = user_prompt[:60000]
 
     if run_logger:
         run_logger.info("Brief: starting AI call (streaming=%s)", bool(on_chunk))
 
+    # Brief is a long-form document (10+ sections) — needs more output room
+    # than the default 4096 max_tokens configured on most providers.
+    brief_max_tokens = 16384
+
     if on_chunk:
-        result = await call_ai_stream(BRIEF_SYSTEM_PROMPT, user_prompt, on_chunk=on_chunk, run_logger=run_logger)
+        result = await call_ai_stream(BRIEF_SYSTEM_PROMPT, user_prompt, on_chunk=on_chunk, run_logger=run_logger, max_tokens=brief_max_tokens)
     else:
-        result = await call_ai(BRIEF_SYSTEM_PROMPT, user_prompt, run_logger=run_logger)
+        result = await call_ai(BRIEF_SYSTEM_PROMPT, user_prompt, run_logger=run_logger, max_tokens=brief_max_tokens)
 
     if run_logger:
         run_logger.info(
