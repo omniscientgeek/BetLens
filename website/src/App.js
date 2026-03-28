@@ -112,6 +112,9 @@ function BetLens() {
   const [pipelineStartTime, setPipelineStartTime] = useState(null);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
 
+  // Self-healing fix tracking
+  const [fixStatus, setFixStatus] = useState({}); // { analyze: {attempt, max, verdict}, brief: {...} }
+
   // Save state
   const [saving, setSaving] = useState(false);
   const [saveStatus, setSaveStatus] = useState(null); // { ok, message }
@@ -297,6 +300,7 @@ function BetLens() {
     setElapsedSeconds(0);
     setSaving(false);
     setSaveStatus(null);
+    setFixStatus({});
 
     if (!filename) {
       sessionRemove("selectedFile");
@@ -460,6 +464,44 @@ function BetLens() {
           [phase]: { ...prev[phase], verification: data.verification },
         }));
       }
+    });
+
+    // Self-healing: fix started — AI is correcting audit failures
+    socket.on("fix_started", (data) => {
+      const phase = data.phase || "brief";
+      setFixStatus((prev) => ({
+        ...prev,
+        [phase]: {
+          attempt: data.fix_attempt,
+          max: data.max_attempts,
+          previousVerdict: data.previous_verdict,
+          status: "fixing",
+        },
+      }));
+      // Clear previous verification agents for this phase so the UI shows fresh results
+      setPhaseResults((prev) => {
+        const existing = prev[phase] || {};
+        return {
+          ...prev,
+          [phase]: { ...existing, verification: undefined },
+        };
+      });
+      // For brief fixes, clear streaming text so new fixed text can stream in
+      if (phase === "brief") {
+        setStreamingBrief("");
+      }
+    });
+
+    // Self-healing: fix complete — re-auditing now
+    socket.on("fix_complete", (data) => {
+      const phase = data.phase || "brief";
+      setFixStatus((prev) => ({
+        ...prev,
+        [phase]: {
+          ...prev[phase],
+          status: "re-auditing",
+        },
+      }));
     });
 
     // Heartbeat from server — reset any "stale" timers / keep UI alive
@@ -756,13 +798,31 @@ function BetLens() {
         />
       )}
 
-      {/* Audit Analyze — show during processing with real-time agent updates */}
+      {/* Audit Analyze — show during processing with real-time agent updates + self-healing */}
       {!pipelineComplete && !pipelineError && pipeline && pipeline.phaseIndex >= 2 && (
         <div className="verification-card">
           <div className="verification-card-header">
             <span className="verification-card-icon">🛡</span>
             <h3>Audit Analyze</h3>
+            {fixStatus.analyze && (
+              <span className="fix-badge">
+                {fixStatus.analyze.status === "fixing"
+                  ? `Fixing (${fixStatus.analyze.attempt}/${fixStatus.analyze.max})`
+                  : fixStatus.analyze.status === "re-auditing"
+                  ? `Re-auditing (${fixStatus.analyze.attempt}/${fixStatus.analyze.max})`
+                  : null}
+              </span>
+            )}
           </div>
+          {fixStatus.analyze?.status === "fixing" && (
+            <div className="fix-status-banner">
+              <span className="pipeline-step-spinner" />
+              <span>
+                Audit failed with <strong>{fixStatus.analyze.previousVerdict}</strong> verdict
+                — AI is fixing issues (attempt {fixStatus.analyze.attempt} of {fixStatus.analyze.max})…
+              </span>
+            </div>
+          )}
           {phaseResults.analyze?.verification ? (
             <VerificationBadge
               verification={phaseResults.analyze.verification}
@@ -771,7 +831,11 @@ function BetLens() {
           ) : (
             <div className="verification-card-pending">
               <span className="pipeline-step-spinner" />
-              <span>Auditing analysis…</span>
+              <span>
+                {fixStatus.analyze?.status === "re-auditing"
+                  ? `Re-auditing after fix ${fixStatus.analyze.attempt}…`
+                  : "Auditing analysis…"}
+              </span>
             </div>
           )}
         </div>
@@ -789,13 +853,31 @@ function BetLens() {
         />
       )}
 
-      {/* Audit Brief — show during processing with real-time agent updates */}
+      {/* Audit Brief — show during processing with real-time agent updates + self-healing */}
       {!pipelineComplete && !pipelineError && pipeline && pipeline.phaseIndex >= 4 && (
         <div className="verification-card">
           <div className="verification-card-header">
             <span className="verification-card-icon">🛡</span>
             <h3>Audit Brief</h3>
+            {fixStatus.brief && (
+              <span className="fix-badge">
+                {fixStatus.brief.status === "fixing"
+                  ? `Fixing (${fixStatus.brief.attempt}/${fixStatus.brief.max})`
+                  : fixStatus.brief.status === "re-auditing"
+                  ? `Re-auditing (${fixStatus.brief.attempt}/${fixStatus.brief.max})`
+                  : null}
+              </span>
+            )}
           </div>
+          {fixStatus.brief?.status === "fixing" && (
+            <div className="fix-status-banner">
+              <span className="pipeline-step-spinner" />
+              <span>
+                Audit failed with <strong>{fixStatus.brief.previousVerdict}</strong> verdict
+                — AI is fixing issues (attempt {fixStatus.brief.attempt} of {fixStatus.brief.max})…
+              </span>
+            </div>
+          )}
           {phaseResults.brief?.verification ? (
             <VerificationBadge
               verification={phaseResults.brief.verification}
@@ -804,7 +886,11 @@ function BetLens() {
           ) : (
             <div className="verification-card-pending">
               <span className="pipeline-step-spinner" />
-              <span>Auditing brief…</span>
+              <span>
+                {fixStatus.brief?.status === "re-auditing"
+                  ? `Re-auditing after fix ${fixStatus.brief.attempt}…`
+                  : "Auditing brief…"}
+              </span>
             </div>
           )}
         </div>
@@ -838,14 +924,39 @@ function BetLens() {
             <AnalyzeConversation analyzeResult={pipelineResults.analyze} />
           )}
 
-          {/* Audit Analyze — standalone card */}
+          {/* Audit Analyze — standalone card with fix history */}
           {pipelineResults?.analyze?.verification && (
             <div className="verification-card">
               <div className="verification-card-header">
                 <span className="verification-card-icon">🛡</span>
                 <h3>Audit Analyze</h3>
+                {pipelineResults.analyze.verification.fix_attempts > 0 && (
+                  <span className="fix-badge fix-badge--complete">
+                    {pipelineResults.analyze.verification.overall_verdict === "pass"
+                      ? `Fixed in ${pipelineResults.analyze.verification.fix_attempts} attempt${pipelineResults.analyze.verification.fix_attempts > 1 ? "s" : ""}`
+                      : `${pipelineResults.analyze.verification.fix_attempts} fix attempt${pipelineResults.analyze.verification.fix_attempts > 1 ? "s" : ""} (${pipelineResults.analyze.verification.overall_verdict})`}
+                  </span>
+                )}
               </div>
               <VerificationBadge verification={pipelineResults.analyze.verification} />
+              {pipelineResults.analyze.verification.fix_history?.length > 1 && (
+                <details className="fix-history">
+                  <summary>Fix History ({pipelineResults.analyze.verification.fix_history.length} attempts)</summary>
+                  <div className="fix-history-list">
+                    {pipelineResults.analyze.verification.fix_history.map((h, idx) => (
+                      <div key={idx} className={`fix-history-item fix-history-item--${h.verdict}`}>
+                        <span className="fix-history-attempt">Attempt {h.attempt}</span>
+                        <span className={`fix-history-verdict verdict--${h.verdict}`}>{h.verdict}</span>
+                        <span className="fix-history-issues">
+                          {Object.values(h.verification?.agents || {}).reduce(
+                            (sum, a) => sum + (a.issues?.length || 0), 0
+                          )} issues
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              )}
             </div>
           )}
 
@@ -853,14 +964,39 @@ function BetLens() {
             <BriefPanel briefResult={pipelineResults.brief} />
           )}
 
-          {/* Audit Brief — standalone card */}
+          {/* Audit Brief — standalone card with fix history */}
           {pipelineResults?.brief?.verification && (
             <div className="verification-card">
               <div className="verification-card-header">
                 <span className="verification-card-icon">🛡</span>
                 <h3>Audit Brief</h3>
+                {pipelineResults.brief.verification.fix_attempts > 0 && (
+                  <span className="fix-badge fix-badge--complete">
+                    {pipelineResults.brief.verification.overall_verdict === "pass"
+                      ? `Fixed in ${pipelineResults.brief.verification.fix_attempts} attempt${pipelineResults.brief.verification.fix_attempts > 1 ? "s" : ""}`
+                      : `${pipelineResults.brief.verification.fix_attempts} fix attempt${pipelineResults.brief.verification.fix_attempts > 1 ? "s" : ""} (${pipelineResults.brief.verification.overall_verdict})`}
+                  </span>
+                )}
               </div>
               <VerificationBadge verification={pipelineResults.brief.verification} />
+              {pipelineResults.brief.verification.fix_history?.length > 1 && (
+                <details className="fix-history">
+                  <summary>Fix History ({pipelineResults.brief.verification.fix_history.length} attempts)</summary>
+                  <div className="fix-history-list">
+                    {pipelineResults.brief.verification.fix_history.map((h, idx) => (
+                      <div key={idx} className={`fix-history-item fix-history-item--${h.verdict}`}>
+                        <span className="fix-history-attempt">Attempt {h.attempt}</span>
+                        <span className={`fix-history-verdict verdict--${h.verdict}`}>{h.verdict}</span>
+                        <span className="fix-history-issues">
+                          {Object.values(h.verification?.agents || {}).reduce(
+                            (sum, a) => sum + (a.issues?.length || 0), 0
+                          )} issues
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              )}
             </div>
           )}
         </>

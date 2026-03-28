@@ -28,6 +28,7 @@ from ai_service import (
     get_enabled_providers,
     run_analyze_phase,
     run_brief_phase,
+    run_fix_phase,
     call_ai_chat,
     call_ai_chat_stream,
     CHAT_SYSTEM_PROMPT,
@@ -80,6 +81,9 @@ PHASES = [
     {"name": "brief", "label": "Generating brief"},
     {"name": "audit_brief", "label": "Auditing brief"},
 ]
+
+# Self-healing: max fix+re-audit attempts before accepting a non-pass verdict
+MAX_FIX_ATTEMPTS = 3
 
 
 @dataclasses.dataclass
@@ -260,6 +264,7 @@ async def run_processing_pipeline(filename: str, state: PipelineState):
 
             elif phase["name"] == "audit_analyze":
                 # --- Audit: run 3 verification agents to double-check the analysis ---
+                # Self-healing loop: if audit fails, AI fixes the text and re-audits
                 analysis = pipeline_results.get("analyze", {})
                 analyze_text = (analysis.get("conversation") or {}).get("assistant_response", "")
                 if analyze_text and not analysis.get("error"):
@@ -271,40 +276,125 @@ async def run_processing_pipeline(filename: str, state: PipelineState):
                             default=str,
                         )
 
-                        # Real-time callback: emit each agent's result as it completes
-                        async def _on_analyze_agent(agent_name, agent_result):
-                            agent_payload = {
+                        current_text = analyze_text
+                        fix_attempt = 0
+                        fix_history = []  # track all attempts for the frontend
+
+                        while True:
+                            # Real-time callback: emit each agent's result as it completes
+                            async def _on_analyze_agent(agent_name, agent_result, _attempt=fix_attempt):
+                                agent_payload = {
+                                    "filename": filename,
+                                    "phase": "analyze",
+                                    "agent_name": agent_name,
+                                    "agent_result": agent_result,
+                                    "run_id": run_id,
+                                    "fix_attempt": _attempt,
+                                }
+                                state.replay_events.append({"type": "verification_agent_update", "payload": agent_payload})
+                                await _safe_emit(state, "verification_agent_update", agent_payload)
+
+                            verification = await run_verification(
+                                text_to_verify=current_text,
+                                source_data=source_data,
+                                run_logger=run_logger,
+                                on_agent_complete=_on_analyze_agent,
+                            )
+
+                            verification_payload = {
                                 "filename": filename,
                                 "phase": "analyze",
-                                "agent_name": agent_name,
-                                "agent_result": agent_result,
+                                "verification": verification,
+                                "run_id": run_id,
+                                "fix_attempt": fix_attempt,
+                            }
+                            state.replay_events.append({"type": "verification_update", "payload": verification_payload})
+                            await _safe_emit(state, "verification_update", verification_payload)
+
+                            overall = verification.get("overall_verdict", "error")
+                            run_logger.info(
+                                "Analysis audit (attempt %d): overall=%s elapsed=%.2fs",
+                                fix_attempt, overall, verification["elapsed_seconds"],
+                            )
+
+                            fix_history.append({
+                                "attempt": fix_attempt,
+                                "verdict": overall,
+                                "verification": verification,
+                            })
+
+                            # If pass, or we've hit max retries, stop the loop
+                            if overall == "pass" or fix_attempt >= MAX_FIX_ATTEMPTS:
+                                if overall != "pass" and fix_attempt >= MAX_FIX_ATTEMPTS:
+                                    run_logger.warning(
+                                        "Analysis audit still %s after %d fix attempts — accepting result",
+                                        overall, fix_attempt,
+                                    )
+                                break
+
+                            # --- Self-healing: AI fixes the text based on audit issues ---
+                            fix_attempt += 1
+                            run_logger.info(
+                                "Analysis audit FAILED (%s) — starting fix attempt %d/%d",
+                                overall, fix_attempt, MAX_FIX_ATTEMPTS,
+                            )
+
+                            # Emit fix_started event so the UI shows the fix in progress
+                            fix_payload = {
+                                "filename": filename,
+                                "phase": "analyze",
+                                "fix_attempt": fix_attempt,
+                                "max_attempts": MAX_FIX_ATTEMPTS,
+                                "previous_verdict": overall,
                                 "run_id": run_id,
                             }
-                            state.replay_events.append({"type": "verification_agent_update", "payload": agent_payload})
-                            await _safe_emit(state, "verification_agent_update", agent_payload)
+                            state.replay_events.append({"type": "fix_started", "payload": fix_payload})
+                            await _safe_emit(state, "fix_started", fix_payload)
 
-                        verification = await run_verification(
-                            text_to_verify=analyze_text,
-                            source_data=source_data,
-                            run_logger=run_logger,
-                            on_agent_complete=_on_analyze_agent,
-                        )
+                            try:
+                                fix_result = await asyncio.wait_for(
+                                    run_fix_phase(
+                                        original_text=current_text,
+                                        audit_result=verification,
+                                        phase_type="analyze",
+                                        run_logger=run_logger,
+                                    ),
+                                    timeout=600,
+                                )
+                                current_text = fix_result["fixed_text"]
+
+                                # Update the analysis conversation with the fixed text
+                                analysis["conversation"]["assistant_response"] = current_text
+                                pipeline_results["analyze"] = analysis
+
+                                fix_complete_payload = {
+                                    "filename": filename,
+                                    "phase": "analyze",
+                                    "fix_attempt": fix_attempt,
+                                    "max_attempts": MAX_FIX_ATTEMPTS,
+                                    "run_id": run_id,
+                                    "fix_ai_meta": fix_result.get("ai_meta"),
+                                }
+                                state.replay_events.append({"type": "fix_complete", "payload": fix_complete_payload})
+                                await _safe_emit(state, "fix_complete", fix_complete_payload)
+
+                                run_logger.info(
+                                    "Analysis fix attempt %d complete — re-auditing...",
+                                    fix_attempt,
+                                )
+                            except Exception as fix_exc:
+                                run_logger.error(
+                                    "Analysis fix attempt %d FAILED: %s — stopping self-heal loop",
+                                    fix_attempt, fix_exc,
+                                )
+                                break
+
+                        # Store final verification + fix history
+                        verification["fix_history"] = fix_history
+                        verification["fix_attempts"] = fix_attempt
                         analysis["verification"] = verification
                         pipeline_results["analyze"] = analysis
 
-                        verification_payload = {
-                            "filename": filename,
-                            "phase": "analyze",
-                            "verification": verification,
-                            "run_id": run_id,
-                        }
-                        state.replay_events.append({"type": "verification_update", "payload": verification_payload})
-                        await _safe_emit(state, "verification_update", verification_payload)
-                        run_logger.info(
-                            "Analysis audit complete: overall=%s elapsed=%.2fs",
-                            verification["overall_verdict"],
-                            verification["elapsed_seconds"],
-                        )
                         await _emit_phase(state, filename, phase, i, "complete", run_id=run_id)
                     except Exception as vex:
                         run_logger.error("Analysis audit FAILED (non-blocking): %s", vex)
@@ -368,6 +458,7 @@ async def run_processing_pipeline(filename: str, state: PipelineState):
 
             elif phase["name"] == "audit_brief":
                 # --- Audit: run 3 verification agents to double-check the brief ---
+                # Self-healing loop: if audit fails, AI fixes the text and re-audits
                 brief = pipeline_results.get("brief", {})
                 if brief.get("brief_text") and not brief.get("error"):
                     try:
@@ -380,40 +471,129 @@ async def run_processing_pipeline(filename: str, state: PipelineState):
                             separators=(",", ":"),
                         )
 
-                        # Real-time callback: emit each agent's result as it completes
-                        async def _on_brief_agent(agent_name, agent_result):
-                            agent_payload = {
+                        current_brief_text = brief["brief_text"]
+                        fix_attempt = 0
+                        fix_history = []
+
+                        while True:
+                            # Real-time callback: emit each agent's result as it completes
+                            async def _on_brief_agent(agent_name, agent_result, _attempt=fix_attempt):
+                                agent_payload = {
+                                    "filename": filename,
+                                    "phase": "brief",
+                                    "agent_name": agent_name,
+                                    "agent_result": agent_result,
+                                    "run_id": run_id,
+                                    "fix_attempt": _attempt,
+                                }
+                                state.replay_events.append({"type": "verification_agent_update", "payload": agent_payload})
+                                await _safe_emit(state, "verification_agent_update", agent_payload)
+
+                            verification = await run_verification(
+                                text_to_verify=current_brief_text,
+                                source_data=source_data,
+                                run_logger=run_logger,
+                                on_agent_complete=_on_brief_agent,
+                            )
+
+                            verification_payload = {
                                 "filename": filename,
                                 "phase": "brief",
-                                "agent_name": agent_name,
-                                "agent_result": agent_result,
+                                "verification": verification,
+                                "run_id": run_id,
+                                "fix_attempt": fix_attempt,
+                            }
+                            state.replay_events.append({"type": "verification_update", "payload": verification_payload})
+                            await _safe_emit(state, "verification_update", verification_payload)
+
+                            overall = verification.get("overall_verdict", "error")
+                            run_logger.info(
+                                "Brief audit (attempt %d): overall=%s elapsed=%.2fs",
+                                fix_attempt, overall, verification["elapsed_seconds"],
+                            )
+
+                            fix_history.append({
+                                "attempt": fix_attempt,
+                                "verdict": overall,
+                                "verification": verification,
+                            })
+
+                            # If pass, or we've hit max retries, stop the loop
+                            if overall == "pass" or fix_attempt >= MAX_FIX_ATTEMPTS:
+                                if overall != "pass" and fix_attempt >= MAX_FIX_ATTEMPTS:
+                                    run_logger.warning(
+                                        "Brief audit still %s after %d fix attempts — accepting result",
+                                        overall, fix_attempt,
+                                    )
+                                break
+
+                            # --- Self-healing: AI fixes the brief based on audit issues ---
+                            fix_attempt += 1
+                            run_logger.info(
+                                "Brief audit FAILED (%s) — starting fix attempt %d/%d",
+                                overall, fix_attempt, MAX_FIX_ATTEMPTS,
+                            )
+
+                            fix_payload = {
+                                "filename": filename,
+                                "phase": "brief",
+                                "fix_attempt": fix_attempt,
+                                "max_attempts": MAX_FIX_ATTEMPTS,
+                                "previous_verdict": overall,
                                 "run_id": run_id,
                             }
-                            state.replay_events.append({"type": "verification_agent_update", "payload": agent_payload})
-                            await _safe_emit(state, "verification_agent_update", agent_payload)
+                            state.replay_events.append({"type": "fix_started", "payload": fix_payload})
+                            await _safe_emit(state, "fix_started", fix_payload)
 
-                        verification = await run_verification(
-                            text_to_verify=brief["brief_text"],
-                            source_data=source_data,
-                            run_logger=run_logger,
-                            on_agent_complete=_on_brief_agent,
-                        )
+                            try:
+                                # Stream fix chunks so the UI can show progress
+                                async def _on_fix_brief_chunk(text_delta):
+                                    await _safe_emit(state, "brief_chunk", {"text": text_delta, "fix_attempt": fix_attempt})
+
+                                fix_result = await asyncio.wait_for(
+                                    run_fix_phase(
+                                        original_text=current_brief_text,
+                                        audit_result=verification,
+                                        phase_type="brief",
+                                        run_logger=run_logger,
+                                        on_chunk=_on_fix_brief_chunk,
+                                    ),
+                                    timeout=600,
+                                )
+                                current_brief_text = fix_result["fixed_text"]
+
+                                # Update the brief with the fixed text
+                                brief["brief_text"] = current_brief_text
+                                pipeline_results["brief"] = brief
+
+                                fix_complete_payload = {
+                                    "filename": filename,
+                                    "phase": "brief",
+                                    "fix_attempt": fix_attempt,
+                                    "max_attempts": MAX_FIX_ATTEMPTS,
+                                    "run_id": run_id,
+                                    "fix_ai_meta": fix_result.get("ai_meta"),
+                                }
+                                state.replay_events.append({"type": "fix_complete", "payload": fix_complete_payload})
+                                await _safe_emit(state, "fix_complete", fix_complete_payload)
+
+                                run_logger.info(
+                                    "Brief fix attempt %d complete — re-auditing...",
+                                    fix_attempt,
+                                )
+                            except Exception as fix_exc:
+                                run_logger.error(
+                                    "Brief fix attempt %d FAILED: %s — stopping self-heal loop",
+                                    fix_attempt, fix_exc,
+                                )
+                                break
+
+                        # Store final verification + fix history
+                        verification["fix_history"] = fix_history
+                        verification["fix_attempts"] = fix_attempt
                         brief["verification"] = verification
                         pipeline_results["brief"] = brief
 
-                        verification_payload = {
-                            "filename": filename,
-                            "phase": "brief",
-                            "verification": verification,
-                            "run_id": run_id,
-                        }
-                        state.replay_events.append({"type": "verification_update", "payload": verification_payload})
-                        await _safe_emit(state, "verification_update", verification_payload)
-                        run_logger.info(
-                            "Brief audit complete: overall=%s elapsed=%.2fs",
-                            verification["overall_verdict"],
-                            verification["elapsed_seconds"],
-                        )
                         await _emit_phase(state, filename, phase, i, "complete", run_id=run_id)
                     except Exception as vex:
                         run_logger.error("Brief audit FAILED (non-blocking): %s", vex)

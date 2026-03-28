@@ -1930,6 +1930,120 @@
 }
 
 /* ================================================================== */
+/*  Self-Healing Fix UI                                                */
+/* ================================================================== */
+
+.fix-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  background: rgba(255, 176, 32, 0.15);
+  color: #ffb020;
+  border: 1px solid rgba(255, 176, 32, 0.3);
+  margin-left: auto;
+  animation: fix-badge-pulse 2s ease-in-out infinite;
+}
+
+.fix-badge--complete {
+  animation: none;
+  background: rgba(0, 230, 138, 0.12);
+  color: #00e68a;
+  border-color: rgba(0, 230, 138, 0.3);
+}
+
+@keyframes fix-badge-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+.fix-status-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  background: rgba(255, 176, 32, 0.08);
+  border-bottom: 1px solid rgba(255, 176, 32, 0.15);
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+}
+
+.fix-status-banner strong {
+  color: #ffb020;
+  text-transform: uppercase;
+}
+
+.fix-history {
+  margin-top: 8px;
+  padding: 0 16px 12px;
+}
+
+.fix-history summary {
+  cursor: pointer;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  font-weight: 500;
+  padding: 4px 0;
+  user-select: none;
+}
+
+.fix-history summary:hover {
+  color: var(--text-secondary);
+}
+
+.fix-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.fix-history-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 0.78rem;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+}
+
+.fix-history-item--pass { border-left: 3px solid #00e68a; }
+.fix-history-item--warn { border-left: 3px solid #ffb020; }
+.fix-history-item--fail { border-left: 3px solid #ff4f6d; }
+.fix-history-item--error { border-left: 3px solid var(--text-muted); }
+
+.fix-history-attempt {
+  font-weight: 600;
+  color: var(--text-secondary);
+  min-width: 70px;
+}
+
+.fix-history-verdict {
+  font-weight: 700;
+  text-transform: uppercase;
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+}
+
+.verdict--pass { color: #00e68a; }
+.verdict--warn { color: #ffb020; }
+.verdict--fail { color: #ff4f6d; }
+.verdict--error { color: var(--text-muted); }
+
+.fix-history-issues {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  margin-left: auto;
+}
+
+/* ================================================================== */
 /*  Verification Badges (vb-*)                                          */
 /* ================================================================== */
 
