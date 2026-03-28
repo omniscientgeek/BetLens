@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "betstamp-intelligence": {
+      "command": "python",
+      "args": [
+        "C:/Users/justi/source/repos/BetStamp/mcp-server/mcp_server.py"
+      ]
+    }
+  }
+}

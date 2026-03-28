@@ -277,3 +277,13 @@ Last night, I was having major issues with the code's accuracy. I decided to ref
 
 ## Quick note: When I was getting the repo ready for pushing to the public GitHub repo. I lost some dev notes and some uncommitted changes when I was clearing the githistory of my private proxy url. The joys of AI!
 _Sat, Mar 28, 2026 at 01:22 PM_
+
+## The processing is crashing at the very end because of circular reference. It takes about 20-30 minutes to process the job.
+_Sat, Mar 28, 2026 at 02:36 PM_
+
+I have not been able to update the system prompts because it takes forever to reproduce the issue. All the run data is lost. I hope the latest fix resolves the issue.
+
+## Performance Improvement
+_Sat, Mar 28, 2026 at 02:53 PM_
+
+The dedup fix that would clean the process crash add drastically speed up the process run times. Last run took 45 minutes to run and now it looks like it will take less than 10 minutes to complete. :)

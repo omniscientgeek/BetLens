@@ -40,39 +40,39 @@ BetStamp/
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
+┌──────────────────────────────────────────────────────────┐
 │                    React Frontend                        │
 │              (Socket.IO Client, Port 8190)               │
 │                                                          │
-│  BetLens ── ActiveRunDetail ── BriefPanel ── PastRuns   │
-└──────────────────────┬──────────────────────────────────┘
+│  BetLens ── ActiveRunDetail ── BriefPanel ── PastRuns    │
+└──────────────────────┬───────────────────────────────────┘
                        │ WebSocket (Socket.IO)
                        │ Events: phase_complete, analyze_chunk,
                        │   brief_chunk, verification_agent_update,
                        │   fix_started, fix_complete, ...
                        ▼
-┌─────────────────────────────────────────────────────────┐
+┌──────────────────────────────────────────────────────────┐
 │               FastAPI Backend (Port 8191)                │
 │                                                          │
 │  Pipeline Orchestrator (app.py)                          │
-│   ├── detect.py          ─── odds enrichment & math     │
-│   ├── ai_service.py      ─── AI provider abstraction    │
-│   ├── verification_agents.py ── 3-agent audit system    │
-│   └── mcp_client.py      ─── MCP tool access            │
+│   ├── detect.py          ─── odds enrichment & math      │
+│   ├── ai_service.py      ─── AI provider abstraction     │
+│   ├── verification_agents.py ── 3-agent audit system     │
+│   └── mcp_client.py      ─── MCP tool access             │
 │                                                          │
 │  AI Providers: Anthropic │ OpenAI │ Claude Agent SDK     │
 │  (priority-based failover)                               │
-└──────────────────────┬──────────────────────────────────┘
+└──────────────────────┬───────────────────────────────────┘
                        │ stdio transport
                        ▼
-┌─────────────────────────────────────────────────────────┐
+┌──────────────────────────────────────────────────────────┐
 │           BetStamp Intelligence MCP Server               │
 │                (mcp_server.py)                           │
 │                                                          │
 │  40+ tools: odds comparison, EV detection, vig analysis, │
 │  arbitrage, Poisson modeling, Kelly sizing, anomaly      │
 │  detection, sportsbook clustering, information flow ...  │
-└─────────────────────────────────────────────────────────┘
+└──────────────────────────────────────────────────────────┘
 ```
 
 ### Key Architectural Decisions
@@ -90,22 +90,22 @@ When a user selects an odds data file, Bet Lens runs a **5-phase pipeline**. Eac
 
 ```
   ┌──────────┐     ┌──────────┐     ┌───────────────┐     ┌──────────┐     ┌─────────────┐
-  │ 1. Detect │────▶│2. Analyze│────▶│3. Audit       │────▶│ 4. Brief │────▶│5. Audit     │
-  │ (code)    │     │ (AI)     │     │   Analyze     │     │ (AI)     │     │   Brief     │
+  │ 1. Detect│────▶│2. Analyze│────▶│3. Audit       │────▶│ 4. Brief │────▶│5. Audit     │
+  │ (code)   │     │ (AI)     │     │   Analyze     │     │ (AI)     │     │   Brief     │
   └──────────┘     └──────────┘     │ (3 AI agents) │     └──────────┘     │(3 AI agents)│
-                                     └───────┬───────┘                      └──────┬──────┘
-                                             │ fail?                               │ fail?
-                                             ▼                                     ▼
-                                     ┌───────────────┐                      ┌─────────────┐
-                                     │  Fix Analyze   │◀─┐                  │  Fix Brief   │◀─┐
-                                     │  (AI rewrite)  │  │                  │ (AI rewrite) │  │
-                                     └───────┬───────┘  │                  └──────┬──────┘  │
-                                             │          │                         │          │
-                                             ▼          │                         ▼          │
-                                     ┌───────────────┐  │                  ┌─────────────┐  │
-                                     │  Re-audit      │──┘                  │  Re-audit    │──┘
-                                     │ (up to 2x)     │                    │ (up to 2x)   │
-                                     └───────────────┘                      └─────────────┘
+                                    └───────┬───────┘                      └──────┬──────┘
+                                            │ fail?                               │ fail?
+                                            ▼                                     ▼
+                                    ┌───────────────┐                      ┌─────────────┐
+                                    │ Fix Analyze   │◀─┐                   │ Fix Brief   │◀─┐
+                                    │ (AI rewrite)  │  │                   │ (AI rewrite)│  │
+                                    └───────┬───────┘  │                   └──────┬──────┘  │
+                                            │          │                          │         │
+                                            ▼          │                          ▼         │
+                                    ┌───────────────┐  │                   ┌─────────────┐  │
+                                    │ Re-audit      │──┘                   │ Re-audit    │──┘
+                                    │ (up to 2x)    │                      │ (up to 2x)  │
+                                    └───────────────┘                      └─────────────┘
 ```
 
 ### Phase 1: Detect (Code-based, ~2-5s)

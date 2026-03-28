@@ -1,6 +1,240 @@
 {
   "commits": [
     {
+      "hash": "7b3b43e2",
+      "author": "BetStamp AutoSync",
+      "email": "autosync@betstamp.app",
+      "date": "2026-03-28 16:03:05 -0600",
+      "subject": "Auto-sync combined devnotes MD for project 10",
+      "is_claude": false,
+      "is_autosync": true
+    },
+    {
+      "hash": "93b2b7f5",
+      "author": "BetStamp AutoSync",
+      "email": "autosync@betstamp.app",
+      "date": "2026-03-28 16:02:28 -0600",
+      "subject": "Auto-sync combined devnotes MD for project 10",
+      "is_claude": false,
+      "is_autosync": true
+    },
+    {
+      "hash": "f140b99e",
+      "author": "BetStamp AutoSync",
+      "email": "autosync@betstamp.app",
+      "date": "2026-03-28 16:01:48 -0600",
+      "subject": "Auto-sync combined devnotes MD for project 10",
+      "is_claude": false,
+      "is_autosync": true
+    },
+    {
+      "hash": "c494ccd5",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 15:48:47 -0600",
+      "subject": "Update README with architecture, pipeline phases, and audit/fix documentation",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "e18d4187",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 15:47:52 -0600",
+      "subject": "Add AI Agent page with epistemic-honesty system prompt and fix disappearing chat responses",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "ca0c1fad",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 15:45:57 -0600",
+      "subject": "Harden ANALYZE_COT_SYSTEM_PROMPT against arbitrage fabrication",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "fc7ced7d",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 15:32:11 -0600",
+      "subject": "Add local environment setup instructions to README",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "9b42bcd1",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 15:31:38 -0600",
+      "subject": "Fix recursive ExceptionGroup unwrapping for MCP connection errors",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "0b6bb550",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 15:16:45 -0600",
+      "subject": "Fix preamble stripping for streamed brief fix chunks",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "e06c2964",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 15:13:42 -0600",
+      "subject": "Reduce audit rerun attempts by accepting warn verdicts and fixing agent oscillation",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "e7571ca7",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 15:09:34 -0600",
+      "subject": "Generate combined MD file with conversations and notes on Generate click",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "372f356f",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 15:09:11 -0600",
+      "subject": "Fix crash when audit history entry has undefined verdict",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "1e5dd0f2",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 14:56:53 -0600",
+      "subject": "Fix opaque TaskGroup errors from MCP/anyio by unwrapping ExceptionGroup",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "86938919",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 14:35:30 -0600",
+      "subject": "Fix circular reference crashes in Socket.IO emit and auto-save",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "ae380344",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 14:25:27 -0600",
+      "subject": "Add test suite and update dev log",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "1c72a52e",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 14:23:49 -0600",
+      "subject": "Fix missing previous audit result and fix conversation boxes during audit reruns",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "2e289bb3",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 14:18:48 -0600",
+      "subject": "Update sync-betlens-history skill: add frontmatter, ActiveRunDetail, and self-maintenance",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "92cc13eb",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 14:17:52 -0600",
+      "subject": "Add missing Past Runs features: detect display, delete, filter/sort, export, AI meta, source data, pagination",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "a86ecc1e",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 14:08:29 -0600",
+      "subject": "Add native MCP tool-use to Anthropic API provider for Railway deployment",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "b220b392",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 13:57:44 -0600",
+      "subject": "Separate fix blocks from audit blocks in BetLens timeline",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "ea7270e9",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 13:55:29 -0600",
+      "subject": "Add real-world data tests and requirements.pdf coverage tests",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "7870b0b0",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 13:45:54 -0600",
+      "subject": "Fix empty result files from auto-save and harden history listing",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "73b80eeb",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 13:21:15 -0600",
+      "subject": "Add environment variable config, pipeline runtime display, and production guards",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "9e8d7c78",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 13:01:51 -0600",
+      "subject": "Sort past runs by saved_at date (newest first) instead of filename",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "327bf796",
+      "author": "BetStamp AutoSync",
+      "email": "autosync@betstamp.app",
+      "date": "2026-03-28 12:55:53 -0600",
+      "subject": "Auto-sync devnotes for project 10",
+      "is_claude": false,
+      "is_autosync": true
+    },
+    {
+      "hash": "ac958acd",
+      "author": "BetStamp AutoSync",
+      "email": "autosync@betstamp.app",
+      "date": "2026-03-28 12:55:46 -0600",
+      "subject": "Auto-sync git stats",
+      "is_claude": false,
+      "is_autosync": true
+    },
+    {
       "hash": "dfade91a",
       "author": "Justin",
       "email": "justin@omniscientgeek.com",
@@ -695,13 +929,13 @@
     }
   ],
   "summary": {
-    "total_commits": 77,
-    "claude_commits": 73,
-    "autosync_commits": 2,
+    "total_commits": 103,
+    "claude_commits": 94,
+    "autosync_commits": 7,
     "user_commits": 2,
-    "claude_percentage": 94.8,
-    "autosync_percentage": 2.6,
-    "user_percentage": 2.6,
-    "generated_at": "2026-03-28T12:55:46.471310"
+    "claude_percentage": 91.3,
+    "autosync_percentage": 6.8,
+    "user_percentage": 1.9,
+    "generated_at": "2026-03-28T16:03:24.684559"
   }
 }
