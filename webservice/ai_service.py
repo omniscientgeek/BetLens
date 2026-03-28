@@ -381,14 +381,15 @@ async def _call_claude_sdk_stream(provider: dict, system_prompt: str, user_promp
         rl.info("%s", user_prompt)
         rl.info("=" * 60)
 
+    use_mcp = provider.get("use_mcp", True)
     command_payload = {
         "system_prompt": system_prompt,
         "user_prompt": user_prompt,
         "model": provider.get("model", "claude-sonnet-4-20250514"),
-        "max_turns": 1,
+        "max_turns": provider.get("max_turns", 25) if use_mcp else 1,
         "cwd": service_dir,
         "timeout_seconds": timeout_seconds,
-        "use_mcp": False,
+        "use_mcp": use_mcp,
     }
 
     start = time.time()
@@ -484,6 +485,7 @@ async def _call_claude_sdk_stream(provider: dict, system_prompt: str, user_promp
             "output_tokens": usage.get("output_tokens", 0),
         },
         "elapsed_seconds": elapsed,
+        "tool_calls": (result_data or {}).get("tool_calls", []),
     }
 
 
@@ -505,31 +507,55 @@ async def _call_anthropic_stream(provider: dict, system_prompt: str, user_prompt
     input_tokens = 0
     output_tokens = 0
 
-    async with client.messages.stream(
-        model=provider.get("model", "claude-sonnet-4-20250514"),
-        max_tokens=provider.get("max_tokens", 4096),
-        temperature=provider.get("temperature", 0.3),
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_prompt}],
-    ) as stream:
-        async for text in stream.text_stream:
-            full_text += text
-            if on_chunk:
-                await on_chunk(text)
+    # Overall timeout for the entire streaming call (generous for large CoT outputs)
+    stream_timeout = config.get("timeout_seconds", 180) + 120
+
+    async def _do_stream():
+        nonlocal full_text, input_tokens, output_tokens
+        async with client.messages.stream(
+            model=provider.get("model", "claude-sonnet-4-20250514"),
+            max_tokens=provider.get("max_tokens", 4096),
+            temperature=provider.get("temperature", 0.3),
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_prompt}],
+        ) as stream:
+            async for text in stream.text_stream:
+                full_text += text
+                if on_chunk:
+                    await on_chunk(text)
+
+        final = await stream.get_final_message()
+        if final and final.usage:
+            input_tokens = final.usage.input_tokens
+            output_tokens = final.usage.output_tokens
+        return final
+
+    try:
+        final_message = await asyncio.wait_for(_do_stream(), timeout=stream_timeout)
+    except asyncio.TimeoutError:
+        raise RuntimeError(f"Anthropic stream timed out after {stream_timeout}s")
 
     elapsed = round(time.time() - start, 2)
-    final = await stream.get_final_message()
-    if final and final.usage:
-        input_tokens = final.usage.input_tokens
-        output_tokens = final.usage.output_tokens
+
+    # Extract any tool_use blocks from the final message
+    tool_calls = []
+    if final_message and final_message.content:
+        for block in final_message.content:
+            if getattr(block, "type", None) == "tool_use":
+                tool_calls.append({
+                    "id": block.id,
+                    "name": block.name,
+                    "input": block.input,
+                })
 
     return {
         "text": full_text,
         "provider_id": provider["id"],
         "provider_name": provider["name"],
-        "model": final.model if final else provider.get("model"),
+        "model": provider.get("model", "claude-sonnet-4-20250514"),
         "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
         "elapsed_seconds": elapsed,
+        "tool_calls": tool_calls,
     }
 
 
