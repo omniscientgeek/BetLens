@@ -1579,7 +1579,9 @@ with the following sections using ## headings:
 ## Market Snapshot
 A 2-3 sentence executive overview of today's market conditions. State the total number \
 of games and sportsbooks covered, and characterize overall market health (normal, \
-volatile, thin, or stale data concerns).
+volatile, thin, or stale data concerns). \
+Use the counts from the "counts" object for ALL totals (games, books, middles, arbs, \
+outliers, stale lines, EV bets). Do NOT count array elements yourself.
 
 ## Top Value Bets
 List up to 5 of the best value bets you can identify, ranked by confidence. For each, \
@@ -1588,8 +1590,12 @@ sportsbook has the best odds, the odds themselves, and why this is a value play 
 (reference fair odds, vig, or consensus). Rate confidence as HIGH, MEDIUM, or LOW \
 with a brief justification. \
 For each value bet, include Kelly Criterion sizing guidance (quarter-Kelly recommended \
-bet size as a percentage of bankroll) from the data. If Kelly sizing data is not \
-available for a bet, state that explicitly.
+bet size as a percentage of bankroll). Kelly data IS available in the "top_ev_bets" \
+array (look for "quarter_kelly_pct" or "kelly_fraction" fields) and/or in "ai_insights" \
+and "top_actions" text. You MUST include Kelly sizing for every bet. Do NOT say "Kelly \
+sizing data not available" unless you have checked ALL of: top_ev_bets entries, \
+ai_insights descriptions, and top_actions reasoning — and NONE of them contain Kelly \
+data for that specific bet.
 
 ## Best Line Shopping
 For key games, show which sportsbook offers the best odds on each side. Highlight \
@@ -1599,14 +1605,18 @@ American odds). This tells the reader where to place each bet for maximum value.
 ## Arbitrage Opportunities
 List any genuine arbitrage opportunities across sportsbooks. For each, specify both \
 legs (side, book, odds), the combined implied probability, and the estimated profit \
-percentage. Quote profit percentages exactly as they appear in the data — do not \
-round, adjust, or recalculate them. If none exist, say so clearly.
+percentage. Quote profit percentages from ai_insights FIRST (these are tool-verified). \
+If ai_insights mentions a specific arbitrage profit percentage, use that exact number. \
+Only fall back to the arbitrage array's profit_pct field if ai_insights has no data \
+for that specific arb. NEVER average, round, or recalculate profit percentages. \
+If none exist, say so clearly.
 
 ## Middle Opportunities
 List any middle opportunities where spread or total lines differ across sportsbooks \
 enough to allow winning both sides. For each, state the game, both legs (side, line, \
-book, odds), the gap size, and the range of outcomes where both bets win. If none \
-exist, say so clearly.
+book, odds), the gap size, and the range of outcomes where both bets win. \
+CRITICAL: The total number of middles is in counts.middles_total — quote that number \
+exactly. Do NOT count array elements yourself. If none exist, say so clearly.
 
 ## Stale & Suspect Lines
 Flag any lines that appear significantly outdated, are outliers from consensus, or \
@@ -1622,8 +1632,15 @@ combination does not appear in the EV data, do NOT mention it as a +EV opportuni
 Quote EV edge percentages exactly as they appear in the data — do not round or adjust.
 
 ## Sportsbook Rankings
-Rank all sportsbooks in the data by average vig percentage. For each, note whether \
-they are sharp (low vig, < 3%), fair, or to be avoided, with a brief reason.
+This section has TWO parts:
+1. **Vig Ranking:** List sportsbooks from the "efficiency_ranking" array IN THE EXACT \
+   ORDER they appear (index 0 = lowest vig = rank #1). Copy avg_vig_pct exactly. \
+   Do NOT reorder, invert, or re-sort this list.
+2. **Overall Grade:** For each book, also include its letter grade from "book_grades" \
+   if available. Note: a book can have high vig but a high overall grade (e.g., a book \
+   may have the highest vig but Grade A due to superior odds availability and freshness).
+CRITICAL: The book at position 0 in efficiency_ranking has the LOWEST (best) vig. \
+The book at the LAST position has the HIGHEST (worst) vig. Do NOT invert this order.
 
 ## Market Movements
 Note any notable cross-book discrepancies, line movements, or anomalies worth watching.
@@ -1631,6 +1648,29 @@ Note any notable cross-book discrepancies, line movements, or anomalies worth wa
 ## Analyst Notes
 2-4 sentences of overall takeaways, things to watch, or caveats a human reviewer \
 should keep in mind before acting on this briefing.
+
+MANDATORY — DATA HIERARCHY (STRICT PRIORITY ORDER)
+When multiple data sources contain the same metric (e.g., EV edge for a bet), use this \
+priority order — NEVER mix sources for the same claim:
+1. HIGHEST PRIORITY: "ai_insights" and "top_actions" from the Analyze phase — these are \
+   tool-verified and audited. Use their exact numbers for EV edges, Kelly sizing, \
+   arbitrage profits, and book rankings.
+2. SECOND: "top_ev_bets" array — pre-computed EV data with Kelly sizing. Use ONLY if \
+   ai_insights has no data for that specific bet.
+3. THIRD: "efficiency_ranking" and "vig_summary_top" — for sportsbook vig rankings.
+4. LOWEST: Raw detection arrays (middles, stale_lines, outliers).
+CRITICAL: If ai_insights says an edge is 8.396% but top_ev_bets says 7.04% for the \
+same bet, you MUST use the ai_insights number because it is tool-verified.
+
+MANDATORY — USE PRE-COMPUTED COUNTS VERBATIM
+The data includes a "counts" object with pre-computed totals:
+- counts.middles_total — use this when stating how many middle opportunities exist
+- counts.arbitrage_total — use this for arbitrage opportunity count
+- counts.outliers_total — use this for outlier count
+- counts.stale_total — use this for stale line count
+- counts.ev_bets_total — use this for EV bet count
+You MUST quote these counts exactly. Do NOT count array elements yourself. \
+Do NOT state a count that does not match the "counts" object.
 
 MANDATORY — USE PRE-COMPUTED NUMBERS ONLY
 You must NEVER perform your own arithmetic, math, or statistical calculations. \
@@ -1640,6 +1680,19 @@ changes) are already computed in the data provided to you. Copy them directly \
 into your briefing — do NOT re-derive, estimate, round, or recalculate any \
 values yourself. If a number is not present in the data, state that it is \
 unavailable rather than computing it.
+
+MANDATORY — ENTITY TRIPLES (SPORTSBOOK + TEAM + ODDS)
+Every bet reference in the briefing must be a COMPLETE triple: {sportsbook, team, odds}. \
+All three elements MUST come from the SAME data entry. You must NEVER:
+- Take a sportsbook from one entry and pair it with odds from another entry
+- Take a team name from one entry and pair it with a different book's odds
+- Infer or guess any element of the triple
+When writing a value bet, locate the SINGLE data entry that contains all three elements \
+and copy them together. For example, if top_ev_bets contains: \
+  {"sportsbook": "BetMGM", "side": "away", "odds": 165, "game_id": "nba_..._den_mil"} \
+and the game has home_team "Milwaukee Bucks" and away_team "Denver Nuggets", \
+then side="away" means the team is Denver Nuggets at BetMGM at +165. \
+NEVER separate these three elements across different data entries.
 
 AI Analysis Summary:
 The data may include fields from a prior AI Analyze step: "ai_summary", "ai_insights", \
@@ -1661,9 +1714,28 @@ Guidelines:
 - If data is insufficient for any section, state that clearly rather than guessing.
 - Write for a professional audience. Be concise but thorough.
 - Include Kelly Criterion sizing (quarter-Kelly % of bankroll) for every recommended bet. \
-  If sizing data is not available, state that explicitly.
+  Kelly data is in the top_ev_bets array and/or ai_insights text.
 - For any bet at a sportsbook with stale lines (>60 minutes old), include an explicit \
   staleness warning so the reader knows the odds may have moved.
+
+MANDATORY SELF-CHECK — COMPLETE BEFORE OUTPUTTING
+Before writing your final briefing, mentally verify each of these:
+[ ] COUNTS: Every count I stated (middles, arbs, outliers, stale) matches a value \
+    from the "counts" object — I did NOT count array elements myself.
+[ ] EV EDGES: Every EV edge percentage I quoted came from ai_insights or top_ev_bets — \
+    I did NOT re-derive or round any edge value.
+[ ] KELLY SIZING: Every value bet includes quarter-Kelly sizing from the data. I did \
+    NOT write "Kelly sizing data not available" without checking ai_insights, \
+    top_actions, AND top_ev_bets for Kelly data first.
+[ ] ENTITY TRIPLES: Every (sportsbook, team, odds) triple came from a single data entry. \
+    I did NOT mix sportsbook from one entry with team/odds from another.
+[ ] ARB PROFIT: Every arbitrage profit % matches the ai_insights description or the \
+    arbitrage array's profit_pct field exactly.
+[ ] SPORTSBOOK RANKINGS: The order matches efficiency_ranking exactly. Position 0 = best \
+    (lowest vig). The last position = worst (highest vig). I did NOT invert the order.
+[ ] NO FABRICATION: I did NOT mention any bet, opportunity, or number that does not \
+    appear in the provided data.
+If ANY check fails, fix it before outputting.
 """
 
 
@@ -1967,8 +2039,39 @@ def _build_brief_payload(detection_data: dict, analysis_data: dict) -> dict:
     """
     analysis = analysis_data.get("analysis", analysis_data)
 
-    # --- Flatten ev_summary (nested dict) into a sorted top-10 list ---
-    ev_bets: list[dict] = []
+    # --- Extract tool-verified EV bets from analyze conversation if available ---
+    # These match what the audit agents verify against (Pinnacle no-vig benchmark).
+    tool_verified_ev: list[dict] = []
+    kelly_data: dict[tuple, dict] = {}
+    tool_calls = analysis_data.get("conversation", {}).get("tool_calls", [])
+    for tc in (tool_calls or []):
+        tc_name = tc.get("name", "")
+        if tc_name in ("find_expected_value_bets", "get_best_bets_today", "get_kelly_sizing"):
+            try:
+                result = tc.get("result", "")
+                if isinstance(result, str):
+                    result = json.loads(result)
+                bets_list = result.get("result", result) if isinstance(result, dict) else result
+                if not isinstance(bets_list, list):
+                    continue
+                for b in bets_list:
+                    if not isinstance(b, dict):
+                        continue
+                    # Collect Kelly data keyed by (sportsbook, game_id, side)
+                    key = (b.get("sportsbook", ""), b.get("game_id", ""), b.get("side", ""))
+                    if key[0] and (b.get("kelly_fraction") or b.get("quarter_kelly_pct")):
+                        kelly_data[key] = {
+                            k: v for k, v in b.items()
+                            if k in ("kelly_fraction", "quarter_kelly_pct", "ev_edge", "ev_edge_pct")
+                        }
+                    # Collect tool-verified EV bets
+                    if tc_name in ("find_expected_value_bets", "get_best_bets_today") and b.get("ev_edge"):
+                        tool_verified_ev.append(b)
+            except (json.JSONDecodeError, TypeError, AttributeError):
+                pass
+
+    # --- Flatten ev_summary (nested dict) into a sorted list as fallback ---
+    ev_bets_fallback: list[dict] = []
     for game_id, markets in detection_data.get("ev_summary", {}).items():
         if not isinstance(markets, dict):
             continue
@@ -1976,8 +2079,22 @@ def _build_brief_payload(detection_data: dict, analysis_data: dict) -> dict:
             if not isinstance(entries, list):
                 continue
             for e in entries[:3]:  # top 3 per game/market
-                ev_bets.append({**e, "game_id": game_id, "market": market_type})
-    ev_bets.sort(key=lambda x: abs(x.get("ev_edge", 0)), reverse=True)
+                ev_bets_fallback.append({**e, "game_id": game_id, "market": market_type})
+    ev_bets_fallback.sort(key=lambda x: abs(x.get("ev_edge", 0)), reverse=True)
+
+    # Prefer tool-verified EV data (matches audit verification); fall back to detect-phase
+    if tool_verified_ev:
+        ev_bets = sorted(tool_verified_ev, key=lambda x: abs(x.get("ev_edge", 0)), reverse=True)
+    else:
+        ev_bets = ev_bets_fallback
+
+    # --- Merge Kelly sizing data into ev_bets ---
+    for bet in ev_bets:
+        key = (bet.get("sportsbook", ""), bet.get("game_id", ""), bet.get("side", ""))
+        if key in kelly_data:
+            for k, v in kelly_data[key].items():
+                if k not in bet or bet[k] is None:
+                    bet[k] = v
 
     # --- Synthetic perfect book: aggregate + arb alerts only ---
     synth = detection_data.get("synthetic_perfect_book", {})
@@ -1994,22 +2111,42 @@ def _build_brief_payload(detection_data: dict, analysis_data: dict) -> dict:
     arb_curves = detection_data.get("arb_profit_curves", {})
     arb_best_pairings = arb_curves.get("best_pairings", [])[:10]
 
+    # --- Pre-computed counts so the AI never counts array elements itself ---
+    middles_list = analysis.get("middles", [])
+    arbitrage_list = analysis.get("arbitrage", [])
+    outliers_list = analysis.get("outliers", [])
+
+    # --- Efficiency ranking with explicit position numbers ---
+    raw_efficiency = analysis.get("efficiency_ranking", [])
+    efficiency_ranked = [
+        {**entry, "rank": i + 1}
+        for i, entry in enumerate(raw_efficiency)
+    ]
+
     return {
         "snapshot": {
             "games_count": analysis.get("games_count", 0),
             "books_count": analysis.get("books_count", 0),
             "summary": analysis.get("summary", ""),
         },
+        # Pre-computed counts — the AI must quote these verbatim
+        "counts": {
+            "middles_total": len(middles_list),
+            "arbitrage_total": len(arbitrage_list),
+            "outliers_total": len(outliers_list),
+            "stale_total": stale.get("count", 0),
+            "ev_bets_total": len(ev_bets),
+        },
         "top_ev_bets": ev_bets[:10],
         "best_lines": analysis.get("best_lines", []),
-        "arbitrage": analysis.get("arbitrage", []),
+        "arbitrage": arbitrage_list,
         "arb_best_pairings": arb_best_pairings,
-        "middles": analysis.get("middles", []),
+        "middles": middles_list,
         "stale_lines": stale_lines,
         "stale_count": stale.get("count", 0),
-        "outliers": analysis.get("outliers", [])[:10],
+        "outliers": outliers_list[:10],
         "fair_odds_summary": analysis.get("fair_odds_summary", []),
-        "efficiency_ranking": analysis.get("efficiency_ranking", []),
+        "efficiency_ranking": efficiency_ranked,
         "vig_summary_top": [
             {k: v for k, v in entry.items() if k != "markets"}
             for entry in (detection_data.get("vig_summary", {}).get("rankings", []) or [])[:8]
@@ -2020,6 +2157,11 @@ def _build_brief_payload(detection_data: dict, analysis_data: dict) -> dict:
         "ai_insights": analysis.get("ai_insights", []),
         "market_assessment": analysis.get("market_assessment", {}),
         "book_grades": analysis.get("book_grades", {}),
+        "book_grades_note": (
+            "book_grades reflect OVERALL quality (vig + odds availability + freshness "
+            "+ sharpness). A book with higher vig can still rank #1 overall if it excels "
+            "in other dimensions. efficiency_ranking ranks by vig ONLY."
+        ),
         "top_actions": analysis.get("top_actions", []),
     }
 
@@ -2035,6 +2177,12 @@ async def run_brief_phase(detection_data: dict, analysis_data: dict, on_chunk=No
     brief_data = _build_brief_payload(detection_data, analysis_data)
     user_prompt = (
         "Generate a daily market briefing from the following data.\n\n"
+        "REMINDER: Use ai_insights and top_actions as your PRIMARY source for EV edges, "
+        "Kelly sizing, and arbitrage profits (they are tool-verified). Use the 'counts' "
+        "object for ALL totals — do NOT count array elements yourself. Use "
+        "efficiency_ranking IN ORDER (index 0 = lowest/best vig). Include quarter-Kelly "
+        "sizing for every value bet. Every (sportsbook, team, odds) triple must come "
+        "from a single data entry.\n\n"
         + json.dumps(brief_data, separators=(",", ":"))
     )
     # Safety cap — should not trigger with properly summarized data
@@ -2111,5 +2259,188 @@ async def run_brief_phase(detection_data: dict, analysis_data: dict, on_chunk=No
             "model": result["model"],
             "usage": result["usage"],
             "elapsed_seconds": result["elapsed_seconds"],
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Self-healing fix phase — rewrites AI text to resolve audit failures
+# ---------------------------------------------------------------------------
+
+FIX_ANALYZE_SYSTEM_PROMPT = """\
+You are a precision editor for sports betting analysis. You receive an AI-generated \
+betting analysis that FAILED verification audits, along with the specific issues \
+found by the audit agents.
+
+Your job is to REWRITE the analysis, correcting EVERY issue listed. You have access \
+to MCP tools — you MUST call them to get the correct data for any claim you fix.
+
+RULES:
+1. Fix ALL issues listed — every "error" and "warning" severity issue MUST be addressed.
+2. Do NOT fabricate data. For every corrected number, call the appropriate MCP tool to \
+   get the real value and use that exact value.
+3. Preserve the overall structure and tone of the original analysis.
+4. If an issue says a +EV opportunity was fabricated, REMOVE it entirely.
+5. If an issue says a number is wrong, call the MCP tool, get the correct number, and \
+   replace it.
+6. If an issue says Kelly sizing is missing, call get_kelly_sizing() and add it.
+7. If an issue says stale line caveat is missing, call detect_stale_lines() and add \
+   appropriate caveats.
+8. After fixing, do a final self-check: re-read your output and verify every number \
+   against the MCP tool results you received.
+
+MANDATORY — NO MENTAL MATH — ZERO TOLERANCE
+Use arithmetic_add, arithmetic_subtract, arithmetic_multiply, arithmetic_divide, \
+arithmetic_evaluate for ALL numerical work. NEVER compute numbers yourself.
+
+OUTPUT: Return ONLY the corrected analysis text. No preamble, no explanation of changes, \
+no markdown fences wrapping the whole thing. Just the corrected analysis text exactly as \
+it should appear (preserving the same format as the original — if it was markdown, output \
+markdown; if it had <analysis> tags, include them).
+"""
+
+FIX_BRIEF_SYSTEM_PROMPT = """\
+You are a precision editor for sports betting market briefings. You receive an \
+AI-generated market briefing that FAILED verification audits, along with the specific \
+issues found by the audit agents.
+
+Your job is to REWRITE the briefing, correcting EVERY issue listed. You have access \
+to MCP tools — you MUST call them to get the correct data for any claim you fix.
+
+RULES:
+1. Fix ALL issues listed — every "error" and "warning" severity issue MUST be addressed.
+2. Do NOT fabricate data. For every corrected number, call the appropriate MCP tool to \
+   get the real value and use that exact value.
+3. Preserve the overall structure, section headings, and tone of the original briefing.
+4. The first characters of your output MUST be "## " (a markdown heading). Do NOT add \
+   any preamble before the first heading.
+5. If an issue says a +EV opportunity was fabricated, REMOVE it entirely.
+6. If an issue says a number is wrong, call the MCP tool, get the correct number, and \
+   replace it.
+7. If an issue says Kelly sizing is missing, call get_kelly_sizing() and add it.
+8. If an issue says stale line caveat is missing, call detect_stale_lines() and add \
+   appropriate caveats.
+9. After fixing, do a final self-check: re-read your output and verify every number \
+   against the MCP tool results you received.
+
+MANDATORY — NO MENTAL MATH — ZERO TOLERANCE
+Use arithmetic_add, arithmetic_subtract, arithmetic_multiply, arithmetic_divide, \
+arithmetic_evaluate for ALL numerical work. NEVER compute numbers yourself.
+
+OUTPUT: Return ONLY the corrected briefing text as clean markdown. The first line MUST \
+start with "## ". No preamble, no explanation of changes.
+"""
+
+
+async def run_fix_phase(
+    original_text: str,
+    audit_result: dict,
+    phase_type: str = "analyze",
+    run_logger=None,
+    on_chunk=None,
+) -> dict:
+    """Rewrite AI-generated text to fix all audit issues.
+
+    Parameters
+    ----------
+    original_text : str
+        The original AI-generated text that failed audit.
+    audit_result : dict
+        The verification result dict with agents and issues.
+    phase_type : str
+        "analyze" or "brief" — selects the appropriate system prompt.
+    run_logger : logging.Logger, optional
+    on_chunk : async callable, optional
+        Streaming callback for text deltas.
+
+    Returns
+    -------
+    dict
+        {fixed_text, ai_meta, conversation}
+    """
+    start = time.time()
+
+    system_prompt = FIX_ANALYZE_SYSTEM_PROMPT if phase_type == "analyze" else FIX_BRIEF_SYSTEM_PROMPT
+
+    # Build a structured list of issues from all agents
+    issues_text = []
+    for agent_name, agent_data in audit_result.get("agents", {}).items():
+        agent_verdict = agent_data.get("verdict", "unknown")
+        agent_issues = agent_data.get("issues", [])
+        if agent_issues:
+            issues_text.append(f"\n--- {agent_name.upper()} AGENT (verdict: {agent_verdict}) ---")
+            for issue in agent_issues:
+                severity = issue.get("severity", "unknown")
+                claim = issue.get("claim", "")
+                finding = issue.get("finding", "")
+                issues_text.append(f"  [{severity}] Claim: {claim}")
+                issues_text.append(f"           Finding: {finding}")
+
+    issues_block = "\n".join(issues_text) if issues_text else "No specific issues provided."
+
+    user_prompt = (
+        f"The following {phase_type} text FAILED verification audit "
+        f"(overall verdict: {audit_result.get('overall_verdict', 'unknown')}). "
+        f"Fix ALL issues listed below.\n\n"
+        f"=== AUDIT ISSUES TO FIX ===\n{issues_block}\n\n"
+        f"=== ORIGINAL TEXT TO CORRECT ===\n{original_text}"
+    )
+
+    # Safety cap
+    if len(user_prompt) > 80000:
+        if run_logger:
+            run_logger.warning("Fix payload exceeded 80KB (%d chars), truncating", len(user_prompt))
+        user_prompt = user_prompt[:80000]
+
+    if run_logger:
+        run_logger.info("Fix phase (%s): starting AI call to correct %d issues", phase_type, len(issues_text))
+
+    fix_max_tokens = 16384
+
+    if on_chunk:
+        result = await call_ai_stream(
+            system_prompt, user_prompt,
+            on_chunk=on_chunk,
+            run_logger=run_logger,
+            max_tokens=fix_max_tokens,
+        )
+    else:
+        result = await call_ai_stream(
+            system_prompt, user_prompt,
+            run_logger=run_logger,
+            max_tokens=fix_max_tokens,
+        )
+
+    elapsed = round(time.time() - start, 2)
+
+    if run_logger:
+        run_logger.info(
+            "Fix phase (%s): AI complete provider=%s model=%s elapsed=%.2fs",
+            phase_type, result["provider_name"], result["model"], elapsed,
+        )
+
+    fixed_text = result["text"]
+
+    # For brief fixes, strip preamble before first heading
+    if phase_type == "brief":
+        heading_pos = fixed_text.find("## ")
+        if heading_pos > 0:
+            if run_logger:
+                run_logger.info("Fix phase: stripped %d chars of preamble from fixed brief", heading_pos)
+            fixed_text = fixed_text[heading_pos:]
+
+    return {
+        "fixed_text": fixed_text,
+        "ai_meta": {
+            "provider": result["provider_name"],
+            "model": result["model"],
+            "usage": result.get("usage", {}),
+            "elapsed_seconds": elapsed,
+        },
+        "conversation": {
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
+            "assistant_response": result["text"],
+            "tool_calls": result.get("tool_calls", []),
         },
     }
