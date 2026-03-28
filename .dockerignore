@@ -39,8 +39,7 @@ _sdk_in_*.json
 # Saved results (start fresh on deploy)
 saved_results/
 
-# Dev notes
-devNotesData/
+# Dev notes (included for production /api/devnotes and /api/notes)
 
 # PDF
 *.pdf

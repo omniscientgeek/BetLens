@@ -23,6 +23,8 @@ RUN cd /app/webservice && npm install --omit=dev
 COPY webservice/ /app/webservice/
 COPY mcp-server/ /app/mcp-server/
 COPY data/ /app/data/
+COPY devNotesData/ /app/devNotesData/
+COPY DEVLOG.md /app/DEVLOG.md
 
 # Create saved_results and logs directories
 RUN mkdir -p /app/saved_results /app/webservice/logs/runs
