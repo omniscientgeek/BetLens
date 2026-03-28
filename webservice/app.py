@@ -184,8 +184,10 @@ async def _auto_save_results(filename: str, pipeline_results: dict, run_logger):
             content = await f.read()
         file_data = json.loads(content)
 
-    # Restructure verification to top-level audit_analyze / audit_brief
-    structured_results = dict(pipeline_results)
+    # Restructure verification to top-level audit_analyze / audit_brief.
+    # Deep-copy so we never mutate the live pipeline_results / state.results.
+    import copy
+    structured_results = copy.deepcopy(pipeline_results)
     analyze = structured_results.get("analyze")
     if isinstance(analyze, dict) and "verification" in analyze:
         structured_results["audit_analyze"] = analyze.pop("verification")
@@ -464,7 +466,13 @@ async def run_processing_pipeline(filename: str, state: PipelineState):
                                 break
 
                         # Store final verification + fix history
-                        verification["fix_history"] = fix_history
+                        # Deep-copy to break circular references: each fix_history
+                        # audit entry stores a verification dict, and we're about to
+                        # attach fix_history *onto* the last verification — which would
+                        # create verification → fix_history → entry → verification → …
+                        import copy
+                        fix_history_safe = copy.deepcopy(fix_history)
+                        verification["fix_history"] = fix_history_safe
                         verification["fix_attempts"] = fix_attempt
                         analysis["verification"] = verification
                         pipeline_results["analyze"] = analysis
@@ -689,7 +697,10 @@ async def run_processing_pipeline(filename: str, state: PipelineState):
                                 break
 
                         # Store final verification + fix history
-                        verification["fix_history"] = fix_history
+                        # Deep-copy to break circular references (same as analyze above)
+                        import copy
+                        fix_history_safe = copy.deepcopy(fix_history)
+                        verification["fix_history"] = fix_history_safe
                         verification["fix_attempts"] = fix_attempt
                         brief["verification"] = verification
                         pipeline_results["brief"] = brief
@@ -1071,6 +1082,25 @@ async def get_saved_result(filename: str):
             {"error": f"Saved result file contains invalid JSON: {exc}"},
             status_code=422,
         )
+
+
+@app.delete("/api/saved-results/{filename}")
+async def delete_saved_result(filename: str):
+    """Delete a saved result file."""
+    if not filename.endswith(".json"):
+        return JSONResponse({"error": "Only .json files are supported"}, status_code=400)
+
+    filepath = os.path.abspath(os.path.join(SAVED_RESULTS_DIR, filename))
+    if not filepath.startswith(SAVED_RESULTS_DIR):
+        return JSONResponse({"error": "Invalid file path"}, status_code=403)
+    if not os.path.isfile(filepath):
+        return JSONResponse({"error": "File not found"}, status_code=404)
+
+    try:
+        os.remove(filepath)
+        return {"deleted": True, "filename": filename}
+    except OSError as exc:
+        return JSONResponse({"error": f"Failed to delete file: {exc}"}, status_code=500)
 
 
 @app.get("/api/active-runs")
