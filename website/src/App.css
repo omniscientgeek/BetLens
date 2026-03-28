@@ -2391,6 +2391,31 @@
   font-style: italic;
   color: var(--text-muted);
 }
+.vb-tool-count {
+  font-size: 0.75rem;
+  opacity: 0.7;
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+.vb-tool-live {
+  font-style: normal;
+  display: flex;
+  align-items: center;
+  gap: 0.3em;
+  flex-wrap: wrap;
+}
+.vb-tool-live code {
+  font-family: 'SFMono-Regular', 'Consolas', 'Liberation Mono', monospace;
+  font-size: 0.8rem;
+  background: rgba(255, 255, 255, 0.06);
+  padding: 0.1em 0.4em;
+  border-radius: 3px;
+  color: var(--accent-cyan, #63b3ed);
+}
+.vb-tool-history {
+  font-size: 0.75rem;
+  opacity: 0.5;
+}
 
 /* Animate completed agents sliding in */
 @keyframes vb-agent-appear {

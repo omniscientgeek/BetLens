@@ -484,6 +484,43 @@ function BetLens() {
       }
     });
 
+    // Receive real-time MCP tool call events from audit agents as they work
+    socket.on("verification_tool_event", (data) => {
+      if (data.agent_name && data.event_type) {
+        const phase = data.phase || "brief";
+        setPhaseResults((prev) => {
+          const existing = prev[phase] || {};
+          const existingVerification = existing.verification || {
+            overall_verdict: "pending",
+            elapsed_seconds: null,
+            agents: {},
+            _pending: true,
+          };
+          // Store tool events per agent (ephemeral — cleared when final verification arrives)
+          const agentToolEvents = existingVerification._toolEvents || {};
+          const agentEvents = agentToolEvents[data.agent_name] || [];
+          const newEvent = {
+            type: data.event_type,
+            ...data.data,
+            timestamp: Date.now(),
+          };
+          return {
+            ...prev,
+            [phase]: {
+              ...existing,
+              verification: {
+                ...existingVerification,
+                _toolEvents: {
+                  ...agentToolEvents,
+                  [data.agent_name]: [...agentEvents, newEvent],
+                },
+              },
+            },
+          };
+        });
+      }
+    });
+
     // Receive final verification results (arrives after all agents finish, before processing_complete)
     socket.on("verification_update", (data) => {
       if (data.verification) {

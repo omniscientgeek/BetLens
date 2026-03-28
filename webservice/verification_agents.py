@@ -17,7 +17,7 @@ import asyncio
 import logging
 from typing import Optional
 
-from ai_service import call_ai, call_ai_chat
+from ai_service import call_ai, call_ai_chat, call_ai_chat_stream
 
 logger = logging.getLogger(__name__)
 
@@ -404,6 +404,7 @@ async def _run_reasoning_agent(
     text_to_verify: str,
     source_data: str,
     run_logger: Optional[logging.Logger] = None,
+    on_tool_event=None,
 ) -> dict:
     """Verify logical consistency — uses call_ai_chat() with MCP tools."""
     agent_start = time.time()
@@ -424,9 +425,10 @@ async def _run_reasoning_agent(
     if run_logger:
         run_logger.info("VERIFICATION [reasoning] starting (MCP-enabled)")
 
-    result = await call_ai_chat(
+    result = await call_ai_chat_stream(
         messages=messages,
         system_prompt=REASONING_SYSTEM_PROMPT,
+        on_tool_event=on_tool_event,
         provider_id="claude-sdk",  # MCP tools required for data verification
         run_logger=run_logger,
     )
@@ -463,6 +465,7 @@ async def _run_reasoning_agent(
 async def _run_factual_agent(
     text_to_verify: str,
     run_logger: Optional[logging.Logger] = None,
+    on_tool_event=None,
 ) -> dict:
     """Fact-check claims via MCP tools — uses call_ai_chat() with claude-sdk provider."""
     agent_start = time.time()
@@ -488,9 +491,10 @@ async def _run_factual_agent(
     if run_logger:
         run_logger.info("VERIFICATION [factual] starting (MCP-enabled)")
 
-    result = await call_ai_chat(
+    result = await call_ai_chat_stream(
         messages=messages,
         system_prompt=FACTUAL_SYSTEM_PROMPT,
+        on_tool_event=on_tool_event,
         provider_id="claude-sdk",  # Only claude_sdk supports MCP tools
         run_logger=run_logger,
     )
@@ -527,8 +531,9 @@ async def _run_factual_agent(
 async def _run_betting_agent(
     text_to_verify: str,
     run_logger: Optional[logging.Logger] = None,
+    on_tool_event=None,
 ) -> dict:
-    """Verify betting recommendation soundness — uses call_ai_chat() with MCP tools."""
+    """Verify betting recommendation soundness — uses call_ai_chat_stream() with MCP tools."""
     agent_start = time.time()
 
     messages = [
@@ -547,9 +552,10 @@ async def _run_betting_agent(
     if run_logger:
         run_logger.info("VERIFICATION [betting] starting (MCP-enabled)")
 
-    result = await call_ai_chat(
+    result = await call_ai_chat_stream(
         messages=messages,
         system_prompt=BETTING_SYSTEM_PROMPT,
+        on_tool_event=on_tool_event,
         provider_id="claude-sdk",  # MCP tools required for data verification
         run_logger=run_logger,
     )
@@ -592,6 +598,7 @@ async def run_verification(
     source_data: str = "",
     run_logger: Optional[logging.Logger] = None,
     on_agent_complete=None,
+    on_tool_event=None,
 ) -> dict:
     """Run all three verification agents in parallel.
 
@@ -607,6 +614,9 @@ async def run_verification(
     on_agent_complete : async callable, optional
         Called with (agent_name, agent_result) each time an individual agent
         finishes — enables real-time streaming of audit progress to the frontend.
+    on_tool_event : async callable, optional
+        Called with (agent_name, event_type, data) each time an agent makes or
+        receives a tool call — enables real-time streaming of MCP tool activity.
 
     Returns
     -------
@@ -619,6 +629,14 @@ async def run_verification(
         run_logger.info("=" * 60)
 
     start = time.time()
+
+    # Create per-agent tool event callbacks that tag events with the agent name
+    def _make_agent_tool_cb(agent_name):
+        if not on_tool_event:
+            return None
+        async def _cb(event_type, data):
+            await on_tool_event(agent_name, event_type, data)
+        return _cb
 
     # Wrap each agent so we can emit its result as soon as it finishes
     agent_names = ["reasoning", "factual", "betting"]
@@ -643,9 +661,9 @@ async def run_verification(
 
     # Launch all 3 agents concurrently, each wrapped with notification
     await asyncio.gather(
-        _run_and_notify("reasoning", _run_reasoning_agent(text_to_verify, source_data, run_logger)),
-        _run_and_notify("factual", _run_factual_agent(text_to_verify, run_logger)),
-        _run_and_notify("betting", _run_betting_agent(text_to_verify, run_logger)),
+        _run_and_notify("reasoning", _run_reasoning_agent(text_to_verify, source_data, run_logger, on_tool_event=_make_agent_tool_cb("reasoning"))),
+        _run_and_notify("factual", _run_factual_agent(text_to_verify, run_logger, on_tool_event=_make_agent_tool_cb("factual"))),
+        _run_and_notify("betting", _run_betting_agent(text_to_verify, run_logger, on_tool_event=_make_agent_tool_cb("betting"))),
     )
 
     # Compute overall verdict — worst of (pass < warn < fail < error)

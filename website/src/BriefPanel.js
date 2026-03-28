@@ -315,18 +315,38 @@ function VerificationBadge({ verification, streaming = false }) {
           {ALL_AGENT_NAMES.map((name) => {
             const agent = agents && agents[name];
 
-            // Pending agent placeholder
+            // Pending agent placeholder — show live tool call activity
             if (!agent) {
+              const toolEvents = verification?._toolEvents?.[name] || [];
+              const toolCalls = toolEvents.filter(e => e.type === "tool_call");
+              const toolResults = toolEvents.filter(e => e.type === "tool_result");
+              const latestCall = toolCalls[toolCalls.length - 1];
+              const toolName = latestCall?.name || latestCall?.tool_name || null;
               return (
                 <div key={name} className="vb-agent vb--pending">
                   <div className="vb-agent-header">
                     <span className="vb-agent-icon"><span className="vb-agent-spinner" /></span>
                     <span className="vb-agent-name">{AGENT_LABELS[name] || name}</span>
                     <span className="vb-agent-verdict vb-agent-verdict--pending">RUNNING</span>
+                    {toolCalls.length > 0 && (
+                      <span className="vb-tool-count">{toolResults.length}/{toolCalls.length} tools</span>
+                    )}
                   </div>
-                  <p className="vb-agent-summary vb-agent-summary--pending">
-                    Verifying with MCP tools…
-                  </p>
+                  {toolName ? (
+                    <p className="vb-agent-summary vb-agent-summary--pending vb-tool-live">
+                      {toolResults.length < toolCalls.length ? "Calling" : "Called"}{" "}
+                      <code>{toolName}</code>
+                      {toolCalls.length > 1 && (
+                        <span className="vb-tool-history">
+                          {" "}— previous: {toolCalls.slice(0, -1).map(tc => tc.name || tc.tool_name).filter(Boolean).join(", ")}
+                        </span>
+                      )}
+                    </p>
+                  ) : (
+                    <p className="vb-agent-summary vb-agent-summary--pending">
+                      Verifying with MCP tools…
+                    </p>
+                  )}
                 </div>
               );
             }

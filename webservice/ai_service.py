@@ -907,7 +907,7 @@ _CHAT_CALL_MAP = {
 # Streaming chat provider functions (multi-turn + on_chunk callback)
 # ---------------------------------------------------------------------------
 
-async def _call_anthropic_chat_stream(provider: dict, system_prompt: str, messages: list[dict], config: dict, on_chunk=None) -> dict:
+async def _call_anthropic_chat_stream(provider: dict, system_prompt: str, messages: list[dict], config: dict, on_chunk=None, on_tool_event=None) -> dict:
     """Call Anthropic Messages API with streaming for multi-turn chat."""
     try:
         import anthropic
@@ -985,7 +985,7 @@ async def _call_anthropic_chat_stream(provider: dict, system_prompt: str, messag
     }
 
 
-async def _call_openai_chat_stream(provider: dict, system_prompt: str, messages: list[dict], config: dict, on_chunk=None) -> dict:
+async def _call_openai_chat_stream(provider: dict, system_prompt: str, messages: list[dict], config: dict, on_chunk=None, on_tool_event=None) -> dict:
     """Call OpenAI Chat Completions API with streaming for multi-turn chat."""
     try:
         import openai
@@ -1046,7 +1046,7 @@ async def _call_openai_chat_stream(provider: dict, system_prompt: str, messages:
     }
 
 
-async def _call_claude_sdk_chat_stream(provider: dict, system_prompt: str, messages: list[dict], config: dict, on_chunk=None) -> dict:
+async def _call_claude_sdk_chat_stream(provider: dict, system_prompt: str, messages: list[dict], config: dict, on_chunk=None, on_tool_event=None) -> dict:
     """Call Claude SDK with streaming for multi-turn chat (concatenates messages, enables MCP)."""
     rl = _current_run_logger.get(None)
     if rl:
@@ -1060,7 +1060,7 @@ async def _call_claude_sdk_chat_stream(provider: dict, system_prompt: str, messa
         parts.append(f"{role_label}: {msg['content']}")
     combined_prompt = "\n\n".join(parts)
 
-    return await _call_claude_sdk_stream(provider, system_prompt, combined_prompt, config, on_chunk=on_chunk)
+    return await _call_claude_sdk_stream(provider, system_prompt, combined_prompt, config, on_chunk=on_chunk, on_tool_event=on_tool_event)
 
 
 _CHAT_STREAM_CALL_MAP = {
@@ -1071,7 +1071,7 @@ _CHAT_STREAM_CALL_MAP = {
 }
 
 
-async def call_ai_chat_stream(messages: list[dict], system_prompt: str, on_chunk=None, provider_id: Optional[str] = None, run_logger=None) -> dict:
+async def call_ai_chat_stream(messages: list[dict], system_prompt: str, on_chunk=None, on_tool_event=None, provider_id: Optional[str] = None, run_logger=None) -> dict:
     """
     Send a multi-turn conversation with streaming support.
 
@@ -1109,7 +1109,7 @@ async def call_ai_chat_stream(messages: list[dict], system_prompt: str, on_chunk
                 logger.info(log_msg, *log_args)
                 if run_logger:
                     run_logger.info(log_msg, *log_args)
-                result = await call_fn(provider, system_prompt, messages, config, on_chunk=on_chunk)
+                result = await call_fn(provider, system_prompt, messages, config, on_chunk=on_chunk, on_tool_event=on_tool_event)
                 success_msg = "AI chat stream SUCCESS: provider=%s model=%s elapsed=%.2fs"
                 success_args = (result.get("provider_id"), result.get("model"), result.get("elapsed_seconds", 0))
                 logger.info(success_msg, *success_args)

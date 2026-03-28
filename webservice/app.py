@@ -337,11 +337,26 @@ async def run_processing_pipeline(filename: str, state: PipelineState):
                                 state.replay_events.append({"type": "verification_agent_update", "payload": agent_payload})
                                 await _safe_emit(state, "verification_agent_update", agent_payload)
 
+                            # Real-time callback: emit each agent's MCP tool calls as they happen
+                            async def _on_analyze_tool_event(agent_name, event_type, data, _attempt=fix_attempt):
+                                tool_payload = {
+                                    "filename": filename,
+                                    "phase": "analyze",
+                                    "agent_name": agent_name,
+                                    "event_type": event_type,
+                                    "data": data,
+                                    "run_id": run_id,
+                                    "fix_attempt": _attempt,
+                                }
+                                # Tool events are ephemeral — don't add to replay_events
+                                await _safe_emit(state, "verification_tool_event", tool_payload)
+
                             verification = await run_verification(
                                 text_to_verify=current_text,
                                 source_data=source_data,
                                 run_logger=run_logger,
                                 on_agent_complete=_on_analyze_agent,
+                                on_tool_event=_on_analyze_tool_event,
                             )
 
                             verification_payload = {
@@ -533,11 +548,26 @@ async def run_processing_pipeline(filename: str, state: PipelineState):
                                 state.replay_events.append({"type": "verification_agent_update", "payload": agent_payload})
                                 await _safe_emit(state, "verification_agent_update", agent_payload)
 
+                            # Real-time callback: emit each agent's MCP tool calls as they happen
+                            async def _on_brief_tool_event(agent_name, event_type, data, _attempt=fix_attempt):
+                                tool_payload = {
+                                    "filename": filename,
+                                    "phase": "brief",
+                                    "agent_name": agent_name,
+                                    "event_type": event_type,
+                                    "data": data,
+                                    "run_id": run_id,
+                                    "fix_attempt": _attempt,
+                                }
+                                # Tool events are ephemeral — don't add to replay_events
+                                await _safe_emit(state, "verification_tool_event", tool_payload)
+
                             verification = await run_verification(
                                 text_to_verify=current_brief_text,
                                 source_data=source_data,
                                 run_logger=run_logger,
                                 on_agent_complete=_on_brief_agent,
+                                on_tool_event=_on_brief_tool_event,
                             )
 
                             verification_payload = {
