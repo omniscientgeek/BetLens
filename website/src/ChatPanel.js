@@ -252,6 +252,7 @@ function ChatPanel({ pipelineResults, debugMode, agentMode }) {
   const [conversationId, setConversationId] = useState(() => sessionGet(convKeyPrefix, null));
   const [isLoading, setIsLoading] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [isAuditing, setIsAuditing] = useState(false);
   const [streamingText, setStreamingText] = useState("");
   const [streamingParsed, setStreamingParsed] = useState({ thinking: "", response: "", isThinking: false });
   const [error, setError] = useState(null);
@@ -314,6 +315,7 @@ function ChatPanel({ pipelineResults, debugMode, agentMode }) {
     setInput("");
     setIsLoading(false);
     setIsStreaming(false);
+    setIsAuditing(false);
     setStreamingText("");
     setStreamingParsed({ thinking: "", response: "", isThinking: false });
     streamingTextRef.current = "";
@@ -428,9 +430,11 @@ function ChatPanel({ pipelineResults, debugMode, agentMode }) {
                 setConversationId(evt.data.conversation_id);
               }
               runId = evt.data.run_id || null;
+              setIsAuditing(true);
               break;
             case "verification":
               verification = evt.data.verification || null;
+              setIsAuditing(false);
               break;
             case "error":
               throw new Error(evt.data.error || "Stream error");
@@ -476,6 +480,7 @@ function ChatPanel({ pipelineResults, debugMode, agentMode }) {
     } finally {
       setIsLoading(false);
       setIsStreaming(false);
+      setIsAuditing(false);
       setStreamingText("");
       setStreamingParsed({ thinking: "", response: "", isThinking: false });
       streamingTextRef.current = "";
@@ -577,16 +582,22 @@ function ChatPanel({ pipelineResults, debugMode, agentMode }) {
             {streamingParsed.response ? (
               <div className="chat-msg-content">
                 {renderMarkdown(streamingParsed.response)}
-                {!streamingParsed.isThinking && <span className="chat-streaming-cursor" />}
+                {!streamingParsed.isThinking && !isAuditing && <span className="chat-streaming-cursor" />}
               </div>
             ) : streamingParsed.isThinking ? null : (
               <div className="chat-msg-content">
                 <span className="chat-streaming-cursor" />
               </div>
             )}
+            {isAuditing && (
+              <div className="chat-audit-indicator">
+                <span className="chat-audit-spinner" />
+                <span className="chat-audit-label">Verifying response...</span>
+              </div>
+            )}
           </div>
         )}
-        {isLoading && !isStreaming && <TypingIndicator />}
+        {isLoading && (!isStreaming || !streamingText) && !isAuditing && <TypingIndicator />}
         {error && <div className="chat-error">Error: {error}</div>}
       </div>
 

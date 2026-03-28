@@ -761,6 +761,17 @@ function RunDetail({ filename, onBack, onDelete }) {
         </div>
       </div>
 
+      {/* AI Agent — ask questions about this run's results */}
+      <Collapsible title="AI Agent" icon={"\u25C8"} defaultOpen={true}
+        badge="Ask about this run">
+        <ChatPanel
+          key={`pastrun-${filename}`}
+          pipelineResults={pr}
+          debugMode={false}
+          agentMode={true}
+        />
+      </Collapsible>
+
       {/* Detect Summary — Issue #1 */}
       <DetectSummary detect={pr.detect} />
 
@@ -1010,14 +1021,6 @@ function RunDetail({ filename, onBack, onDelete }) {
 
         return null;
       })()}
-
-      {/* AI Agent — ask questions about this run's results */}
-      <ChatPanel
-        key={`pastrun-${filename}`}
-        pipelineResults={pr}
-        debugMode={false}
-        agentMode={true}
-      />
 
       {/* Source Data — Issue #6 */}
       {data.file_data && (
