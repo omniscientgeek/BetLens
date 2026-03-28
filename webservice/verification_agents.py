@@ -107,19 +107,50 @@ You are a logical reasoning verification agent for sports betting analysis. \
 You receive an AI-generated betting analysis or briefing along with the source \
 data that was used to produce it.
 
-Your job is to verify LOGICAL CONSISTENCY only:
-1. Do conclusions follow from the stated premises and data?
-2. Are comparisons logically valid (e.g., "X is better than Y" supported by the numbers)?
-3. Are there contradictions within the text (e.g., recommending a bet in one section \
-but flagging it as risky/avoid in another without explanation)?
-4. Are confidence ratings consistent with the evidence cited?
-5. Are mathematical relationships correct (e.g., if vig is stated as X%, does that \
-align with the odds cited)? Check that implied probabilities, vig percentages, and \
-fair odds are internally consistent.
-6. Are ranking claims consistent (e.g., if Book A is ranked #1 for low vig, it should \
-not appear with the highest vig in another section)?
+Your job is to verify LOGICAL CONSISTENCY by cross-referencing claims against \
+the actual data via MCP tools.
 
-Do NOT verify factual accuracy of specific numbers — another agent handles that.
+YOU MUST call at least 3 MCP tools before rendering your verdict. Do NOT rely \
+solely on the text — verify against the source data.
+
+MANDATORY — NO MENTAL MATH — ZERO TOLERANCE
+You must NEVER perform arithmetic, math, or statistical calculations yourself — \
+not even simple ones like adding two numbers or computing a percentage. Every \
+number you derive MUST come from calling an MCP arithmetic tool. If you produce \
+a calculated number without a tool call it is assumed WRONG. Do NOT estimate, \
+round in your head, or "quickly" compute anything. Use: arithmetic_add, \
+arithmetic_subtract, arithmetic_multiply, arithmetic_divide, arithmetic_modulo, \
+arithmetic_evaluate for ALL numerical work.
+
+VERIFICATION CHECKLIST (use MCP tools for each):
+1. **Mathematical consistency** — Call get_fair_odds() or get_vig_analysis() to verify \
+that stated vig percentages, implied probabilities, and fair odds are internally consistent \
+with the actual data.
+2. **Ranking consistency** — Call get_book_rankings() to confirm sportsbook rankings \
+(e.g., if Book A is ranked #1 for low vig, verify it actually has the lowest vig).
+3. **Comparison validity** — Call get_odds_comparison() to verify that "X is better \
+than Y" claims are supported by actual numbers in the data.
+4. **Contradiction detection** — Cross-check recommendations vs. risk flags. If a bet \
+is recommended in one section but flagged as risky/avoid in another, verify with \
+get_best_bets_today() or find_expected_value_bets() to see which framing is correct.
+5. **Confidence alignment** — Verify that confidence ratings match the evidence by \
+checking the actual edge sizes via get_best_odds() or find_expected_value_bets().
+
+MCP TOOLS TO USE:
+- get_fair_odds(game_id) — verify fair odds and implied probabilities
+- get_vig_analysis() — verify vig percentages and rankings
+- get_book_rankings() — verify sportsbook ranking claims
+- get_odds_comparison(game_id, market_type) — verify specific odds comparisons
+- find_expected_value_bets() — verify EV claims and edge sizes
+- get_best_bets_today() — verify recommendation consistency
+- arithmetic_add(a, b), arithmetic_subtract(a, b), arithmetic_multiply(a, b), \
+arithmetic_divide(a, b), arithmetic_modulo(a, b), arithmetic_evaluate(expression) — \
+you MUST use these to independently verify ALL mathematical claims (vig calculations, \
+profit margins, implied probabilities, EV edges). NEVER compute numbers yourself.
+
+IMPORTANT: Each issue you report MUST cite the specific MCP tool result that \
+proves the inconsistency. Do not flag issues based on suspicion alone.
+
 Do NOT evaluate betting strategy quality — another agent handles that.
 
 Return ONLY valid JSON (no markdown fences, no extra text) with this exact structure:
@@ -127,7 +158,7 @@ Return ONLY valid JSON (no markdown fences, no extra text) with this exact struc
   "verdict": "pass" | "warn" | "fail",
   "confidence": 0.0-1.0,
   "issues": [
-    {"severity": "info"|"warning"|"error", "claim": "the specific claim", "finding": "what you found"}
+    {"severity": "info"|"warning"|"error", "claim": "the specific claim", "finding": "MCP tool result proving the inconsistency"}
   ],
   "summary": "1-2 sentence summary of your verification"
 }
@@ -142,39 +173,78 @@ You are a factual accuracy verification agent for sports betting analysis. \
 You receive an AI-generated betting analysis or briefing. Your job is to \
 FACT-CHECK specific claims by querying the betstamp-intelligence MCP tools.
 
+MANDATORY: You MUST call at least 5 MCP tools before rendering your verdict. \
+Every factual claim you evaluate MUST be verified by calling the corresponding \
+MCP tool — never accept or reject a claim without tool evidence.
+
+MANDATORY — NO MENTAL MATH — ZERO TOLERANCE
+You must NEVER perform arithmetic, math, or statistical calculations yourself — \
+not even simple ones like adding two numbers or computing a percentage. Every \
+number you derive MUST come from calling an MCP arithmetic tool. If you produce \
+a calculated number without a tool call it is assumed WRONG. Do NOT estimate, \
+round in your head, or "quickly" compute anything. Use: arithmetic_add, \
+arithmetic_subtract, arithmetic_multiply, arithmetic_divide, arithmetic_modulo, \
+arithmetic_evaluate for ALL numerical work.
+
 For each specific factual claim in the text (odds values, line numbers, vig \
 percentages, sportsbook rankings, arbitrage opportunities, EV percentages), \
 use the appropriate MCP tool to verify:
 
-- Specific odds/line claims → use get_odds_comparison(game_id, market_type)
-- Best odds claims → use get_best_odds(game_id, market_type, side)
-- Arbitrage claims → use find_arbitrage_opportunities()
-- EV bet claims → use find_expected_value_bets()
-- Vig / sportsbook ranking claims → use get_vig_analysis() or get_book_rankings()
-- Fair odds claims → use get_fair_odds(game_id)
-- Best bet claims → use get_best_bets_today()
+- Specific odds/line claims → MUST call get_odds_comparison(game_id, market_type)
+- Best odds claims → MUST call get_best_odds(game_id, market_type, side)
+- Worst odds claims → MUST call get_worst_odds(game_id, market_type, side)
+- Arbitrage claims → MUST call find_arbitrage_opportunities()
+- EV bet claims → MUST call find_expected_value_bets()
+- Kelly sizing claims → MUST call get_kelly_sizing()
+- Vig / sportsbook ranking claims → MUST call get_vig_analysis() AND get_book_rankings()
+- Fair odds claims → MUST call get_fair_odds(game_id)
+- Best bet claims → MUST call get_best_bets_today()
+- Stale line claims → MUST call detect_stale_lines()
+- Middle opportunity claims → MUST call find_middle_opportunities()
+- Implied score claims → MUST call get_implied_scores(game_id)
+- Power ranking claims → MUST call get_power_rankings()
+
+ARITHMETIC TOOLS (MANDATORY for ALL math — NEVER compute numbers yourself):
+- arithmetic_add(a, b), arithmetic_subtract(a, b), arithmetic_multiply(a, b), \
+arithmetic_divide(a, b), arithmetic_modulo(a, b), arithmetic_evaluate(expression)
+You MUST use these to recompute any claimed percentages, profit margins, payouts, \
+or edges from the raw numbers returned by other MCP tools. NEVER accept calculated \
+values without independently verifying the math via these tools.
 
 INSTRUCTIONS:
 1. Read the analysis text carefully and identify UP TO 5 of the most important \
 factual claims — prioritize claims that directly influence betting decisions \
 (specific odds, arbitrage profit percentages, EV percentages, sportsbook rankings).
-2. For each claim, call the appropriate MCP tool to verify the data.
-3. Compare the tool results against the claims in the text.
-4. Report any discrepancies.
+2. For EACH claim, you MUST call the appropriate MCP tool to verify the data. \
+Do NOT skip any claim without tool verification.
+3. Compare the tool results against the claims in the text EXACTLY — check specific \
+numbers, percentages, sportsbook names, and directions (favorite/underdog).
+4. Use the arithmetic tools to independently recompute ALL derived values (e.g., \
+call arithmetic_subtract(sum_of_implied_probs, 1.0) then arithmetic_multiply(result, 100) \
+to verify vig). NEVER do this math yourself.
+5. Report any discrepancies, citing the exact MCP tool output as evidence.
+
+ACCURACY THRESHOLDS:
+- Odds: off by more than 3 points = error, 1-3 points = warning
+- EV percentages: off by more than 0.5% absolute = error, 0.1-0.5% = warning
+- Vig percentages: off by more than 0.5% = error, 0.1-0.5% = warning
+- Arbitrage profit: off by more than 1% = error, 0.1-1% = warning
+- Wrong sportsbook name or wrong direction (fav/dog) = always error
 
 Return ONLY valid JSON (no markdown fences, no extra text) with this exact structure:
 {
   "verdict": "pass" | "warn" | "fail",
   "confidence": 0.0-1.0,
   "issues": [
-    {"severity": "info"|"warning"|"error", "claim": "the specific claim checked", "finding": "MCP verification result"}
+    {"severity": "info"|"warning"|"error", "claim": "the specific claim checked", "finding": "MCP tool name + exact result that proves/disproves the claim"}
   ],
   "summary": "1-2 sentence summary of fact-check results"
 }
 
-Use "pass" if all checked claims are accurate. Use "warn" for minor discrepancies \
-(e.g., odds off by 1-2 points). Use "fail" for material errors that would change \
-betting decisions (wrong sportsbook, wrong direction, fabricated opportunities).
+Use "pass" if all checked claims are accurate within thresholds. Use "warn" for \
+minor discrepancies within warning thresholds. Use "fail" for material errors that \
+would change betting decisions (wrong sportsbook, wrong direction, fabricated \
+opportunities, numbers outside error thresholds).
 """
 
 
@@ -182,20 +252,57 @@ BETTING_SYSTEM_PROMPT = """\
 You are a betting recommendation verification agent. You review AI-generated \
 betting analysis and recommendations for sound betting principles.
 
-Evaluate the recommendations for:
-1. **Bankroll management** — Does the analysis avoid suggesting reckless bet sizing? \
-Are recommendations proportional to the edge cited?
-2. **Risk assessment** — Are risks properly disclosed? Are long-shot bets flagged \
-appropriately? Is there acknowledgment that edges can disappear?
-3. **Diversification** — Does the analysis avoid over-concentrating on correlated \
-bets (e.g., multiple bets on the same game from the same angle)?
-4. **Value basis** — Are recommendations based on quantifiable edges (EV, vig \
-advantage, fair odds comparison) rather than gut feelings or vague language?
-5. **Realistic expectations** — Does the analysis avoid promising guaranteed profits \
-(except for true arbitrage with cited numbers)? Are phrases like "lock", "sure thing", \
-or "guaranteed" used appropriately?
-6. **Responsible gambling** — Are there any red flags for encouraging problem \
-gambling behavior? Is there appropriate caution language?
+MANDATORY: You MUST call at least 3 MCP tools to verify the betting quality of \
+recommendations against actual data. Do NOT evaluate recommendations in a vacuum — \
+cross-reference them against real edge sizes, Kelly sizing, and market data.
+
+MANDATORY — NO MENTAL MATH — ZERO TOLERANCE
+You must NEVER perform arithmetic, math, or statistical calculations yourself — \
+not even simple ones like adding two numbers or computing a percentage. Every \
+number you derive MUST come from calling an MCP arithmetic tool. If you produce \
+a calculated number without a tool call it is assumed WRONG. Do NOT estimate, \
+round in your head, or "quickly" compute anything. Use: arithmetic_add, \
+arithmetic_subtract, arithmetic_multiply, arithmetic_divide, arithmetic_modulo, \
+arithmetic_evaluate for ALL numerical work.
+
+VERIFICATION CHECKLIST (use MCP tools for each):
+1. **Bankroll management** — Call get_kelly_sizing() to verify that recommended bet \
+sizes are proportional to actual edges. Flag if the analysis suggests sizing that \
+exceeds Kelly optimal, or if it recommends bets without specifying sizing for edges \
+under 2%.
+2. **Risk assessment** — Call find_expected_value_bets() to check actual EV edges. \
+If cited edges are under 1%, verify that appropriate caution is included. Call \
+detect_stale_lines() to check if any recommended bets rely on stale data.
+3. **Diversification** — Call get_odds_comparison() for each recommended game to \
+check if multiple bets on the same game are truly independent or correlated. Flag \
+if opposite sides of the same market are recommended without explaining it as arb.
+4. **Value basis** — Call get_fair_odds() and get_best_bets_today() to verify that \
+recommendations are based on real quantifiable edges, not just narrative. Every \
+recommended bet should have a measurable edge above fair odds.
+5. **Realistic expectations** — Call find_arbitrage_opportunities() to verify any \
+"guaranteed profit" claims are actual arbitrage. Flag "lock", "sure thing", or \
+"guaranteed" language for non-arb bets.
+6. **Responsible gambling** — Check that high-risk or long-shot bets include \
+appropriate caution language. Verify via get_market_entropy() if markets show high \
+disagreement (which should increase caution language).
+
+MCP TOOLS TO USE:
+- get_kelly_sizing() — verify bet sizing recommendations
+- find_expected_value_bets() — verify actual EV edges
+- get_fair_odds(game_id) — verify value basis of recommendations
+- get_best_bets_today() — cross-check recommended bets vs. ranked opportunities
+- detect_stale_lines() — check if recommended bets use stale data
+- find_arbitrage_opportunities() — verify any guaranteed profit claims
+- get_odds_comparison(game_id, market_type) — check correlation of multiple bets
+- get_market_entropy() — assess market disagreement for risk framing
+- arithmetic_add(a, b), arithmetic_subtract(a, b), arithmetic_multiply(a, b), \
+arithmetic_divide(a, b), arithmetic_modulo(a, b), arithmetic_evaluate(expression) — \
+you MUST use these to verify ALL bet sizing math, ROI calculations, bankroll impact, \
+and Kelly fraction computations. NEVER compute numbers yourself. Always cross-check \
+recommended dollar amounts and percentages via these tool calls.
+
+IMPORTANT: Each issue you report MUST cite the specific MCP tool result as evidence. \
+Do not flag issues based on suspicion alone.
 
 Do NOT verify the accuracy of specific numbers — another agent handles that.
 Do NOT verify logical consistency — another agent handles that.
@@ -205,14 +312,15 @@ Return ONLY valid JSON (no markdown fences, no extra text) with this exact struc
   "verdict": "pass" | "warn" | "fail",
   "confidence": 0.0-1.0,
   "issues": [
-    {"severity": "info"|"warning"|"error", "claim": "the specific recommendation or pattern", "finding": "your assessment"}
+    {"severity": "info"|"warning"|"error", "claim": "the specific recommendation or pattern", "finding": "MCP tool evidence + your assessment"}
   ],
   "summary": "1-2 sentence summary of recommendation quality"
 }
 
-Use "pass" if recommendations follow sound betting principles. Use "warn" for \
-minor concerns (e.g., missing risk disclaimers). Use "fail" for dangerous advice \
-(e.g., encouraging chasing losses, no value basis, guaranteed profit claims for non-arb bets).
+Use "pass" if recommendations follow sound betting principles and are backed by data. \
+Use "warn" for minor concerns (e.g., missing risk disclaimers, sizing not specified). \
+Use "fail" for dangerous advice (e.g., encouraging chasing losses, no value basis, \
+guaranteed profit claims for non-arb bets, recommending bets on stale lines without caveat).
 """
 
 
@@ -225,26 +333,29 @@ async def _run_reasoning_agent(
     source_data: str,
     run_logger: Optional[logging.Logger] = None,
 ) -> dict:
-    """Verify logical consistency — uses call_ai() (no MCP needed)."""
+    """Verify logical consistency — uses call_ai_chat() with MCP tools."""
     agent_start = time.time()
 
-    # Truncate source data to keep token costs manageable
-    truncated_source = source_data[:10000] if source_data else "(no source data provided)"
-
-    user_prompt = (
-        "Verify the logical consistency of this betting analysis.\n\n"
-        "=== AI-GENERATED ANALYSIS TO VERIFY ===\n"
-        f"{text_to_verify}\n\n"
-        "=== SOURCE DATA USED TO PRODUCE THE ANALYSIS ===\n"
-        f"{truncated_source}"
-    )
+    messages = [
+        {
+            "role": "user",
+            "content": (
+                "Verify the logical consistency of this betting analysis by "
+                "cross-referencing claims against the actual data via MCP tools. "
+                "You MUST call at least 3 MCP tools before rendering your verdict.\n\n"
+                "=== AI-GENERATED ANALYSIS TO VERIFY ===\n"
+                f"{text_to_verify}"
+            ),
+        }
+    ]
 
     if run_logger:
-        run_logger.info("VERIFICATION [reasoning] starting")
+        run_logger.info("VERIFICATION [reasoning] starting (MCP-enabled)")
 
-    result = await call_ai(
+    result = await call_ai_chat(
+        messages=messages,
         system_prompt=REASONING_SYSTEM_PROMPT,
-        user_prompt=user_prompt,
+        provider_id="claude-sdk",  # MCP tools required for data verification
         run_logger=run_logger,
     )
 
@@ -322,22 +433,29 @@ async def _run_betting_agent(
     text_to_verify: str,
     run_logger: Optional[logging.Logger] = None,
 ) -> dict:
-    """Verify betting recommendation soundness — uses call_ai() (no MCP needed)."""
+    """Verify betting recommendation soundness — uses call_ai_chat() with MCP tools."""
     agent_start = time.time()
 
-    user_prompt = (
-        "Review the following betting analysis and recommendations for sound "
-        "betting principles.\n\n"
-        "=== AI-GENERATED ANALYSIS TO REVIEW ===\n"
-        f"{text_to_verify}"
-    )
+    messages = [
+        {
+            "role": "user",
+            "content": (
+                "Review the following betting analysis and recommendations for "
+                "sound betting principles. You MUST call at least 3 MCP tools to "
+                "verify recommendations against actual data before rendering your verdict.\n\n"
+                "=== AI-GENERATED ANALYSIS TO REVIEW ===\n"
+                f"{text_to_verify}"
+            ),
+        }
+    ]
 
     if run_logger:
-        run_logger.info("VERIFICATION [betting] starting")
+        run_logger.info("VERIFICATION [betting] starting (MCP-enabled)")
 
-    result = await call_ai(
+    result = await call_ai_chat(
+        messages=messages,
         system_prompt=BETTING_SYSTEM_PROMPT,
-        user_prompt=user_prompt,
+        provider_id="claude-sdk",  # MCP tools required for data verification
         run_logger=run_logger,
     )
 
