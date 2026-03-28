@@ -25,6 +25,29 @@ from mcp_client import mcp_client as _mcp
 logger = logging.getLogger(__name__)
 
 
+def _is_rate_limit_error(exc: Exception) -> bool:
+    """Check if an exception is a rate-limit (HTTP 429) error."""
+    # Anthropic SDK raises anthropic.RateLimitError
+    exc_type_name = type(exc).__name__
+    if "RateLimitError" in exc_type_name:
+        return True
+    # OpenAI SDK raises openai.RateLimitError
+    if hasattr(exc, "status_code") and getattr(exc, "status_code", None) == 429:
+        return True
+    # Check message as fallback
+    if "429" in str(exc) and "rate" in str(exc).lower():
+        return True
+    return False
+
+
+def _rate_limit_backoff_seconds(attempt: int) -> float:
+    """Return backoff delay in seconds for rate-limited retries.
+
+    Uses exponential backoff: 60s, 90s (enough to reset a per-minute quota).
+    """
+    return 60.0 * (1.5 ** (attempt - 1))
+
+
 def _unwrap_exception_group(exc: Exception) -> Exception:
     """Unwrap anyio/asyncio ExceptionGroup to get the real root-cause error.
 
@@ -914,6 +937,14 @@ async def call_ai_stream(system_prompt: str, user_prompt: str, on_chunk=None, on
                 if run_logger:
                     run_logger.warning(msg)
                 errors.append(msg)
+                # Back off on rate-limit errors before retrying
+                if _is_rate_limit_error(exc) and attempt < retries:
+                    backoff = _rate_limit_backoff_seconds(attempt)
+                    backoff_msg = f"{provider['id']}: rate-limited, waiting {backoff:.0f}s before retry"
+                    logger.info(backoff_msg)
+                    if run_logger:
+                        run_logger.info(backoff_msg)
+                    await asyncio.sleep(backoff)
 
         if not failover:
             break
@@ -1458,6 +1489,14 @@ async def call_ai_chat_stream(messages: list[dict], system_prompt: str, on_chunk
                 if run_logger:
                     run_logger.warning(msg)
                 errors.append(msg)
+                # Back off on rate-limit errors before retrying
+                if _is_rate_limit_error(exc) and attempt < retries:
+                    backoff = _rate_limit_backoff_seconds(attempt)
+                    backoff_msg = f"{provider['id']}: rate-limited, waiting {backoff:.0f}s before retry"
+                    logger.info(backoff_msg)
+                    if run_logger:
+                        run_logger.info(backoff_msg)
+                    await asyncio.sleep(backoff)
 
         if not failover:
             break
@@ -1536,6 +1575,14 @@ async def call_ai(system_prompt: str, user_prompt: str, provider_id: Optional[st
                 if run_logger:
                     run_logger.warning(msg)
                 errors.append(msg)
+                # Back off on rate-limit errors before retrying
+                if _is_rate_limit_error(exc) and attempt < retries:
+                    backoff = _rate_limit_backoff_seconds(attempt)
+                    backoff_msg = f"{provider['id']}: rate-limited, waiting {backoff:.0f}s before retry"
+                    logger.info(backoff_msg)
+                    if run_logger:
+                        run_logger.info(backoff_msg)
+                    await asyncio.sleep(backoff)
 
         if not failover:
             break
@@ -1605,6 +1652,14 @@ async def call_ai_chat(messages: list[dict], system_prompt: str, provider_id: Op
                 if run_logger:
                     run_logger.warning(msg)
                 errors.append(msg)
+                # Back off on rate-limit errors before retrying
+                if _is_rate_limit_error(exc) and attempt < retries:
+                    backoff = _rate_limit_backoff_seconds(attempt)
+                    backoff_msg = f"{provider['id']}: rate-limited, waiting {backoff:.0f}s before retry"
+                    logger.info(backoff_msg)
+                    if run_logger:
+                        run_logger.info(backoff_msg)
+                    await asyncio.sleep(backoff)
 
         if not failover:
             break
@@ -2219,12 +2274,12 @@ def _build_analyze_payload(detection_data: dict) -> dict:
             "best_lines": analysis.get("best_lines", []),
             "arbitrage": analysis.get("arbitrage", []),
             "middles": analysis.get("middles", []),
-            "outliers": analysis.get("outliers", [])[:15],
+            "outliers": analysis.get("outliers", [])[:10],
             "stale_lines": analysis.get("stale_lines", []),
             "fair_odds_summary": analysis.get("fair_odds_summary", []),
             "summary": analysis.get("summary", ""),
         },
-        "ev_bets": ev_bets[:15],
+        "ev_bets": ev_bets[:10],
         "vig_rankings": vig_rankings,
         "stale_summary": {
             "count": stale.get("count", 0),
@@ -2321,11 +2376,11 @@ async def run_analyze_phase(detection_data: dict, run_logger=None, on_chunk=None
         + json.dumps(analyze_payload, separators=(",", ":"))
     )
 
-    # Safety cap
-    if len(user_prompt) > 80000:
+    # Safety cap — keep under ~50KB to stay within 30K token/min rate limits
+    if len(user_prompt) > 50000:
         if run_logger:
-            run_logger.warning("Analyze payload exceeded 80KB (%d chars), truncating", len(user_prompt))
-        user_prompt = user_prompt[:80000]
+            run_logger.warning("Analyze payload exceeded 50KB (%d chars), truncating", len(user_prompt))
+        user_prompt = user_prompt[:50000]
 
     if run_logger:
         run_logger.info("Analyze: starting AI call (chain-of-thought enabled)")
@@ -2618,10 +2673,10 @@ async def run_brief_phase(detection_data: dict, analysis_data: dict, on_chunk=No
         "from a single data entry.\n\n"
         + json.dumps(brief_data, separators=(",", ":"))
     )
-    # Safety cap — should not trigger with properly summarized data
-    if len(user_prompt) > 60000:
-        logger.warning("Brief payload exceeded 60KB (%d chars), truncating", len(user_prompt))
-        user_prompt = user_prompt[:60000]
+    # Safety cap — keep under ~40KB to stay within 30K token/min rate limits
+    if len(user_prompt) > 40000:
+        logger.warning("Brief payload exceeded 40KB (%d chars), truncating", len(user_prompt))
+        user_prompt = user_prompt[:40000]
 
     if run_logger:
         run_logger.info("Brief: starting AI call (streaming=%s)", bool(on_chunk))
@@ -2819,11 +2874,11 @@ async def run_fix_phase(
         f"=== ORIGINAL TEXT TO CORRECT ===\n{original_text}"
     )
 
-    # Safety cap
-    if len(user_prompt) > 80000:
+    # Safety cap — keep under ~50KB to stay within 30K token/min rate limits
+    if len(user_prompt) > 50000:
         if run_logger:
-            run_logger.warning("Fix payload exceeded 80KB (%d chars), truncating", len(user_prompt))
-        user_prompt = user_prompt[:80000]
+            run_logger.warning("Fix payload exceeded 50KB (%d chars), truncating", len(user_prompt))
+        user_prompt = user_prompt[:50000]
 
     if run_logger:
         run_logger.info("Fix phase (%s): starting AI call to correct %d issues", phase_type, len(issues_text))

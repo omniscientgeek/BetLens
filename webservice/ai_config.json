@@ -24,45 +24,8 @@
       "temperature": 0.3,
       "type": "anthropic",
       "use_mcp": true
-    },
-    {
-      "api_key_env": "OPENAI_API_KEY",
-      "api_key_set": false,
-      "enabled": false,
-      "id": "openai",
-      "max_tokens": 4096,
-      "model": "gpt-4o",
-      "name": "OpenAI GPT-4o",
-      "priority": 2,
-      "temperature": 0.3,
-      "type": "openai"
-    },
-    {
-      "api_key_env": "OPENAI_API_KEY",
-      "api_key_set": false,
-      "enabled": false,
-      "id": "openai-mini",
-      "max_tokens": 4096,
-      "model": "gpt-4o-mini",
-      "name": "OpenAI GPT-4o Mini",
-      "priority": 3,
-      "temperature": 0.3,
-      "type": "openai"
-    },
-    {
-      "api_key_env": "CUSTOM_AI_API_KEY",
-      "api_key_set": false,
-      "base_url": "http://localhost:11434/v1",
-      "enabled": false,
-      "id": "custom",
-      "max_tokens": 4096,
-      "model": "default",
-      "name": "Custom Endpoint",
-      "priority": 99,
-      "temperature": 0.3,
-      "type": "openai_compatible"
     }
   ],
-  "retry_attempts": 2,
+  "retry_attempts": 3,
   "timeout_seconds": 300
 }
