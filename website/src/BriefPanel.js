@@ -221,15 +221,25 @@ const AGENT_LABELS = {
   betting:   "Bet Quality",
 };
 
-function VerificationBadge({ verification }) {
+const ALL_AGENT_NAMES = ["reasoning", "factual", "betting"];
+
+function VerificationBadge({ verification, streaming = false }) {
   const [expanded, setExpanded] = useState(false);
 
   if (!verification) return null;
 
   const { overall_verdict, agents, elapsed_seconds } = verification;
-  const cfg = VERDICT_CONFIG[overall_verdict] || VERDICT_CONFIG.error;
+  const isPending = streaming || verification._pending;
+  const cfg = isPending
+    ? { icon: "\u23F3", label: "Auditing\u2026", className: "vb--pending" }
+    : (VERDICT_CONFIG[overall_verdict] || VERDICT_CONFIG.error);
 
-  // Compute overall failure percentage across all agents
+  // Count how many agents have completed
+  const completedAgents = agents ? Object.keys(agents) : [];
+  const completedCount = completedAgents.length;
+  const totalAgents = ALL_AGENT_NAMES.length;
+
+  // Compute overall failure percentage across completed agents
   let overallTotal = 0;
   let overallFailed = 0;
   if (agents) {
@@ -242,6 +252,9 @@ function VerificationBadge({ verification }) {
   }
   const overallFailPct = overallTotal > 0 ? ((overallFailed / overallTotal) * 100).toFixed(0) : null;
 
+  // Auto-expand when streaming so users see agents arriving in real time
+  const effectiveExpanded = expanded || (isPending && completedCount > 0);
+
   return (
     <div className={`vb-container ${cfg.className}`}>
       <button
@@ -251,24 +264,42 @@ function VerificationBadge({ verification }) {
       >
         <span className="vb-icon">{cfg.icon}</span>
         <span className="vb-label">{cfg.label}</span>
-        {overallFailPct !== null && (
+        {isPending && (
+          <span className="vb-progress">
+            {completedCount}/{totalAgents} agents
+          </span>
+        )}
+        {!isPending && overallFailPct !== null && (
           <span className={`vb-fail-pct ${overallFailed === 0 ? "vb-fail-pct--zero" : "vb-fail-pct--nonzero"}`}>
             {overallFailed === 0 ? "0% failed" : `${overallFailPct}% failed`}
           </span>
         )}
         <span className="vb-agents-mini">
-          {agents && Object.entries(agents).map(([name, a]) => {
-            const ac = VERDICT_CONFIG[a.verdict] || VERDICT_CONFIG.error;
-            const agentFailPct = a.checks_total > 0
-              ? ((a.checks_failed || 0) / a.checks_total * 100).toFixed(0)
-              : null;
+          {ALL_AGENT_NAMES.map((name) => {
+            const a = agents && agents[name];
+            if (a) {
+              const ac = VERDICT_CONFIG[a.verdict] || VERDICT_CONFIG.error;
+              const agentFailPct = a.checks_total > 0
+                ? ((a.checks_failed || 0) / a.checks_total * 100).toFixed(0)
+                : null;
+              return (
+                <span
+                  key={name}
+                  className="vb-agent-dot vb-agent-dot--done"
+                  title={`${AGENT_LABELS[name]}: ${a.verdict}${agentFailPct !== null ? ` (${agentFailPct}% failed)` : ""}`}
+                >
+                  {ac.icon}
+                </span>
+              );
+            }
+            // Pending agent — show spinner dot
             return (
               <span
                 key={name}
-                className="vb-agent-dot"
-                title={`${AGENT_LABELS[name]}: ${a.verdict}${agentFailPct !== null ? ` (${agentFailPct}% failed)` : ""}`}
+                className="vb-agent-dot vb-agent-dot--pending"
+                title={`${AGENT_LABELS[name]}: running…`}
               >
-                {ac.icon}
+                <span className="vb-agent-spinner" />
               </span>
             );
           })}
@@ -276,18 +307,36 @@ function VerificationBadge({ verification }) {
         {elapsed_seconds != null && (
           <span className="vb-elapsed">{elapsed_seconds.toFixed(1)}s</span>
         )}
-        <span className={`vb-chevron ${expanded ? "vb-chevron--open" : ""}`}>{"\u25BC"}</span>
+        <span className={`vb-chevron ${effectiveExpanded ? "vb-chevron--open" : ""}`}>{"\u25BC"}</span>
       </button>
 
-      {expanded && agents && (
+      {effectiveExpanded && (
         <div className="vb-details">
-          {Object.entries(agents).map(([name, agent]) => {
+          {ALL_AGENT_NAMES.map((name) => {
+            const agent = agents && agents[name];
+
+            // Pending agent placeholder
+            if (!agent) {
+              return (
+                <div key={name} className="vb-agent vb--pending">
+                  <div className="vb-agent-header">
+                    <span className="vb-agent-icon"><span className="vb-agent-spinner" /></span>
+                    <span className="vb-agent-name">{AGENT_LABELS[name] || name}</span>
+                    <span className="vb-agent-verdict vb-agent-verdict--pending">RUNNING</span>
+                  </div>
+                  <p className="vb-agent-summary vb-agent-summary--pending">
+                    Verifying with MCP tools…
+                  </p>
+                </div>
+              );
+            }
+
             const ac = VERDICT_CONFIG[agent.verdict] || VERDICT_CONFIG.error;
             const agentTotal = agent.checks_total || 0;
             const agentFailed = agent.checks_failed || 0;
             const agentFailPct = agentTotal > 0 ? ((agentFailed / agentTotal) * 100).toFixed(0) : null;
             return (
-              <div key={name} className={`vb-agent ${ac.className}`}>
+              <div key={name} className={`vb-agent ${ac.className} vb-agent--animate-in`}>
                 <div className="vb-agent-header">
                   <span className="vb-agent-icon">{ac.icon}</span>
                   <span className="vb-agent-name">{AGENT_LABELS[name] || name}</span>

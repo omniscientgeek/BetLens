@@ -591,6 +591,7 @@ async def run_verification(
     text_to_verify: str,
     source_data: str = "",
     run_logger: Optional[logging.Logger] = None,
+    on_agent_complete=None,
 ) -> dict:
     """Run all three verification agents in parallel.
 
@@ -603,6 +604,9 @@ async def run_verification(
         Used by the reasoning agent for cross-referencing.
     run_logger : logging.Logger, optional
         Per-run logger for detailed logging.
+    on_agent_complete : async callable, optional
+        Called with (agent_name, agent_result) each time an individual agent
+        finishes — enables real-time streaming of audit progress to the frontend.
 
     Returns
     -------
@@ -616,26 +620,33 @@ async def run_verification(
 
     start = time.time()
 
-    # Launch all 3 agents concurrently
-    # return_exceptions=True ensures one failure doesn't cancel the others
-    results = await asyncio.gather(
-        _run_reasoning_agent(text_to_verify, source_data, run_logger),
-        _run_factual_agent(text_to_verify, run_logger),
-        _run_betting_agent(text_to_verify, run_logger),
-        return_exceptions=True,
-    )
-
-    # Map results, converting exceptions to error verdicts
+    # Wrap each agent so we can emit its result as soon as it finishes
     agent_names = ["reasoning", "factual", "betting"]
     agents = {}
-    for name, result in zip(agent_names, results):
-        if isinstance(result, BaseException):
-            logger.error("Verification agent '%s' failed: %s", name, result)
+
+    async def _run_and_notify(name, coro):
+        try:
+            result = await coro
+        except BaseException as exc:
+            logger.error("Verification agent '%s' failed: %s", name, exc)
             if run_logger:
-                run_logger.error("VERIFICATION [%s] FAILED: %s", name, result)
-            agents[name] = _error_result(name, str(result))
-        else:
-            agents[name] = result
+                run_logger.error("VERIFICATION [%s] FAILED: %s", name, exc)
+            result = _error_result(name, str(exc))
+        agents[name] = result
+        # Emit per-agent result immediately for real-time UI updates
+        if on_agent_complete:
+            try:
+                await on_agent_complete(name, result)
+            except Exception as cb_err:
+                logger.warning("on_agent_complete callback error for %s: %s", name, cb_err)
+        return result
+
+    # Launch all 3 agents concurrently, each wrapped with notification
+    await asyncio.gather(
+        _run_and_notify("reasoning", _run_reasoning_agent(text_to_verify, source_data, run_logger)),
+        _run_and_notify("factual", _run_factual_agent(text_to_verify, run_logger)),
+        _run_and_notify("betting", _run_betting_agent(text_to_verify, run_logger)),
+    )
 
     # Compute overall verdict — worst of (pass < warn < fail < error)
     verdict_priority = {"pass": 0, "warn": 1, "fail": 2, "error": 3}
