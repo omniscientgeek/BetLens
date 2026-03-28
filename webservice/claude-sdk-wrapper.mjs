@@ -122,6 +122,7 @@ async function handleQuery(command) {
     let resultText = '';
     let sessionId = null;
     let usage = null;
+    const toolCalls = [];
 
     for await (const message of session) {
       process.stderr.write(`[claude-sdk] Message type: ${message.type}\n`);
@@ -131,7 +132,7 @@ async function handleQuery(command) {
         sessionId = message.session_id;
       }
 
-      // Extract text from assistant messages (streaming)
+      // Extract text and tool_use blocks from assistant messages (streaming)
       if (message.type === 'assistant' && message.message?.content) {
         for (const item of message.message.content) {
           if (item.type === 'text' && item.text) {
@@ -141,6 +142,28 @@ async function handleQuery(command) {
               process.stdout.write(JSON.stringify({ type: 'chunk', text: delta }) + '\n');
             }
             resultText = item.text;
+          }
+          // Capture tool_use blocks (MCP tool calls)
+          if (item.type === 'tool_use') {
+            toolCalls.push({
+              id: item.id,
+              name: item.name,
+              input: item.input,
+            });
+          }
+        }
+      }
+
+      // Capture tool results
+      if (message.type === 'tool_result' || (message.type === 'user' && message.message?.content)) {
+        const content = message.message?.content || [];
+        for (const item of (Array.isArray(content) ? content : [])) {
+          if (item.type === 'tool_result') {
+            const matching = toolCalls.find(tc => tc.id === item.tool_use_id);
+            if (matching) {
+              matching.result = typeof item.content === 'string' ? item.content : JSON.stringify(item.content);
+              matching.is_error = item.is_error || false;
+            }
           }
         }
       }
@@ -163,10 +186,10 @@ async function handleQuery(command) {
       }
     }
 
-    return { resultText, sessionId, usage };
+    return { resultText, sessionId, usage, toolCalls };
   })();
 
-  const { resultText, sessionId, usage } = await Promise.race([queryPromise, timeoutPromise]);
+  const { resultText, sessionId, usage, toolCalls } = await Promise.race([queryPromise, timeoutPromise]);
 
   if (!resultText) {
     sendResult({ type: 'error', message: 'Empty response from Claude SDK' });
@@ -180,5 +203,6 @@ async function handleQuery(command) {
     text: resultText,
     session_id: sessionId,
     usage: usage || {},
+    tool_calls: toolCalls,
   });
 }

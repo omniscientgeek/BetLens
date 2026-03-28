@@ -112,6 +112,16 @@ async def _call_anthropic(provider: dict, system_prompt: str, user_prompt: str, 
         rl.info("%s", text)
         rl.info("-" * 40 + " END RESPONSE " + "-" * 40)
 
+    # Extract any tool_use blocks from the response
+    tool_calls = []
+    for block in (response.content or []):
+        if getattr(block, "type", None) == "tool_use":
+            tool_calls.append({
+                "id": block.id,
+                "name": block.name,
+                "input": block.input,
+            })
+
     return {
         "text": text,
         "provider_id": provider["id"],
@@ -122,6 +132,7 @@ async def _call_anthropic(provider: dict, system_prompt: str, user_prompt: str, 
             "output_tokens": response.usage.output_tokens,
         },
         "elapsed_seconds": elapsed,
+        "tool_calls": tool_calls,
     }
 
 
@@ -333,6 +344,7 @@ async def _call_claude_sdk(provider: dict, system_prompt: str, user_prompt: str,
             "output_tokens": usage.get("output_tokens", 0),
         },
         "elapsed_seconds": elapsed,
+        "tool_calls": result.get("tool_calls", []),
     }
 
 
@@ -1330,7 +1342,7 @@ def _parse_analyze_response(raw_text: str) -> dict:
     return parsed
 
 
-async def run_analyze_phase(detection_data: dict, run_logger=None) -> dict:
+async def run_analyze_phase(detection_data: dict, run_logger=None, on_chunk=None, on_conversation_event=None) -> dict:
     """Phase 2: AI-powered deep analysis with chain-of-thought reasoning.
 
     Sends the pre-computed cross-book analysis data to an AI model with a
@@ -1342,6 +1354,14 @@ async def run_analyze_phase(detection_data: dict, run_logger=None) -> dict:
 
     The pre-computed analysis dict is preserved as-is for backward compatibility.
     The AI's insights, grades, and actions are layered on top.
+
+    Args:
+        on_chunk: Async callback for streaming text deltas.
+        on_conversation_event: Async callback for conversation lifecycle events.
+            Called with (event_type, data) where event_type is one of:
+            - "prompts": system & user prompts are ready
+            - "chunk": streaming text delta
+            - "complete": final result with full response and tool calls
     """
     start = time.time()
 
@@ -1365,13 +1385,28 @@ async def run_analyze_phase(detection_data: dict, run_logger=None) -> dict:
     if run_logger:
         run_logger.info("Analyze: starting AI call (chain-of-thought enabled)")
 
+    # Emit prompts event so the UI can show them immediately
+    if on_conversation_event:
+        await on_conversation_event("prompts", {
+            "system_prompt": ANALYZE_COT_SYSTEM_PROMPT,
+            "user_prompt": user_prompt,
+        })
+
     # Use generous token limit — CoT thinking + full analysis
     analyze_max_tokens = 16384
 
+    # Streaming chunk handler — forward deltas to both callbacks
+    async def _on_stream_chunk(text_delta):
+        if on_chunk:
+            await on_chunk(text_delta)
+        if on_conversation_event:
+            await on_conversation_event("chunk", {"text": text_delta})
+
     try:
-        result = await call_ai(
+        result = await call_ai_stream(
             ANALYZE_COT_SYSTEM_PROMPT,
             user_prompt,
+            on_chunk=_on_stream_chunk,
             run_logger=run_logger,
             max_tokens=analyze_max_tokens,
         )
@@ -1409,6 +1444,26 @@ async def run_analyze_phase(detection_data: dict, run_logger=None) -> dict:
 
         elapsed = round(time.time() - start, 2)
 
+        conversation_data = {
+            "system_prompt": ANALYZE_COT_SYSTEM_PROMPT,
+            "user_prompt": user_prompt,
+            "assistant_response": raw_response_text,
+            "thinking": ai_analysis.get("_thinking"),
+            "tool_calls": result.get("tool_calls", []),
+        }
+
+        # Emit complete event so UI gets the final parsed conversation
+        if on_conversation_event:
+            await on_conversation_event("complete", {
+                "conversation": conversation_data,
+                "ai_meta": {
+                    "provider": result["provider_name"],
+                    "model": result["model"],
+                    "usage": result["usage"],
+                    "elapsed_seconds": elapsed,
+                },
+            })
+
         return {
             "analysis": merged,
             "ai_meta": {
@@ -1419,13 +1474,7 @@ async def run_analyze_phase(detection_data: dict, run_logger=None) -> dict:
                 "chain_of_thought": bool(ai_analysis.get("_thinking")),
                 "self_verified": "verification_notes" in ai_analysis,
             },
-            "conversation": {
-                "system_prompt": ANALYZE_COT_SYSTEM_PROMPT,
-                "user_prompt": user_prompt,
-                "assistant_response": raw_response_text,
-                "thinking": ai_analysis.get("_thinking"),
-                "tool_calls": result.get("tool_calls", []),
-            },
+            "conversation": conversation_data,
         }
 
     except Exception as exc:

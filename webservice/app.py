@@ -118,9 +118,22 @@ async def run_processing_pipeline(filename, sid):
                 logger.info("PIPELINE Phase %d: %s completed in %.2fs", i, phase["name"], elapsed)
                 await _emit_phase(sid, filename, phase, i, "complete", result=detection, run_id=run_id)
             elif phase["name"] == "analyze":
-                # --- AI-powered cross-sportsbook analysis ---
+                # --- AI-powered cross-sportsbook analysis (streamed) ---
                 try:
-                    analysis = await run_analyze_phase(pipeline_results.get("detect", {}), run_logger=run_logger)
+                    async def on_analyze_conversation(event_type, data):
+                        """Emit analyze conversation events to the frontend in real-time."""
+                        await sio.emit("analyze_conversation", {
+                            "event": event_type,
+                            "data": data,
+                            "filename": filename,
+                            "run_id": run_id,
+                        }, to=sid)
+
+                    analysis = await run_analyze_phase(
+                        pipeline_results.get("detect", {}),
+                        run_logger=run_logger,
+                        on_conversation_event=on_analyze_conversation,
+                    )
                     pipeline_results["analyze"] = analysis
                     elapsed = time.time() - phase_start
                     run_logger.info("Phase %d: %s completed in %.2fs", i, phase["name"], elapsed)

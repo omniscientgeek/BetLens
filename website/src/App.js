@@ -7,7 +7,7 @@ import AISettings from "./AISettings";
 import ChatPanel from "./ChatPanel";
 import BriefPanel from "./BriefPanel";
 import AnalyzeConversation from "./AnalyzeConversation";
-import "./App.css";
+import "./App.css"; // updated
 
 const API_BASE = "";
 const SOCKET_URL = "";
@@ -79,6 +79,13 @@ function BetLens() {
   // Streaming brief text (accumulated from brief_chunk events)
   const [streamingBrief, setStreamingBrief] = useState("");
 
+  // Streaming analyze conversation (built up from analyze_conversation events)
+  const [analyzeConversation, setAnalyzeConversation] = useState(null);
+
+  // Pipeline runtime timer
+  const [pipelineStartTime, setPipelineStartTime] = useState(null);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+
   // Debug mode
   const [debugMode, setDebugMode] = useState(
     () => localStorage.getItem("betstamp_debug") === "true"
@@ -90,6 +97,15 @@ function BetLens() {
     setDebugMode(next);
     localStorage.setItem("betstamp_debug", String(next));
   };
+
+  // Tick the elapsed timer every second while the pipeline is running
+  useEffect(() => {
+    if (!pipelineStartTime || pipelineComplete || pipelineError) return;
+    const interval = setInterval(() => {
+      setElapsedSeconds(Math.floor((Date.now() - pipelineStartTime) / 1000));
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [pipelineStartTime, pipelineComplete, pipelineError]);
 
   // Persist key state to sessionStorage so data survives page refresh
   useEffect(() => { sessionSet("selectedFile", selectedFile); }, [selectedFile]);
@@ -124,7 +140,10 @@ function BetLens() {
     setPipelineError(null);
     setPhaseResults({});
     setStreamingBrief("");
+    setAnalyzeConversation(null);
     setRunId(null);
+    setPipelineStartTime(null);
+    setElapsedSeconds(0);
 
     if (!filename) {
       sessionRemove("selectedFile");
@@ -154,10 +173,16 @@ function BetLens() {
     setLoading(false);
 
     // Start WebSocket connection for processing pipeline
-    const socket = io(SOCKET_URL, { transports: ["websocket", "polling"] });
+    // Disable auto-reconnect — if the connection drops mid-pipeline (e.g.
+    // phone lock), we don't want to restart from scratch.
+    const socket = io(SOCKET_URL, {
+      transports: ["websocket", "polling"],
+      reconnection: false,
+    });
     socketRef.current = socket;
 
-    socket.on("connect", () => {
+    socket.once("connect", () => {
+      setPipelineStartTime(Date.now());
       socket.emit("start_processing", { filename });
     });
 
@@ -173,6 +198,33 @@ function BetLens() {
       // Capture phase results as they complete
       if (data.status === "complete" && data.result) {
         setPhaseResults((prev) => ({ ...prev, [data.phase]: data.result }));
+      }
+    });
+
+    // Stream analyze conversation events as they arrive
+    socket.on("analyze_conversation", (data) => {
+      const { event, data: eventData } = data;
+      if (event === "prompts") {
+        setAnalyzeConversation({
+          system_prompt: eventData.system_prompt,
+          user_prompt: eventData.user_prompt,
+          assistant_response: "",
+          thinking: null,
+          tool_calls: [],
+          streaming: true,
+        });
+      } else if (event === "chunk") {
+        setAnalyzeConversation((prev) => {
+          if (!prev) return prev;
+          return { ...prev, assistant_response: (prev.assistant_response || "") + (eventData.text || "") };
+        });
+      } else if (event === "complete") {
+        setAnalyzeConversation((prev) => ({
+          ...(prev || {}),
+          ...eventData.conversation,
+          ai_meta: eventData.ai_meta,
+          streaming: false,
+        }));
       }
     });
 
@@ -310,6 +362,15 @@ function BetLens() {
     };
   };
 
+  // Format elapsed seconds as m:ss or h:mm:ss
+  const formatElapsed = (totalSec) => {
+    const hrs = Math.floor(totalSec / 3600);
+    const mins = Math.floor((totalSec % 3600) / 60);
+    const secs = totalSec % 60;
+    if (hrs > 0) return `${hrs}:${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+    return `${mins}:${String(secs).padStart(2, "0")}`;
+  };
+
   // Determine step status for the pipeline stepper
   const getStepStatus = (idx) => {
     if (!pipeline) return "pending";
@@ -384,7 +445,19 @@ function BetLens() {
               </React.Fragment>
             );
           })}
+          <div className="pipeline-timer">
+            {formatElapsed(elapsedSeconds)}
+          </div>
         </div>
+      )}
+
+      {/* Show streaming analyze conversation as it arrives during the analyze phase */}
+      {!pipelineComplete && !pipelineError && analyzeConversation && (
+        <AnalyzeConversation
+          analyzeResult={{ conversation: analyzeConversation, ai_meta: analyzeConversation.ai_meta }}
+          streaming={analyzeConversation.streaming}
+          defaultExpanded={true}
+        />
       )}
 
       {/* Show streaming brief text as it arrives during the brief phase */}
@@ -401,7 +474,7 @@ function BetLens() {
 
       {pipelineComplete && (
         <>
-          <div className="pipeline-done">Processing complete</div>
+          <div className="pipeline-done">Processing complete in {formatElapsed(elapsedSeconds)}</div>
           {pipelineResults?.brief?.error && (
             <div className="error">Brief generation failed: {pipelineResults.brief.error}</div>
           )}
