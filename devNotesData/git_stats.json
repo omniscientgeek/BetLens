@@ -1,7 +1,43 @@
 {
   "commits": [
     {
-      "hash": "0f83b677",
+      "hash": "dfade91a",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 12:42:35 -0600",
+      "subject": "Add proxy to tunnel URL for dev server API forwarding",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "c3c92907",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 12:32:13 -0600",
+      "subject": "Add 236 unit tests for MCP probability engine with browser test runner",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "e463d655",
+      "author": "BetStamp AutoSync",
+      "email": "autosync@betstamp.app",
+      "date": "2026-03-28 12:26:23 -0600",
+      "subject": "Auto-sync devnotes for project 10",
+      "is_claude": false,
+      "is_autosync": true
+    },
+    {
+      "hash": "09078136",
+      "author": "BetStamp AutoSync",
+      "email": "autosync@betstamp.app",
+      "date": "2026-03-28 12:26:17 -0600",
+      "subject": "Auto-sync git stats",
+      "is_claude": false,
+      "is_autosync": true
+    },
+    {
+      "hash": "6fd055b4",
       "author": "Justin",
       "email": "justin@omniscientgeek.com",
       "date": "2026-03-28 12:16:06 -0600",
@@ -10,7 +46,7 @@
       "is_autosync": false
     },
     {
-      "hash": "453ee21c",
+      "hash": "b1c619e4",
       "author": "Justin",
       "email": "justin@omniscientgeek.com",
       "date": "2026-03-28 12:15:26 -0600",
@@ -19,7 +55,7 @@
       "is_autosync": false
     },
     {
-      "hash": "1045fabd",
+      "hash": "9a0036eb",
       "author": "Justin",
       "email": "justin@omniscientgeek.com",
       "date": "2026-03-28 12:13:01 -0600",
@@ -28,7 +64,7 @@
       "is_autosync": false
     },
     {
-      "hash": "57d05a3b",
+      "hash": "ea1bc2fa",
       "author": "Justin",
       "email": "justin@omniscientgeek.com",
       "date": "2026-03-28 11:39:47 -0600",
@@ -37,7 +73,7 @@
       "is_autosync": false
     },
     {
-      "hash": "cc4d0ac2",
+      "hash": "2aeab93b",
       "author": "Justin",
       "email": "justin@omniscientgeek.com",
       "date": "2026-03-28 11:38:53 -0600",
@@ -46,7 +82,7 @@
       "is_autosync": false
     },
     {
-      "hash": "30adac8a",
+      "hash": "89b40252",
       "author": "Justin",
       "email": "justin@omniscientgeek.com",
       "date": "2026-03-28 10:55:06 -0600",
@@ -55,7 +91,7 @@
       "is_autosync": false
     },
     {
-      "hash": "183df4d8",
+      "hash": "78bbc868",
       "author": "Justin",
       "email": "justin@omniscientgeek.com",
       "date": "2026-03-28 10:54:28 -0600",
@@ -64,7 +100,7 @@
       "is_autosync": false
     },
     {
-      "hash": "6744e72d",
+      "hash": "22a266a8",
       "author": "Justin",
       "email": "justin@omniscientgeek.com",
       "date": "2026-03-28 10:53:17 -0600",
@@ -73,7 +109,7 @@
       "is_autosync": false
     },
     {
-      "hash": "f7dc8f91",
+      "hash": "bbe15950",
       "author": "Justin",
       "email": "justin@omniscientgeek.com",
       "date": "2026-03-28 10:39:37 -0600",
@@ -82,21 +118,12 @@
       "is_autosync": false
     },
     {
-      "hash": "4e53448a",
+      "hash": "3ccd288c",
       "author": "Justin",
       "email": "justin@omniscientgeek.com",
       "date": "2026-03-28 10:32:17 -0600",
       "subject": "Fix audit_analyze step not showing as running on WebSocket reconnect",
       "is_claude": true,
-      "is_autosync": false
-    },
-    {
-      "hash": "f6a90245",
-      "author": "Justin",
-      "email": "justin@omniscientgeek.com",
-      "date": "2026-03-28 10:29:17 -0600",
-      "subject": "Add Requirements.pdf",
-      "is_claude": false,
       "is_autosync": false
     },
     {
@@ -668,13 +695,13 @@
     }
   ],
   "summary": {
-    "total_commits": 74,
-    "claude_commits": 71,
-    "autosync_commits": 0,
-    "user_commits": 3,
-    "claude_percentage": 95.9,
-    "autosync_percentage": 0.0,
-    "user_percentage": 4.1,
-    "generated_at": "2026-03-28T12:26:17.484891"
+    "total_commits": 77,
+    "claude_commits": 73,
+    "autosync_commits": 2,
+    "user_commits": 2,
+    "claude_percentage": 94.8,
+    "autosync_percentage": 2.6,
+    "user_percentage": 2.6,
+    "generated_at": "2026-03-28T12:55:46.471310"
   }
 }
