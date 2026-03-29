@@ -22,8 +22,7 @@ logs/
 .DS_Store
 Thumbs.db
 
-# DevNotes JSON cache (only .md files are committed)
-devNotesData/*.json
+# DevNotes JSON cache — committed so production (Railway) can serve saved data
 
 # Private docs
 Requirements.pdf

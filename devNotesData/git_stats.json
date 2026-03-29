@@ -1,6 +1,42 @@
 {
   "commits": [
     {
+      "hash": "c05018fe",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 17:43:05 -0600",
+      "subject": "Move AI Agent to top of past runs detail view and improve chat UX",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "1b9e228c",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 17:02:16 -0600",
+      "subject": "Move devnotes_combined.MD output to repo root",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "f849605b",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 16:56:13 -0600",
+      "subject": "Fix devnotes page blank in production by including data files in Docker image",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
+      "hash": "bddb29ec",
+      "author": "Justin",
+      "email": "justin@omniscientgeek.com",
+      "date": "2026-03-28 16:27:14 -0600",
+      "subject": "Update dev notes and add BetLens saved results",
+      "is_claude": true,
+      "is_autosync": false
+    },
+    {
       "hash": "344f0acc",
       "author": "Justin",
       "email": "justin@omniscientgeek.com",
@@ -983,13 +1019,13 @@
     }
   ],
   "summary": {
-    "total_commits": 109,
-    "claude_commits": 98,
+    "total_commits": 113,
+    "claude_commits": 102,
     "autosync_commits": 9,
     "user_commits": 2,
-    "claude_percentage": 89.9,
-    "autosync_percentage": 8.3,
+    "claude_percentage": 90.3,
+    "autosync_percentage": 8.0,
     "user_percentage": 1.8,
-    "generated_at": "2026-03-28T16:26:08.295114"
+    "generated_at": "2026-03-28T17:57:58.316918"
   }
 }

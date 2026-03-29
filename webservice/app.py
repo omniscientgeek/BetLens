@@ -1524,6 +1524,14 @@ async def download_devnotes_md():
     return FileResponse(md_path, filename="devnotes_combined.MD", media_type="text/markdown")
 
 
+@app.get("/api/download-devnotes-md/check")
+async def check_devnotes_md():
+    """Lightweight check whether the combined devnotes MD file exists."""
+    md_path = os.path.join(REPO_DIR, "devnotes_combined.MD")
+    exists = os.path.isfile(md_path)
+    return {"exists": exists}
+
+
 REPO_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 GIT_STATS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "devNotesData"))
 
@@ -1679,12 +1687,28 @@ async def get_git_stats():
     return stats
 
 
+@app.get("/api/debug/devnotes-dir")
+async def debug_devnotes_dir():
+    """Debug: list contents of devNotesData directory."""
+    info = {
+        "GIT_STATS_DIR": GIT_STATS_DIR,
+        "DEV_NOTES_DIR": DEV_NOTES_DIR,
+        "git_stats_dir_exists": os.path.isdir(GIT_STATS_DIR),
+        "dev_notes_dir_exists": os.path.isdir(DEV_NOTES_DIR),
+        "git_stats_dir_contents": os.listdir(GIT_STATS_DIR) if os.path.isdir(GIT_STATS_DIR) else [],
+        "dev_notes_dir_contents": os.listdir(DEV_NOTES_DIR) if os.path.isdir(DEV_NOTES_DIR) else [],
+        "cwd": os.getcwd(),
+        "__file__": os.path.abspath(__file__),
+    }
+    return info
+
+
 @app.get("/api/git-stats/saved")
 async def get_saved_git_stats():
     """Return previously saved git stats, or 404 if none exist."""
     filepath = os.path.join(GIT_STATS_DIR, "git_stats.json")
     if not os.path.isfile(filepath):
-        return JSONResponse({"error": "No saved git stats found"}, status_code=404)
+        return JSONResponse({"error": "No saved git stats found", "checked_path": filepath, "dir_exists": os.path.isdir(GIT_STATS_DIR), "dir_contents": os.listdir(GIT_STATS_DIR) if os.path.isdir(GIT_STATS_DIR) else []}, status_code=404)
 
     import aiofiles
     async with aiofiles.open(filepath, "r", encoding="utf-8") as f:

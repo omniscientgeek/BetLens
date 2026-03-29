@@ -62,6 +62,22 @@ function DevNotes() {
     loadGitStats();
   }, []);
 
+  // Check if combined MD file already exists on mount (e.g. auto-committed in production)
+  useEffect(() => {
+    const checkMdFile = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/download-devnotes-md/check`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.exists) setMdReady(true);
+        }
+      } catch {
+        // Silent fail
+      }
+    };
+    checkMdFile();
+  }, []);
+
   const handleGenerate = async () => {
     setLoading(true);
     setError(null);
@@ -264,6 +280,37 @@ function DevNotes() {
             {gitStats.summary.total_commits} total commits &middot; Generated{" "}
             {new Date(gitStats.summary.generated_at).toLocaleString()}
           </div>
+
+          {gitStats.commits && gitStats.commits.length > 0 && (
+            <div className="git-commits-list">
+              <h4>Commit History</h4>
+              {gitStats.commits.map((commit) => (
+                <div
+                  key={commit.hash}
+                  className={`git-commit-row ${
+                    commit.is_claude
+                      ? "git-commit-claude"
+                      : commit.is_autosync
+                      ? "git-commit-autosync"
+                      : "git-commit-user"
+                  }`}
+                >
+                  <span className="git-commit-hash">{commit.hash}</span>
+                  <span className="git-commit-subject">{commit.subject}</span>
+                  <span className="git-commit-badge">
+                    {commit.is_claude
+                      ? "Claude"
+                      : commit.is_autosync
+                      ? "AutoSync"
+                      : "User"}
+                  </span>
+                  <span className="git-commit-date">
+                    {new Date(commit.date).toLocaleDateString()}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
