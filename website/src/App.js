@@ -11,6 +11,7 @@ import ActiveRunDetail from "./ActiveRunDetail";
 import ChatPanel from "./ChatPanel";
 import BriefPanel, { VerificationBadge } from "./BriefPanel";
 import AnalyzeConversation from "./AnalyzeConversation";
+import TokenUsageSummary from "./TokenUsageSummary";
 import { API_BASE, SOCKET_URL, fetchWithRetry } from "./api";
 import "./App.css"; // updated
 
@@ -1418,6 +1419,9 @@ function BetLens() {
           {pipelineResults?.analyze?.error && (
             <div className="error">Analysis failed: {pipelineResults.analyze.error}</div>
           )}
+
+          {/* Token Usage Summary */}
+          {pipelineResults && <TokenUsageSummary pipelineResults={pipelineResults} />}
 
           {/* === ANALYSIS SECTION === */}
           {(() => {

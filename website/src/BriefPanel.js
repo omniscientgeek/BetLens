@@ -393,6 +393,11 @@ function VerificationBadge({ verification, streaming = false }) {
                 {agent.ai_meta && (
                   <div className="vb-agent-meta">
                     {agent.ai_meta.provider} &middot; {agent.ai_meta.model} &middot; {agent.ai_meta.elapsed_seconds?.toFixed(1)}s
+                    {agent.ai_meta.usage?.input_tokens > 0 && (
+                      <span className="vb-agent-tokens">
+                        {" "}&middot; {(agent.ai_meta.usage.input_tokens || 0).toLocaleString()} in / {(agent.ai_meta.usage.output_tokens || 0).toLocaleString()} out
+                      </span>
+                    )}
                   </div>
                 )}
                 {agent.conversation && (
@@ -465,6 +470,11 @@ export default function BriefPanel({ briefResult, isInterim = false }) {
             {ai_meta.elapsed_seconds != null && (
               <span className="bp-meta-time">
                 {ai_meta.elapsed_seconds.toFixed(1)}s
+              </span>
+            )}
+            {ai_meta.usage?.input_tokens > 0 && (
+              <span className="bp-meta-tokens">
+                {(ai_meta.usage.input_tokens || 0).toLocaleString()} in / {(ai_meta.usage.output_tokens || 0).toLocaleString()} out
               </span>
             )}
           </div>

@@ -421,9 +421,11 @@ async def run_processing_pipeline(filename: str, state: PipelineState):
                             await _safe_emit(state, "verification_update", verification_payload)
 
                             overall = verification.get("overall_verdict", "error")
+                            from_cache = verification.get("from_cache", False)
                             run_logger.info(
-                                "Analysis audit (attempt %d): overall=%s elapsed=%.2fs",
+                                "Analysis audit (attempt %d): overall=%s elapsed=%.2fs%s",
                                 fix_attempt, overall, verification["elapsed_seconds"],
+                                " [CACHED]" if from_cache else "",
                             )
 
                             fix_history.append({
@@ -432,7 +434,13 @@ async def run_processing_pipeline(filename: str, state: PipelineState):
                                 "verdict": overall,
                                 "verification": verification,
                                 "text": current_text,
+                                "from_cache": from_cache,
                             })
+
+                            # Cached "fail" results should NOT trigger a fix cycle —
+                            # the text hasn't changed so a fix would just repeat.
+                            if from_cache:
+                                break
 
                             # Only rerun on "fail" — "warn" is accepted without
                             # burning another fix cycle (cosmetic issues aren't
@@ -670,9 +678,11 @@ async def run_processing_pipeline(filename: str, state: PipelineState):
                             await _safe_emit(state, "verification_update", verification_payload)
 
                             overall = verification.get("overall_verdict", "error")
+                            from_cache = verification.get("from_cache", False)
                             run_logger.info(
-                                "Brief audit (attempt %d): overall=%s elapsed=%.2fs",
+                                "Brief audit (attempt %d): overall=%s elapsed=%.2fs%s",
                                 fix_attempt, overall, verification["elapsed_seconds"],
+                                " [CACHED]" if from_cache else "",
                             )
 
                             fix_history.append({
@@ -681,7 +691,13 @@ async def run_processing_pipeline(filename: str, state: PipelineState):
                                 "verdict": overall,
                                 "verification": verification,
                                 "text": current_brief_text,
+                                "from_cache": from_cache,
                             })
+
+                            # Cached "fail" results should NOT trigger a fix cycle —
+                            # the text hasn't changed so a fix would just repeat.
+                            if from_cache:
+                                break
 
                             # Only rerun on "fail" — "warn" is accepted without
                             # burning another fix cycle (cosmetic issues aren't
@@ -1101,15 +1117,41 @@ async def list_saved_results():
                 or pr.get("audit_brief", {}).get("overall_verdict")
             )
             # Compute total pipeline runtime by summing phase + verification times
+            # Also accumulate token counts across all phases and agents
             total_secs = 0.0
+            total_input_tokens = 0
+            total_output_tokens = 0
             for phase_key in ("analyze", "brief"):
                 phase = pr.get(phase_key, {})
                 ai = phase.get("ai_meta") or {}
                 total_secs += ai.get("elapsed_seconds", 0) or 0
+                usage = ai.get("usage") or {}
+                total_input_tokens += usage.get("input_tokens", 0) or 0
+                total_output_tokens += usage.get("output_tokens", 0) or 0
                 verif = phase.get("verification") or {}
                 total_secs += verif.get("elapsed_seconds", 0) or 0
+                # Sum agent tokens from verification
+                agents = verif.get("agents") or {}
+                for agent_data in agents.values():
+                    agent_ai = (agent_data or {}).get("ai_meta") or {}
+                    agent_usage = agent_ai.get("usage") or {}
+                    total_input_tokens += agent_usage.get("input_tokens", 0) or 0
+                    total_output_tokens += agent_usage.get("output_tokens", 0) or 0
+            # Also check top-level audit keys
+            for audit_key in ("audit_analyze", "audit_brief"):
+                audit = pr.get(audit_key) or {}
+                agents = audit.get("agents") or {}
+                for agent_data in agents.values():
+                    agent_ai = (agent_data or {}).get("ai_meta") or {}
+                    agent_usage = agent_ai.get("usage") or {}
+                    total_input_tokens += agent_usage.get("input_tokens", 0) or 0
+                    total_output_tokens += agent_usage.get("output_tokens", 0) or 0
             if total_secs > 0:
                 meta["total_runtime_seconds"] = round(total_secs, 1)
+            if total_input_tokens > 0 or total_output_tokens > 0:
+                meta["total_input_tokens"] = total_input_tokens
+                meta["total_output_tokens"] = total_output_tokens
+                meta["total_tokens"] = total_input_tokens + total_output_tokens
         except (json.JSONDecodeError, OSError):
             # Skip files with invalid JSON or read errors
             continue

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from "react";
 import BriefPanel, { VerificationBadge } from "./BriefPanel";
 import AnalyzeConversation from "./AnalyzeConversation";
 import { API_BASE, fetchWithRetry } from "./api";
+import TokenUsageSummary from "./TokenUsageSummary";
 
 const PHASE_LABELS = {
   detect: "Detect",
@@ -128,6 +129,9 @@ export default function ActiveRunDetail({ filename, onBack, backLabel }) {
           );
         })}
       </div>
+
+      {/* Token Usage Summary */}
+      <TokenUsageSummary pipelineResults={pr} />
 
       {/* Completed phase results — same rendering as RunDetail */}
       {pr.analyze && (

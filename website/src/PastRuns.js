@@ -5,6 +5,7 @@ import AnalyzeConversation from "./AnalyzeConversation";
 import ActiveRunDetail from "./ActiveRunDetail";
 import ChatPanel from "./ChatPanel";
 import { API_BASE, fetchWithRetry } from "./api";
+import TokenUsageSummary from "./TokenUsageSummary";
 
 /* ------------------------------------------------------------------ */
 /*  Verdict badge helper                                               */
@@ -324,17 +325,24 @@ function DetectSummary({ detect }) {
 /* ------------------------------------------------------------------ */
 function AiMetaRow({ label, meta }) {
   if (!meta) return null;
-  const tokens = (meta.usage?.input_tokens || 0) + (meta.usage?.output_tokens || 0);
+  const inTok = meta.usage?.input_tokens || 0;
+  const outTok = meta.usage?.output_tokens || 0;
+  const tokens = inTok + outTok;
   return (
     <span className="pr-ai-meta-item">
       <span className="pr-ai-meta-label">{label}:</span>{" "}
       {meta.provider && <span>{meta.provider}/</span>}
       {meta.model && <span>{meta.model}</span>}
       {meta.elapsed_seconds != null && <span> ({meta.elapsed_seconds.toFixed(1)}s)</span>}
-      {tokens > 0 && <span> {tokens.toLocaleString()} tok</span>}
+      {tokens > 0 && (
+        <span className="pr-token-inline">
+          {" "}{inTok.toLocaleString()} in / {outTok.toLocaleString()} out ({tokens.toLocaleString()} total)
+        </span>
+      )}
     </span>
   );
 }
+
 
 /* ------------------------------------------------------------------ */
 /*  Helper: resolve audit data with fallback — Issue #8                */
@@ -565,6 +573,14 @@ function RunList({ runs, activeRuns, onSelect, onDelete, loading, error, search,
                           {"\u23F1"} {formatElapsed(Math.round(run.total_runtime_seconds))}
                         </span>
                       )}
+                      {run.total_tokens > 0 && (
+                        <span className="pr-list-item-tokens">
+                          {"\u{1F4CA}"} {run.total_tokens.toLocaleString()} tok
+                          <span className="pr-list-item-tokens-detail">
+                            ({(run.total_input_tokens || 0).toLocaleString()} in / {(run.total_output_tokens || 0).toLocaleString()} out)
+                          </span>
+                        </span>
+                      )}
                     </div>
                   </div>
                   <div className="pr-list-item-verdicts">
@@ -760,6 +776,9 @@ function RunDetail({ filename, onBack, onDelete }) {
           )}
         </div>
       </div>
+
+      {/* Token Usage Summary */}
+      <TokenUsageSummary pipelineResults={pr} />
 
       {/* AI Agent — ask questions about this run's results */}
       <Collapsible title="AI Agent" icon={"\u25C8"} defaultOpen={true}

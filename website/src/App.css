@@ -5030,6 +5030,201 @@
   color: var(--text-secondary);
 }
 
+.pr-token-inline {
+  color: var(--accent-cyan, #67d6ed);
+  font-weight: 500;
+}
+
+/* ================================================================== */
+/*  Past Runs — List Item Tokens                                       */
+/* ================================================================== */
+.pr-list-item-tokens {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--accent-cyan, #67d6ed);
+  margin-left: 8px;
+}
+
+.pr-list-item-tokens-detail {
+  color: var(--text-muted);
+  margin-left: 4px;
+}
+
+/* ================================================================== */
+/*  Token Usage Summary Card                                            */
+/* ================================================================== */
+.pr-token-summary {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg, 12px);
+  margin-bottom: var(--space-md, 16px);
+  overflow: hidden;
+}
+
+.pr-token-summary-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 12px 16px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  text-align: left;
+  transition: background 0.15s;
+}
+
+.pr-token-summary-header:hover {
+  background: var(--bg-hover, rgba(255, 255, 255, 0.04));
+}
+
+.pr-token-summary-icon {
+  font-size: 1.1rem;
+}
+
+.pr-token-summary-title {
+  font-weight: 700;
+  font-size: 0.88rem;
+}
+
+.pr-token-summary-totals {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  flex-wrap: wrap;
+}
+
+.pr-token-pill {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 2px 10px;
+  border-radius: var(--radius-full, 100px);
+  white-space: nowrap;
+}
+
+.pr-token-pill--in {
+  background: rgba(103, 214, 237, 0.12);
+  color: var(--accent-cyan, #67d6ed);
+}
+
+.pr-token-pill--out {
+  background: rgba(255, 167, 38, 0.12);
+  color: var(--accent-orange, #ffa726);
+}
+
+.pr-token-pill--total {
+  background: rgba(129, 199, 132, 0.12);
+  color: var(--accent-green, #81c784);
+}
+
+.pr-token-pill--tools {
+  background: rgba(186, 147, 255, 0.12);
+  color: var(--accent-purple, #ba93ff);
+}
+
+.pr-token-chevron {
+  font-size: 0.6rem;
+  color: var(--text-muted);
+  transition: transform 0.2s;
+  margin-left: 4px;
+}
+
+.pr-token-chevron--open {
+  transform: rotate(0deg);
+}
+
+.pr-token-chevron:not(.pr-token-chevron--open) {
+  transform: rotate(-90deg);
+}
+
+.pr-token-table-wrap {
+  padding: 0 16px 16px;
+  overflow-x: auto;
+}
+
+.pr-token-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+}
+
+.pr-token-table th {
+  text-align: left;
+  padding: 8px 10px;
+  font-weight: 700;
+  color: var(--text-secondary);
+  border-bottom: 2px solid var(--border-subtle);
+  white-space: nowrap;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.pr-token-table td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.pr-token-table tbody tr:hover {
+  background: var(--bg-hover, rgba(255, 255, 255, 0.03));
+}
+
+.pr-token-phase {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.pr-token-model {
+  color: var(--text-muted);
+  font-size: 0.68rem;
+}
+
+.pr-token-in {
+  color: var(--accent-cyan, #67d6ed);
+}
+
+.pr-token-out {
+  color: var(--accent-orange, #ffa726);
+}
+
+.pr-token-total {
+  color: var(--accent-green, #81c784);
+  font-weight: 600;
+}
+
+.pr-token-footer td {
+  padding-top: 10px;
+  border-bottom: none;
+  border-top: 2px solid var(--border-subtle);
+}
+
+/* ================================================================== */
+/*  BriefPanel — Token meta                                             */
+/* ================================================================== */
+.bp-meta-tokens {
+  background: rgba(103, 214, 237, 0.1);
+  color: var(--accent-cyan, #67d6ed);
+  padding: 3px 10px;
+  border-radius: var(--radius-full, 100px);
+  font-size: 0.72rem;
+  font-weight: 600;
+  font-family: var(--font-mono);
+}
+
+/* ================================================================== */
+/*  VerificationBadge — Agent token display                             */
+/* ================================================================== */
+.vb-agent-tokens {
+  color: var(--accent-cyan, #67d6ed);
+}
+
 /* ================================================================== */
 /*  Past Runs — Detect Grid                                            */
 /* ================================================================== */
