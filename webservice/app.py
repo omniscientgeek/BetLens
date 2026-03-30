@@ -36,7 +36,7 @@ from ai_service import (
     AGENT_SYSTEM_PROMPT,
     _build_brief_payload,
 )
-from verification_agents import run_verification
+from verification_agents import run_verification, build_reference_data
 
 # ---------------------------------------------------------------------------
 # FastAPI + Socket.IO (async) setup
@@ -256,6 +256,7 @@ async def run_processing_pipeline(filename: str, state: PipelineState):
     logger.info("PIPELINE Starting pipeline for %s (run_id=%s)", filename, run_id)
     try:
         pipeline_results = state.results  # may already have completed phases on resume
+        ref_data = ""  # Pre-fetched MCP tool reference data for audit agents
 
         for i, phase in enumerate(PHASES):
             # Skip phases that already completed (e.g. after a restart/resume)
@@ -370,6 +371,20 @@ async def run_processing_pipeline(filename: str, state: PipelineState):
                             default=str,
                         )
 
+                        # Pre-fetch reference data from analyze conversation's
+                        # tool calls — eliminates ~100+ duplicate MCP calls across
+                        # the 3 audit agents (each was independently calling the
+                        # same tools that the analyze phase already called).
+                        analyze_tool_calls = (
+                            analysis.get("conversation", {}).get("tool_calls", [])
+                        )
+                        ref_data = build_reference_data(analyze_tool_calls)
+                        if ref_data:
+                            run_logger.info(
+                                "Built reference data from %d analyze tool calls (%d chars)",
+                                len(analyze_tool_calls), len(ref_data),
+                            )
+
                         current_text = analyze_text
                         fix_attempt = 0
                         fix_history = []  # track all attempts for the frontend
@@ -408,6 +423,7 @@ async def run_processing_pipeline(filename: str, state: PipelineState):
                                 run_logger=run_logger,
                                 on_agent_complete=_on_analyze_agent,
                                 on_tool_event=_on_analyze_tool_event,
+                                reference_data=ref_data,
                             )
 
                             verification_payload = {
@@ -627,6 +643,17 @@ async def run_processing_pipeline(filename: str, state: PipelineState):
                             separators=(",", ":"),
                         )
 
+                        # Reuse the reference data built during audit_analyze
+                        # (same MCP tool results apply — the data hasn't changed).
+                        # Fall back to building from analyze tool calls if not available.
+                        if not ref_data:
+                            analyze_tc = (
+                                pipeline_results.get("analyze", {})
+                                .get("conversation", {})
+                                .get("tool_calls", [])
+                            )
+                            ref_data = build_reference_data(analyze_tc)
+
                         current_brief_text = brief["brief_text"]
                         fix_attempt = 0
                         fix_history = []
@@ -665,6 +692,7 @@ async def run_processing_pipeline(filename: str, state: PipelineState):
                                 run_logger=run_logger,
                                 on_agent_complete=_on_brief_agent,
                                 on_tool_event=_on_brief_tool_event,
+                                reference_data=ref_data,
                             )
 
                             verification_payload = {
