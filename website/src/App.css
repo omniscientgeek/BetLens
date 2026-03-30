@@ -2498,6 +2498,170 @@
 .vb-agent .ac-container .ac-body { padding: var(--space-sm) var(--space-md); }
 .vb-agent .ac-container .ac-code-block { max-height: 300px; font-size: 0.72rem; }
 
+/* ------------------------------------------------------------------ */
+/*  Sub-agent drill-down — per-claim verification results              */
+/* ------------------------------------------------------------------ */
+.vb-sub-agents {
+  margin: 8px 0 4px;
+  padding-left: 12px;
+  border-left: 2px solid rgba(255, 255, 255, 0.08);
+}
+
+.vb-sub-agents-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: var(--radius-sm);
+  padding: 4px 10px;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  transition: background 0.15s, color 0.15s;
+}
+.vb-sub-agents-toggle:hover {
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-secondary);
+}
+
+.vb-sub-chevron {
+  font-size: 0.55rem;
+  transition: transform 0.2s;
+}
+.vb-sub-chevron--open { transform: rotate(0deg); }
+.vb-sub-chevron:not(.vb-sub-chevron--open) { transform: rotate(-90deg); }
+
+.vb-sub-agents-label {
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+.vb-sub-agents-summary {
+  opacity: 0.7;
+}
+
+.vb-sub-agents-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+  padding-bottom: 4px;
+}
+
+.vb-sub-agent {
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.02);
+  border-left: 3px solid rgba(255, 255, 255, 0.1);
+}
+.vb-sub-agent.vb--pass  { border-left-color: var(--accent-green, #48bb78); }
+.vb-sub-agent.vb--warn  { border-left-color: var(--accent-yellow, #ecc94b); }
+.vb-sub-agent.vb--fail  { border-left-color: var(--accent-red, #fc8181); }
+.vb-sub-agent.vb--error { border-left-color: var(--accent-red, #fc8181); }
+
+.vb-sub-agent-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.vb-sub-agent-index {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  font-weight: 700;
+  color: var(--text-muted);
+  min-width: 22px;
+}
+
+.vb-sub-agent-verdict-icon {
+  font-size: 0.75rem;
+  flex-shrink: 0;
+}
+
+.vb-sub-agent-claim {
+  flex: 1;
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.vb-sub-agent-type {
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  padding: 1px 5px;
+  border-radius: var(--radius-full);
+  background: rgba(99, 179, 237, 0.1);
+  color: var(--accent-cyan);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.vb-sub-agent-confidence {
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.vb-sub-agent-tokens {
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  padding: 1px 5px;
+  border-radius: var(--radius-full);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.vb-sub-agent-tools {
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  padding: 1px 5px;
+  border-radius: var(--radius-full);
+  background: rgba(159, 122, 234, 0.1);
+  color: var(--accent-purple, #b794f4);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.vb-sub-agent-summary {
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  margin: 3px 0 0 28px;
+  line-height: 1.3;
+}
+
+.vb-sub-agent-issues {
+  margin: 4px 0 0 28px;
+  padding: 0;
+  list-style: none;
+}
+.vb-sub-agent-issues .vb-issue {
+  font-size: 0.68rem;
+  padding: 2px 0;
+}
+
+/* Token table — sub-agent detail rows */
+.pr-token-sub-row {
+  opacity: 0.55;
+  font-size: 0.78em;
+}
+.pr-token-sub-row td {
+  padding-top: 2px;
+  padding-bottom: 2px;
+  border-top: none;
+}
+.pr-token-sub-row .pr-token-phase {
+  padding-left: 18px;
+  color: var(--text-muted);
+}
+
 /* Real-time streaming: progress counter */
 .vb-progress {
   font-family: var(--font-mono);

@@ -25,6 +25,27 @@ export function collectTokens(pr) {
     });
   };
 
+  // Display-only sub-agent rows — tokens NOT added to grand totals
+  // (already counted in parent agent row)
+  const addSubAgentRows = (agent, parentLabel) => {
+    if (!agent?.sub_agents) return;
+    agent.sub_agents.forEach((sub, idx) => {
+      const inT = sub.ai_meta?.usage?.input_tokens || 0;
+      const outT = sub.ai_meta?.usage?.output_tokens || 0;
+      if (inT === 0 && outT === 0) return;
+      rows.push({
+        label: `  \u2514 ${parentLabel} #${idx + 1}: ${(sub.claim_text || "claim").slice(0, 40)}`,
+        provider: sub.ai_meta?.provider,
+        model: sub.ai_meta?.model,
+        elapsed: sub.ai_meta?.elapsed_seconds,
+        inTokens: inT,
+        outTokens: outT,
+        toolCalls: sub.tool_calls_count || 0,
+        isSubAgent: true,
+      });
+    });
+  };
+
   // Analyze phase
   if (pr.analyze) {
     const tc = pr.analyze.conversation?.tool_calls?.length || 0;
@@ -37,6 +58,7 @@ export function collectTokens(pr) {
     for (const [name, agent] of Object.entries(auditAnalyze.agents)) {
       const tc = agent.conversation?.tool_calls?.length || 0;
       addRow(`Audit Analyze \u203A ${name}`, agent.ai_meta, tc);
+      addSubAgentRows(agent, name);
     }
   }
 
@@ -66,6 +88,7 @@ export function collectTokens(pr) {
     for (const [name, agent] of Object.entries(auditBrief.agents)) {
       const tc = agent.conversation?.tool_calls?.length || 0;
       addRow(`Audit Brief \u203A ${name}`, agent.ai_meta, tc);
+      addSubAgentRows(agent, name);
     }
   }
 
@@ -97,7 +120,7 @@ export default function TokenUsageSummary({ pipelineResults }) {
   const { rows, grandIn, grandOut, grandTotal } = collectTokens(pipelineResults);
   if (rows.length === 0) return null;
 
-  const totalToolCalls = rows.reduce((s, r) => s + r.toolCalls, 0);
+  const totalToolCalls = rows.filter((r) => !r.isSubAgent).reduce((s, r) => s + r.toolCalls, 0);
 
   return (
     <div className="pr-token-summary">
@@ -130,7 +153,7 @@ export default function TokenUsageSummary({ pipelineResults }) {
             </thead>
             <tbody>
               {rows.map((r, i) => (
-                <tr key={i}>
+                <tr key={i} className={r.isSubAgent ? "pr-token-sub-row" : ""}>
                   <td className="pr-token-phase">{r.label}</td>
                   <td className="pr-token-model">{r.provider ? `${r.provider} / ` : ""}{r.model || "-"}</td>
                   <td>{r.elapsed != null ? `${r.elapsed.toFixed(1)}s` : "-"}</td>

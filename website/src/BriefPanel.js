@@ -223,6 +223,93 @@ const AGENT_LABELS = {
 
 const ALL_AGENT_NAMES = ["reasoning", "factual", "betting"];
 
+/* ------------------------------------------------------------------ */
+/*  Sub-agent drill-down — shows per-claim verification results        */
+/* ------------------------------------------------------------------ */
+function SubAgentList({ subAgents }) {
+  const [expanded, setExpanded] = useState(false);
+
+  if (!subAgents || subAgents.length === 0) return null;
+
+  const passCount = subAgents.filter((s) => s.verdict === "pass").length;
+
+  return (
+    <div className="vb-sub-agents">
+      <button
+        className="vb-sub-agents-toggle"
+        onClick={() => setExpanded(!expanded)}
+      >
+        <span className={`vb-sub-chevron ${expanded ? "vb-sub-chevron--open" : ""}`}>{"\u25BC"}</span>
+        <span className="vb-sub-agents-label">
+          {subAgents.length} sub-agent{subAgents.length !== 1 ? "s" : ""}
+        </span>
+        <span className="vb-sub-agents-summary">
+          {passCount}/{subAgents.length} passed
+        </span>
+      </button>
+      {expanded && (
+        <div className="vb-sub-agents-list">
+          {subAgents.map((sub, idx) => {
+            const sc = VERDICT_CONFIG[sub.verdict] || VERDICT_CONFIG.error;
+            const tokens = (sub.ai_meta?.usage?.input_tokens || 0) + (sub.ai_meta?.usage?.output_tokens || 0);
+            return (
+              <div key={idx} className={`vb-sub-agent ${sc.className}`}>
+                <div className="vb-sub-agent-header">
+                  <span className="vb-sub-agent-index">#{idx + 1}</span>
+                  <span className="vb-sub-agent-verdict-icon">{sc.icon}</span>
+                  <span className="vb-sub-agent-claim" title={sub.claim_text}>
+                    {sub.claim_text
+                      ? sub.claim_text.length > 120
+                        ? sub.claim_text.slice(0, 117) + "..."
+                        : sub.claim_text
+                      : "Claim"}
+                  </span>
+                  {sub.claim_type && (
+                    <span className="vb-sub-agent-type">{sub.claim_type}</span>
+                  )}
+                  {sub.confidence != null && (
+                    <span className="vb-sub-agent-confidence">
+                      {(sub.confidence * 100).toFixed(0)}%
+                    </span>
+                  )}
+                  {tokens > 0 && (
+                    <span className="vb-sub-agent-tokens">
+                      {tokens.toLocaleString()} tok
+                    </span>
+                  )}
+                  {sub.tool_calls_count > 0 && (
+                    <span className="vb-sub-agent-tools">
+                      {sub.tool_calls_count} tool{sub.tool_calls_count !== 1 ? "s" : ""}
+                    </span>
+                  )}
+                </div>
+                {sub.summary && (
+                  <p className="vb-sub-agent-summary">{sub.summary}</p>
+                )}
+                {sub.issues && sub.issues.length > 0 && (
+                  <ul className="vb-sub-agent-issues">
+                    {sub.issues.map((issue, iIdx) => (
+                      <li key={iIdx} className={`vb-issue vb-issue--${issue.severity}`}>
+                        <span className="vb-issue-severity">
+                          {issue.severity === "error" ? "\u274C" : issue.severity === "warning" ? "\u26A0\uFE0F" : "\u2139\uFE0F"}
+                        </span>
+                        <div>
+                          <strong className="vb-issue-claim">{issue.claim}</strong>
+                          <span className="vb-issue-finding">{issue.finding}</span>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function VerificationBadge({ verification, streaming = false }) {
   const [expanded, setExpanded] = useState(false);
 
@@ -390,6 +477,7 @@ function VerificationBadge({ verification, streaming = false }) {
                     ))}
                   </ul>
                 )}
+                <SubAgentList subAgents={agent.sub_agents} />
                 {agent.ai_meta && (
                   <div className="vb-agent-meta">
                     {agent.ai_meta.provider} &middot; {agent.ai_meta.model} &middot; {agent.ai_meta.elapsed_seconds?.toFixed(1)}s

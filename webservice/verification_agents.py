@@ -278,7 +278,7 @@ def build_reference_data(
 # Sub-agent parallelism constants
 # ---------------------------------------------------------------------------
 
-MAX_CONCURRENT_SUB_AGENTS = 5   # semaphore limit per parent agent
+MAX_CONCURRENT_SUB_AGENTS = 10  # semaphore limit per parent agent
 MIN_CLAIMS_FOR_PARALLEL = 2     # below this, fall back to single-call
 
 
@@ -653,11 +653,15 @@ def _aggregate_sub_results(
     parent_system_prompt: str,
     original_user_prompt: str,
     wall_elapsed: float,
+    claims: list[dict] | None = None,
 ) -> dict:
     """Merge N sub-agent results into a single agent result dict.
 
     Preserves the exact same schema as the original serial agent runner so
     that callers (app.py, fix phase, cache, UI) see no difference.
+
+    When *claims* is provided the individual sub-agent results are preserved
+    in a ``sub_agents`` list so the UI can drill down per-claim.
     """
     verdict_priority = {"pass": 0, "warn": 1, "fail": 2, "error": 3}
 
@@ -729,6 +733,22 @@ def _aggregate_sub_results(
             "assistant_response": combined_response,
             "tool_calls": all_tool_calls,
         },
+        # Per-claim sub-agent results for UI drill-down
+        "sub_agents": [
+            {
+                "claim_text": (claims[i].get("claim_text", "") if claims and i < len(claims) else ""),
+                "claim_type": (claims[i].get("claim_type", "") if claims and i < len(claims) else ""),
+                "verdict": r["verdict"],
+                "confidence": r.get("confidence", 0.5),
+                "checks_total": r.get("checks_total", 0),
+                "checks_failed": r.get("checks_failed", 0),
+                "issues": r.get("issues", []),
+                "summary": r.get("summary", ""),
+                "ai_meta": r.get("ai_meta", {}),
+                "tool_calls_count": len(r.get("tool_calls", [])),
+            }
+            for i, r in enumerate(sub_results)
+        ],
     }
 
 
@@ -866,6 +886,7 @@ async def _run_agent_parallel(
     wall_elapsed = round(time.time() - agent_start, 2)
     aggregated = _aggregate_sub_results(
         clean_results, agent_name, system_prompt, user_prompt_text, wall_elapsed,
+        claims=claims,
     )
 
     if run_logger:
