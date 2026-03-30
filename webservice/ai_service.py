@@ -21,6 +21,7 @@ import contextvars
 from typing import Optional
 
 from mcp_client import mcp_client as _mcp
+from odds_math import implied_probability as _implied_prob
 
 logger = logging.getLogger(__name__)
 
@@ -1931,7 +1932,10 @@ MUST be "## Market Snapshot". ZERO preamble, meta-commentary, or process discuss
 **## Top Value Bets** — Up to 5 best value bets ranked by confidence. Each: game, \
   market, side, line, sportsbook, odds, why it's value, confidence (HIGH/MEDIUM/LOW), \
   quarter-Kelly sizing (from top_ev_bets or ai_insights).
-**## Best Line Shopping** — Best odds per side for key games. Highlight >5 cent gaps.
+**## Best Line Shopping** — Use line_shopping_pairs (pre-paired with pre-computed metrics). \
+  Report: game_label, market, best odds per side with book name, gap_pct, is_arb. \
+  Highlight pairs where gap_pct > 5%. NEVER compute gaps from American odds yourself \
+  (American odds arithmetic is non-linear). Copy gap_pct and combined_implied_prob directly.
 **## Arbitrage Opportunities** — Both legs, combined implied prob, profit %. \
   Quote from ai_insights first, fall back to arbitrage array. If none, say so.
 **## Middle Opportunities** — Both legs, gap, winning range. Count = counts.middles_total.
@@ -1952,6 +1956,15 @@ MUST be "## Market Snapshot". ZERO preamble, meta-commentary, or process discuss
 - **Kelly sizing:** Required for every value bet. Check ai_insights, top_actions, AND \
   top_ev_bets before saying "not available".
 - **Staleness:** Warn if bet uses lines >60 minutes old.
+- **Confidence cap:** NEVER assign HIGH confidence to any bet that uses lines flagged \
+  as stale (>30 min old) in stale_lines. Downgrade to MEDIUM at most and note staleness.
+- **No aggregate invention:** NEVER invent aggregate metrics (e.g., "market efficiency \
+  at X%", "consensus strength of Y%") unless that exact metric and value appear in the data.
+- **Fair odds:** Always quote fair probabilities from fair_odds_summary. NEVER recompute \
+  or approximate fair probabilities from American odds yourself.
+- **Line shopping gaps:** NEVER subtract American odds to compute a "point gap" — American \
+  odds are non-linear. Use gap_pct from line_shopping_pairs, which is the implied \
+  probability edge (1 - combined_implied_prob). Report as "X% implied edge" not "X-point gap".
 """
 
 
@@ -2247,6 +2260,63 @@ async def run_analyze_phase(detection_data: dict, run_logger=None, on_chunk=None
         }
 
 
+def _build_line_shopping_pairs(best_lines: list[dict]) -> list[dict]:
+    """Pair best_lines entries by (game_id, market) and pre-compute gap metrics.
+
+    Returns a list of paired entries with:
+      - best odds per side with book name and implied probability
+      - combined_implied_prob (sum of both sides' implied probs)
+      - gap_pct (1 - combined implied; positive = arb opportunity)
+      - is_arb flag
+    This eliminates the need for the brief AI to do American odds arithmetic.
+    """
+    pairs_by_key: dict[tuple, dict] = {}
+    for entry in best_lines:
+        gid = entry.get("game_id", "")
+        mkt = entry.get("market", "")
+        key = (gid, mkt)
+        if key not in pairs_by_key:
+            pairs_by_key[key] = {"game_id": gid, "market": mkt}
+        side = entry.get("side", "")
+        odds = entry.get("best_odds")
+        if odds is None or not side:
+            continue
+        pairs_by_key[key][side] = {
+            "book": entry.get("best_book", ""),
+            "odds": odds,
+            "implied_prob": round(_implied_prob(odds), 4),
+        }
+        if entry.get("line") is not None:
+            pairs_by_key[key][side]["line"] = entry["line"]
+        # Carry team names
+        for tk in ("home_team", "away_team"):
+            if entry.get(tk):
+                pairs_by_key[key][tk] = entry[tk]
+
+    result = []
+    for pair in pairs_by_key.values():
+        # Determine the two sides depending on market type
+        side_a = pair.get("home") or pair.get("over")
+        side_b = pair.get("away") or pair.get("under")
+        if not side_a or not side_b:
+            continue
+        prob_a = side_a.get("implied_prob", 0)
+        prob_b = side_b.get("implied_prob", 0)
+        combined = round(prob_a + prob_b, 4)
+        pair["combined_implied_prob"] = combined
+        pair["gap_pct"] = round((1.0 - combined) * 100, 2)
+        pair["is_arb"] = combined < 1.0
+        # Build human-readable game label
+        home = pair.get("home_team", "")
+        away = pair.get("away_team", "")
+        if home and away:
+            pair["game_label"] = f"{away} @ {home}"
+        result.append(pair)
+    # Sort by gap_pct descending (biggest value opportunities first)
+    result.sort(key=lambda x: x.get("gap_pct", 0), reverse=True)
+    return result
+
+
 def _build_brief_payload(detection_data: dict, analysis_data: dict) -> dict:
     """Build a compact, briefing-optimized payload from raw pipeline output.
 
@@ -2355,7 +2425,7 @@ def _build_brief_payload(detection_data: dict, analysis_data: dict) -> dict:
             "ev_bets_total": len(ev_bets),
         },
         "top_ev_bets": ev_bets[:10],
-        "best_lines": analysis.get("best_lines", []),
+        "line_shopping_pairs": _build_line_shopping_pairs(analysis.get("best_lines", [])),
         "arbitrage": arbitrage_list,
         "arb_best_pairings": arb_best_pairings,
         "middles": middles_list,
@@ -2399,7 +2469,10 @@ async def run_brief_phase(detection_data: dict, analysis_data: dict, on_chunk=No
         "object for ALL totals — do NOT count array elements yourself. Use "
         "efficiency_ranking IN ORDER (index 0 = lowest/best vig). Include quarter-Kelly "
         "sizing for every value bet. Every (sportsbook, team, odds) triple must come "
-        "from a single data entry.\n\n"
+        "from a single data entry. For line shopping, use line_shopping_pairs directly — "
+        "each pair has pre-computed gap_pct and combined_implied_prob. NEVER subtract "
+        "American odds to compute gaps. Quote fair probabilities ONLY from "
+        "fair_odds_summary — never recompute them.\n\n"
         + json.dumps(brief_data, separators=(",", ":"))
     )
     # Safety cap — keep under ~40KB to stay within 30K token/min rate limits
