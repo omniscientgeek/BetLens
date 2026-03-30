@@ -293,8 +293,10 @@ TASK: Verify LOGICAL CONSISTENCY of claims against actual data. Use the \
 PRE-FETCHED REFERENCE DATA in the user prompt FIRST — only call MCP tools \
 for data not already provided.
 
-ARITHMETIC: Use arithmetic_evaluate() for multi-step math. Simple two-number \
-operations (add, subtract, multiply, divide) may be done inline.
+ARITHMETIC: Use MCP arithmetic tools (arithmetic_add, arithmetic_subtract, \
+arithmetic_multiply, arithmetic_divide) for ALL math — even simple operations. \
+NEVER compute numbers yourself, not even basic math. For multi-step calculations, \
+chain multiple arithmetic tool calls.
 
 FAIR ODDS: get_fair_odds() = consensus (canonical baseline). Pinnacle sharp \
 fields differ — do NOT flag consensus vs Pinnacle discrepancies as errors.
@@ -333,8 +335,10 @@ TASK: Fact-check ALL specific claims (odds, EV %, vig %, arb profit, rankings, \
 stale lines) against actual data. Use the PRE-FETCHED REFERENCE DATA in the \
 user prompt FIRST — only call MCP tools for data not already provided.
 
-ARITHMETIC: Use arithmetic_evaluate() for multi-step math. Simple two-number \
-operations may be done inline.
+ARITHMETIC: Use MCP arithmetic tools (arithmetic_add, arithmetic_subtract, \
+arithmetic_multiply, arithmetic_divide) for ALL math — even simple operations. \
+NEVER compute numbers yourself. For multi-step calculations, chain multiple \
+arithmetic tool calls.
 
 FAIR ODDS: get_fair_odds() = consensus baseline. Do NOT flag consensus vs \
 Pinnacle discrepancies unless text explicitly says "Pinnacle fair odds".
@@ -390,8 +394,10 @@ TASK: Verify ALL recommendations against actual data. Use the PRE-FETCHED \
 REFERENCE DATA in the user prompt FIRST — only call MCP tools for data not \
 already provided.
 
-ARITHMETIC: Use arithmetic_evaluate() for multi-step math. Simple two-number \
-operations may be done inline.
+ARITHMETIC: Use MCP arithmetic tools (arithmetic_add, arithmetic_subtract, \
+arithmetic_multiply, arithmetic_divide) for ALL math — even simple operations. \
+NEVER compute numbers yourself. For multi-step calculations, chain multiple \
+arithmetic tool calls.
 
 CHECKLIST (verify against reference data or MCP tools):
 1. Bankroll management — Kelly sizing proportional to edges; flag if sizing \
