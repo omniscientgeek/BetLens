@@ -1118,7 +1118,7 @@ async def handle_start_processing(sid, data):
     _pipeline_cache[filename] = state
 
 
-DATA_DIR = os.environ.get("DATA_DIR") or os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data"))
+DATA_DIR = os.path.abspath(os.environ.get("DATA_DIR") or os.path.join(os.path.dirname(__file__), "..", "data"))
 DEV_NOTES_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "devNotesData"))
 CONVERSATIONS_DIR = r"C:\ProgramData\DesktopDevService\Conversations"
 
@@ -1192,7 +1192,7 @@ async def upload_file(file: UploadFile = File(...)):
 # Save pipeline results
 # ---------------------------------------------------------------------------
 
-SAVED_RESULTS_DIR = os.environ.get("SAVED_RESULTS_DIR") or os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "saved_results"))
+SAVED_RESULTS_DIR = os.path.abspath(os.environ.get("SAVED_RESULTS_DIR") or os.path.join(os.path.dirname(__file__), "..", "saved_results"))
 
 
 @app.post("/api/save-results")
