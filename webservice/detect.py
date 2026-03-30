@@ -1352,8 +1352,12 @@ def _build_cross_book_analysis(
         summary_parts.append(f"Found {len(middles)} middle opportunity(ies).")
     if outliers:
         summary_parts.append(f"Detected {len(outliers)} outlier(s).")
+    stale_threshold = stale_summary.get("threshold_minutes", STALE_THRESHOLD_MINUTES)
     if stale_lines:
-        summary_parts.append(f"Detected {len(stale_lines)} stale line(s).")
+        summary_parts.append(
+            f"Detected {len(stale_lines)} stale line(s) "
+            f"(threshold: >{stale_threshold} min behind newest update for same game)."
+        )
 
     return {
         "games_count": len(games),
@@ -1364,6 +1368,7 @@ def _build_cross_book_analysis(
         "middles": middles,
         "outliers": outliers,
         "stale_lines": stale_lines,
+        "stale_threshold_minutes": stale_threshold,
         "fair_odds_summary": fair_odds_summary,
         "summary": " ".join(summary_parts),
     }
