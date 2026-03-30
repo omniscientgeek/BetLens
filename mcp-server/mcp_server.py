@@ -5,6 +5,13 @@ Exposes structured betting data (odds, value, vig, comparisons, anomalies)
 via MCP so Claude can reason about best/worst bets, arbitrage, and market
 inefficiencies.
 
+Every tool accepts an optional ``intent`` parameter (str).  The AI should
+always populate this with a short natural-language description of *what it
+is looking for* or *why it is calling the tool*.  The intent is:
+  - Logged server-side for observability / debugging.
+  - Echoed back in the JSON response under the ``_intent`` key so the
+    conversation retains context about each tool call's purpose.
+
 Usage:
     python mcp_server.py          # stdio transport (default for Claude)
     python mcp_server.py --sse    # SSE transport for web clients
@@ -223,7 +230,16 @@ async def run_server_with_reconnect(transport: str = "stdio"):
 
 mcp = FastMCP(
     "BetStamp Intelligence",
-    instructions="Betting intelligence MCP — odds comparison, value detection, vig analysis, and anomaly spotting. Use get_market_summary as a starting point, then drill into specific tools.",
+    instructions=(
+        "Betting intelligence MCP — odds comparison, value detection, vig analysis, and anomaly spotting. "
+        "Start with get_market_overview for a quick lay of the land, then use get_betting_opportunities, "
+        "get_line_quality, or get_advanced_analytics for focused results.\n\n"
+        "IMPORTANT: Every tool accepts an 'intent' parameter (string). You MUST always populate this with "
+        "a short, specific description of what you are looking for or why you are calling the tool "
+        "(e.g., 'Checking if any NFL spreads have arbitrage opportunities' or 'Getting vig rankings to "
+        "find the fairest sportsbook for NBA moneylines'). This improves traceability and is echoed "
+        "back in the response under the '_intent' key."
+    ),
 )
 
 
@@ -949,12 +965,43 @@ def _compute_sharp_vs_crowd(by_game: dict[str, list[dict]]) -> dict[str, dict]:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Intent helper — log + inject intent into every tool response
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _with_intent(func):
+    """Decorator that logs and injects the 'intent' parameter into tool responses.
+
+    Every @mcp.tool() function should accept an 'intent: str = ""' kwarg.
+    This decorator:
+      1. Logs the intent (if provided) for observability.
+      2. Injects {"_intent": "..."} into the JSON response so the caller
+         can see what the AI was looking for.
+    """
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        intent = kwargs.get("intent", "") or ""
+        if intent:
+            logger.info("[intent] %s → %s", func.__name__, intent)
+        result = func(*args, **kwargs)
+        if intent and isinstance(result, str):
+            try:
+                obj = json.loads(result)
+                obj["_intent"] = intent
+                return json.dumps(obj, indent=2)
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return result
+    return wrapper
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # TOOLS — Phase 1: Core Odds & Comparison
 # ═══════════════════════════════════════════════════════════════════════════
 
 
+@_with_intent
 @mcp.tool()
-def list_data_files() -> str:
+def list_data_files(intent: str = "") -> str:
     """List all available betting data files that can be loaded for analysis.
 
     Returns a JSON list of filenames in the data/ directory.
@@ -966,8 +1013,9 @@ def list_data_files() -> str:
     return json.dumps({"files": files, "count": len(files)})
 
 
+@_with_intent
 @mcp.tool()
-def list_events(filename: Optional[str] = None, sport: Optional[str] = None) -> str:
+def list_events(filename: Optional[str] = None, sport: Optional[str] = None, intent: str = "") -> str:
     """List all unique games/events in the dataset with basic info.
 
     Args:
@@ -999,8 +1047,9 @@ def list_events(filename: Optional[str] = None, sport: Optional[str] = None) -> 
     return json.dumps({"events": events, "count": len(events)}, indent=2)
 
 
+@_with_intent
 @mcp.tool()
-def get_odds_comparison(game_id: str, market_type: Optional[str] = None, filename: Optional[str] = None) -> str:
+def get_odds_comparison(game_id: str, market_type: Optional[str] = None, filename: Optional[str] = None, intent: str = "") -> str:
     """Compare odds across all sportsbooks for a specific game — side by side.
 
     This is the primary tool for understanding where the best and worst lines are.
@@ -1038,8 +1087,9 @@ def get_odds_comparison(game_id: str, market_type: Optional[str] = None, filenam
     }, indent=2)
 
 
+@_with_intent
 @mcp.tool()
-def get_best_odds(game_id: str, market_type: str, side: str, filename: Optional[str] = None) -> str:
+def get_best_odds(game_id: str, market_type: str, side: str, filename: Optional[str] = None, intent: str = "") -> str:
     """Find the single best available odds for a specific bet across all sportsbooks.
 
     Use this to answer "where should I place this bet?" questions.
@@ -1114,8 +1164,9 @@ def get_best_odds(game_id: str, market_type: str, side: str, filename: Optional[
     }, indent=2)
 
 
+@_with_intent
 @mcp.tool()
-def get_worst_odds(game_id: str, market_type: str, side: str, filename: Optional[str] = None) -> str:
+def get_worst_odds(game_id: str, market_type: str, side: str, filename: Optional[str] = None, intent: str = "") -> str:
     """Find the worst available odds for a specific bet — useful for identifying books to avoid.
 
     Args:
@@ -1174,8 +1225,9 @@ def get_worst_odds(game_id: str, market_type: str, side: str, filename: Optional
 # ═══════════════════════════════════════════════════════════════════════════
 
 
+@_with_intent
 @mcp.tool()
-def get_vig_analysis(game_id: Optional[str] = None, filename: Optional[str] = None) -> str:
+def get_vig_analysis(game_id: Optional[str] = None, filename: Optional[str] = None, intent: str = "") -> str:
     """Analyze the vig (bookmaker margin) across all sportsbooks and markets.
 
     Lower vig = better for bettors. Use this to rank sportsbooks by fairness.
@@ -1246,8 +1298,9 @@ def get_vig_analysis(game_id: Optional[str] = None, filename: Optional[str] = No
     return json.dumps(result, indent=2)
 
 
+@_with_intent
 @mcp.tool()
-def get_hold_percentage(filename: Optional[str] = None) -> str:
+def get_hold_percentage(filename: Optional[str] = None, intent: str = "") -> str:
     """Calculate hold percentage by sportsbook - the overall margin a book keeps.
 
     Hold percentage measures how much a sportsbook retains from every dollar
@@ -1338,8 +1391,9 @@ def get_hold_percentage(filename: Optional[str] = None) -> str:
     return json.dumps(result, indent=2)
 
 
+@_with_intent
 @mcp.tool()
-def find_arbitrage_opportunities(filename: Optional[str] = None, min_profit_pct: float = 0.0) -> str:
+def find_arbitrage_opportunities(filename: Optional[str] = None, min_profit_pct: float = 0.0, intent: str = "") -> str:
     """Scan all games for arbitrage (arb) opportunities across sportsbooks.
 
     An arbitrage exists when you can bet both sides across different books
@@ -1424,8 +1478,9 @@ def find_arbitrage_opportunities(filename: Optional[str] = None, min_profit_pct:
     return json.dumps(result, indent=2)
 
 
+@_with_intent
 @mcp.tool()
-def find_expected_value_bets(filename: Optional[str] = None, min_ev_pct: float = 0.0) -> str:
+def find_expected_value_bets(filename: Optional[str] = None, min_ev_pct: float = 0.0, intent: str = "") -> str:
     """Find +EV (positive expected value) bets with Kelly Criterion bet sizing.
 
     Uses Pinnacle's no-vig odds as the "true" probability reference (falls back
@@ -1541,8 +1596,9 @@ def find_expected_value_bets(filename: Optional[str] = None, min_ev_pct: float =
 # ═══════════════════════════════════════════════════════════════════════════
 
 
+@_with_intent
 @mcp.tool()
-def detect_stale_lines(filename: Optional[str] = None, stale_threshold_minutes: int = 30) -> str:
+def detect_stale_lines(filename: Optional[str] = None, stale_threshold_minutes: int = 30, intent: str = "") -> str:
     """Detect sportsbook lines that haven't been updated recently (potentially stale).
 
     Stale lines may represent value opportunities if other books have moved.
@@ -1607,8 +1663,9 @@ def detect_stale_lines(filename: Optional[str] = None, stale_threshold_minutes: 
     return json.dumps(result, indent=2)
 
 
+@_with_intent
 @mcp.tool()
-def infer_odds_movement(filename: Optional[str] = None, stale_threshold_minutes: int = 30) -> str:
+def infer_odds_movement(filename: Optional[str] = None, stale_threshold_minutes: int = 30, intent: str = "") -> str:
     """Infer where sharp money moved by comparing stale odds against fresh odds for the same game.
 
     When a sportsbook's line hasn't been updated but other books have moved,
@@ -1835,8 +1892,9 @@ def infer_odds_movement(filename: Optional[str] = None, stale_threshold_minutes:
     return json.dumps(result, indent=2)
 
 
+@_with_intent
 @mcp.tool()
-def detect_line_outliers(filename: Optional[str] = None, threshold_odds: int = 15) -> str:
+def detect_line_outliers(filename: Optional[str] = None, threshold_odds: int = 15, intent: str = "") -> str:
     """Detect odds that are significant outliers compared to the consensus across books.
 
     An outlier is a line that deviates substantially from the average, which
@@ -1974,8 +2032,9 @@ def detect_line_outliers(filename: Optional[str] = None, threshold_odds: int = 1
 # ═══════════════════════════════════════════════════════════════════════════
 
 
+@_with_intent
 @mcp.tool()
-def get_fair_odds(game_id: Optional[str] = None, filename: Optional[str] = None) -> str:
+def get_fair_odds(game_id: Optional[str] = None, filename: Optional[str] = None, intent: str = "") -> str:
     """Get the consensus no-vig "fair" odds for each game and market.
 
     Removes the vig from each sportsbook's odds, then averages across all
@@ -2118,25 +2177,21 @@ def get_fair_odds(game_id: Optional[str] = None, filename: Optional[str] = None)
     return json.dumps(result, indent=2)
 
 
-@mcp.tool()
-def get_market_summary(filename: Optional[str] = None) -> str:
-    """Get a comprehensive market summary — a structured digest of the entire dataset.
+# ── Sub-Summary Tools ────────────────────────────────────────────────────
 
-    This is the best "start here" tool. It gives Claude a high-level overview:
-    - Event count and sports covered
-    - Sportsbook rankings by vig
-    - Top +EV bets
-    - Arbitrage opportunities
-    - Stale lines & sharp money movement inferred from staleness
-    - Biggest outliers
-    - Power rankings (market-implied team strength)
+
+@_with_intent
+@mcp.tool()
+def get_market_overview(filename: Optional[str] = None, intent: str = "") -> str:
+    """Lightweight market overview — event count, sports, sportsbooks, vig rankings, hold percentage, sharpness scores.
+
+    Use this for a quick "lay of the land" before drilling into specific opportunities.
+    Only loads book-level metrics — fast and lightweight.
 
     Args:
         filename: Data file to load. Optional.
-
-    Returns a structured JSON summary suitable for Claude to reason about.
     """
-    cache_key = "market_summary"
+    cache_key = "market_overview"
     cached = _cache.get_analysis(filename, cache_key)
     if cached is not None:
         return json.dumps(cached, indent=2)
@@ -2146,28 +2201,12 @@ def get_market_summary(filename: Optional[str] = None) -> str:
         return json.dumps({"error": "No odds data found"})
 
     games = _cache.load_by_game(filename)
-
-    # Basics
     sports = list(set(r.get("sport", "Unknown") for r in odds))
     books = list(set(r.get("sportsbook", "Unknown") for r in odds))
 
-    # Get results from other tools (parse the JSON they return)
     vig_data = json.loads(get_vig_analysis(filename))
-    arb_data = json.loads(find_arbitrage_opportunities(filename))
-    ev_data = json.loads(find_expected_value_bets(filename, min_ev_pct=1.0))
-    stale_data = json.loads(detect_stale_lines(filename))
-    outlier_data = json.loads(detect_line_outliers(filename))
-
-    middles_data = json.loads(find_middle_opportunities(filename))
-    fair_odds_data = json.loads(get_fair_odds(filename))
     hold_data = json.loads(get_hold_percentage(filename))
-    power_data = json.loads(get_power_rankings(filename))
-    movement_data = json.loads(infer_odds_movement(filename))
     sharpness_data = json.loads(get_sharpness_scores(filename))
-    correlation_data = json.loads(get_market_correlations(filename))
-    synthetic_data = json.loads(get_synthetic_hold_free_market(filename=filename))
-    entropy_data = json.loads(get_market_entropy(filename=filename))
-    cross_mkt_data = json.loads(find_cross_market_arbitrage(filename))
 
     result = {
         "summary": {
@@ -2180,6 +2219,53 @@ def get_market_summary(filename: Optional[str] = None) -> str:
         "sportsbook_rankings": vig_data.get("sportsbook_rankings", []),
         "best_book": vig_data.get("best_book"),
         "worst_book": vig_data.get("worst_book"),
+        "hold_percentage": {
+            "market_average": hold_data.get("market_average_hold_pct", "N/A"),
+            "lowest_hold": hold_data.get("lowest_hold"),
+            "highest_hold": hold_data.get("highest_hold"),
+            "by_sportsbook": hold_data.get("hold_by_sportsbook", []),
+        },
+        "sharpness_scores": {
+            "benchmark": sharpness_data.get("benchmark_book", "Pinnacle"),
+            "sharpest": sharpness_data.get("sharpest_book"),
+            "softest": sharpness_data.get("softest_book"),
+            "rankings": [
+                {"sportsbook": r["sportsbook"], "score": r["sharpness_score"], "classification": r["classification"]}
+                for r in sharpness_data.get("rankings", [])
+            ],
+        },
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _cache.set_analysis(filename, cache_key, result)
+    return json.dumps(result, indent=2)
+
+
+@_with_intent
+@mcp.tool()
+def get_betting_opportunities(filename: Optional[str] = None, intent: str = "") -> str:
+    """Betting opportunities digest — arbitrage, middles, +EV bets, and cross-market arbitrage.
+
+    Actionable opportunities ranked by profitability. Use this when looking for
+    what to bet on without needing the full market summary.
+
+    Args:
+        filename: Data file to load. Optional.
+    """
+    cache_key = "betting_opportunities"
+    cached = _cache.get_analysis(filename, cache_key)
+    if cached is not None:
+        return json.dumps(cached, indent=2)
+
+    odds = _load_odds(filename)
+    if not odds:
+        return json.dumps({"error": "No odds data found"})
+
+    arb_data = json.loads(find_arbitrage_opportunities(filename))
+    middles_data = json.loads(find_middle_opportunities(filename))
+    ev_data = json.loads(find_expected_value_bets(filename, min_ev_pct=1.0))
+    cross_mkt_data = json.loads(find_cross_market_arbitrage(filename))
+
+    result = {
         "arbitrage_opportunities": {
             "count": arb_data.get("count", 0),
             "top_3": arb_data.get("arbitrage_opportunities", [])[:3],
@@ -2192,6 +2278,42 @@ def get_market_summary(filename: Optional[str] = None) -> str:
             "count": ev_data.get("count", 0),
             "top_5": ev_data.get("ev_bets", [])[:5],
         },
+        "cross_market_arbitrage": {
+            "count": cross_mkt_data.get("count", 0),
+            "breakdown": cross_mkt_data.get("breakdown", {}),
+            "top_3": cross_mkt_data.get("cross_market_opportunities", [])[:3],
+        },
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _cache.set_analysis(filename, cache_key, result)
+    return json.dumps(result, indent=2)
+
+
+@_with_intent
+@mcp.tool()
+def get_line_quality(filename: Optional[str] = None, intent: str = "") -> str:
+    """Line quality analysis — stale lines, outliers, and sharp money movement.
+
+    Identifies which lines are stale, deviate from consensus, or show sharp action.
+    Use this to check line integrity before placing bets.
+
+    Args:
+        filename: Data file to load. Optional.
+    """
+    cache_key = "line_quality"
+    cached = _cache.get_analysis(filename, cache_key)
+    if cached is not None:
+        return json.dumps(cached, indent=2)
+
+    odds = _load_odds(filename)
+    if not odds:
+        return json.dumps({"error": "No odds data found"})
+
+    stale_data = json.loads(detect_stale_lines(filename))
+    outlier_data = json.loads(detect_line_outliers(filename))
+    movement_data = json.loads(infer_odds_movement(filename))
+
+    result = {
         "stale_lines": {
             "count": stale_data.get("count", 0),
             "top_3": stale_data.get("stale_lines", [])[:3],
@@ -2207,13 +2329,40 @@ def get_market_summary(filename: Optional[str] = None) -> str:
             "direction_summary": movement_data.get("sharp_direction_summary", {}),
             "top_3": movement_data.get("odds_movements", [])[:3],
         },
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _cache.set_analysis(filename, cache_key, result)
+    return json.dumps(result, indent=2)
+
+
+@_with_intent
+@mcp.tool()
+def get_advanced_analytics(filename: Optional[str] = None, intent: str = "") -> str:
+    """Advanced market analytics — fair odds, power rankings, correlations, entropy, synthetic hold-free market.
+
+    Deeper structural analysis of market efficiency and team strength.
+    Use this for research and modeling rather than immediate betting decisions.
+
+    Args:
+        filename: Data file to load. Optional.
+    """
+    cache_key = "advanced_analytics"
+    cached = _cache.get_analysis(filename, cache_key)
+    if cached is not None:
+        return json.dumps(cached, indent=2)
+
+    odds = _load_odds(filename)
+    if not odds:
+        return json.dumps({"error": "No odds data found"})
+
+    fair_odds_data = json.loads(get_fair_odds(filename))
+    power_data = json.loads(get_power_rankings(filename))
+    correlation_data = json.loads(get_market_correlations(filename))
+    entropy_data = json.loads(get_market_entropy(filename=filename))
+    synthetic_data = json.loads(get_synthetic_hold_free_market(filename=filename))
+
+    result = {
         "fair_odds_consensus": fair_odds_data.get("games", [])[:3],
-        "hold_percentage": {
-            "market_average": hold_data.get("market_average_hold_pct", "N/A"),
-            "lowest_hold": hold_data.get("lowest_hold"),
-            "highest_hold": hold_data.get("highest_hold"),
-            "by_sportsbook": hold_data.get("hold_by_sportsbook", []),
-        },
         "power_rankings": {
             "total_teams": power_data.get("total_teams", 0),
             "top_5": [
@@ -2223,15 +2372,6 @@ def get_market_summary(filename: Optional[str] = None) -> str:
             "bottom_5": [
                 {"rank": r["rank"], "team": r["team"], "strength": r["strength_pct"], "tier": r["tier"]}
                 for r in power_data.get("power_rankings", [])[-5:]
-            ],
-        },
-        "sharpness_scores": {
-            "benchmark": sharpness_data.get("benchmark_book", "Pinnacle"),
-            "sharpest": sharpness_data.get("sharpest_book"),
-            "softest": sharpness_data.get("softest_book"),
-            "rankings": [
-                {"sportsbook": r["sportsbook"], "score": r["sharpness_score"], "classification": r["classification"]}
-                for r in sharpness_data.get("rankings", [])
             ],
         },
         "market_correlations": {
@@ -2256,20 +2396,15 @@ def get_market_summary(filename: Optional[str] = None) -> str:
             "by_market_type": synthetic_data.get("aggregate", {}).get("by_market_type", {}),
             "top_3_games": synthetic_data.get("games", [])[:3],
         },
-        "cross_market_arbitrage": {
-            "count": cross_mkt_data.get("count", 0),
-            "breakdown": cross_mkt_data.get("breakdown", {}),
-            "top_3": cross_mkt_data.get("cross_market_opportunities", [])[:3],
-        },
-        "context": "Full market summary with sportsbook rankings, hold percentage, arb opportunities (same-market + cross-market), middles, +EV bets, stale lines, sharp money movement, outliers (odds + line), fair odds, power rankings, sharpness scores, market correlations, entropy-based market efficiency, and synthetic hold-free market. Drill into specific tools for more detail.",
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
     _cache.set_analysis(filename, cache_key, result)
     return json.dumps(result, indent=2)
 
 
+@_with_intent
 @mcp.tool()
-def calculate_odds(american_odds: int) -> str:
+def calculate_odds(american_odds: int, intent: str = "") -> str:
     """Convert American odds to implied probability, decimal odds, and potential payout.
 
     Useful as a quick calculator for understanding any odds number.
@@ -2306,8 +2441,9 @@ def calculate_odds(american_odds: int) -> str:
 # ── Basic Arithmetic Tools ──────────────────────────────────────────────
 
 
+@_with_intent
 @mcp.tool()
-def arithmetic_add(a: float, b: float) -> str:
+def arithmetic_add(a: float, b: float, intent: str = "") -> str:
     """Add two numbers together.
 
     Use this for any addition calculation — bankroll totals, combined payouts,
@@ -2327,8 +2463,9 @@ def arithmetic_add(a: float, b: float) -> str:
     }, indent=2)
 
 
+@_with_intent
 @mcp.tool()
-def arithmetic_subtract(a: float, b: float) -> str:
+def arithmetic_subtract(a: float, b: float, intent: str = "") -> str:
     """Subtract b from a (a - b).
 
     Use this for differences — edge calculations, line movement deltas,
@@ -2348,8 +2485,9 @@ def arithmetic_subtract(a: float, b: float) -> str:
     }, indent=2)
 
 
+@_with_intent
 @mcp.tool()
-def arithmetic_multiply(a: float, b: float) -> str:
+def arithmetic_multiply(a: float, b: float, intent: str = "") -> str:
     """Multiply two numbers (a × b).
 
     Use this for scaling — bet sizing from percentages, payout calculations,
@@ -2369,8 +2507,9 @@ def arithmetic_multiply(a: float, b: float) -> str:
     }, indent=2)
 
 
+@_with_intent
 @mcp.tool()
-def arithmetic_divide(a: float, b: float) -> str:
+def arithmetic_divide(a: float, b: float, intent: str = "") -> str:
     """Divide a by b (a ÷ b).
 
     Use this for ratios — vig as percentage, odds conversion, ROI,
@@ -2398,8 +2537,9 @@ def arithmetic_divide(a: float, b: float) -> str:
     }, indent=2)
 
 
+@_with_intent
 @mcp.tool()
-def arithmetic_modulo(a: float, b: float) -> str:
+def arithmetic_modulo(a: float, b: float, intent: str = "") -> str:
     """Calculate the remainder of a ÷ b (a % b).
 
     Use this for remainder / modulus operations — checking divisibility,
@@ -2427,8 +2567,9 @@ def arithmetic_modulo(a: float, b: float) -> str:
     }, indent=2)
 
 
+@_with_intent
 @mcp.tool()
-def arithmetic_evaluate(expression: str) -> str:
+def arithmetic_evaluate(expression: str, intent: str = "") -> str:
     """Evaluate a multi-step arithmetic expression safely.
 
     Supports: +, -, *, /, %, parentheses, and decimal numbers.
@@ -2475,8 +2616,9 @@ def arithmetic_evaluate(expression: str) -> str:
 
 #
 
+@_with_intent
 @mcp.tool()
-def get_kelly_sizing(game_id: Optional[str] = None, filename: Optional[str] = None, kelly_fraction: float = 0.25, bankroll: float = 1000.0) -> str:
+def get_kelly_sizing(game_id: Optional[str] = None, filename: Optional[str] = None, kelly_fraction: float = 0.25, bankroll: float = 1000.0, intent: str = "") -> str:
     """Calculate Kelly Criterion bet sizing for every +EV opportunity.
 
     Uses Pinnacle's no-vig odds as the "true" probability baseline (falls back
@@ -2588,15 +2730,14 @@ def get_kelly_sizing(game_id: Optional[str] = None, filename: Optional[str] = No
 
 
 
+@_with_intent
 @mcp.tool()
-def simulate_bankroll_kelly(
-    filename: Optional[str] = None,
+def simulate_bankroll_kelly(filename: Optional[str] = None,
     bankroll: float = 1000.0,
     kelly_fraction: float = 0.5,
     min_ev_pct: float = 0.0,
     max_bet_pct: float = 10.0,
-    num_simulations: int = 1000,
-) -> str:
+    num_simulations: int = 1000, intent: str = "") -> str:
     """Run a full bankroll management simulation using fractional Kelly across all games.
 
     For every +EV opportunity found across all games, this tool calculates
@@ -3002,8 +3143,9 @@ def _compact_entropy_result(result: dict) -> dict:
     return compacted
 
 
+@_with_intent
 @mcp.tool()
-def get_market_entropy(game_id: Optional[str] = None, filename: Optional[str] = None) -> str:
+def get_market_entropy(game_id: Optional[str] = None, filename: Optional[str] = None, intent: str = "") -> str:
     """Measure market efficiency via Shannon entropy of implied probabilities across books.
 
     For each game and market, collects the implied probability each sportsbook
@@ -3204,8 +3346,9 @@ def get_market_entropy(game_id: Optional[str] = None, filename: Optional[str] = 
 # ═══════════════════════════════════════════════════════════════════════════
 
 
+@_with_intent
 @mcp.tool()
-def get_best_bets_today(filename: Optional[str] = None, count: int = 10) -> str:
+def get_best_bets_today(filename: Optional[str] = None, count: int = 10, intent: str = "") -> str:
     """Get the top-N best bets right now, ranked by a composite value score, with Kelly bet sizing.
 
     Combines +EV edge (using Pinnacle no-vig as true probability), low vig,
@@ -3374,8 +3517,9 @@ def get_best_bets_today(filename: Optional[str] = None, count: int = 10) -> str:
     return json.dumps(result, indent=2)
 
 
+@_with_intent
 @mcp.tool()
-def find_middle_opportunities(filename: Optional[str] = None) -> str:
+def find_middle_opportunities(filename: Optional[str] = None, intent: str = "") -> str:
     """Find middling opportunities where spread/total lines differ enough across books
     that you could bet both sides and potentially win BOTH bets.
 
@@ -3491,8 +3635,9 @@ def find_middle_opportunities(filename: Optional[str] = None) -> str:
     return json.dumps(result, indent=2)
 
 
+@_with_intent
 @mcp.tool()
-def get_book_rankings(filename: Optional[str] = None) -> str:
+def get_book_rankings(filename: Optional[str] = None, intent: str = "") -> str:
     """Rank sportsbooks across multiple quality metrics — a comprehensive book report card.
 
     Metrics scored:
@@ -3622,10 +3767,9 @@ def get_book_rankings(filename: Optional[str] = None) -> str:
     return json.dumps(result, indent=2)
 
 
+@_with_intent
 @mcp.tool()
-def get_implied_scores(
-    game_id: Optional[str] = None, filename: Optional[str] = None
-) -> str:
+def get_implied_scores(game_id: Optional[str] = None, filename: Optional[str] = None, intent: str = "") -> str:
     """Estimate implied final scores for each team by combining spread and total.
 
     Formula:
@@ -3807,8 +3951,9 @@ def get_implied_scores(
     return json.dumps(result, indent=2)
 
 
+@_with_intent
 @mcp.tool()
-def get_daily_digest(filename: Optional[str] = None) -> str:
+def get_daily_digest(filename: Optional[str] = None, intent: str = "") -> str:
     """Generate a structured daily digest optimized for Claude to reason about.
 
     Organized into clear sections: must-bet opportunities, lines to avoid,
@@ -3825,8 +3970,10 @@ def get_daily_digest(filename: Optional[str] = None) -> str:
     if cached is not None:
         return json.dumps(cached, indent=2)
 
-    # Gather data from other tools (these will hit cache after first call)
-    summary_data = json.loads(get_market_summary(filename))
+    # Gather data from focused sub-summary tools (these will hit cache after first call)
+    overview_data = json.loads(get_market_overview(filename))
+    line_quality_data = json.loads(get_line_quality(filename))
+    opps_data = json.loads(get_betting_opportunities(filename))
     best_bets_data = json.loads(get_best_bets_today(filename, count=5))
     middles_data = json.loads(find_middle_opportunities(filename))
     rankings_data = json.loads(get_book_rankings(filename))
@@ -3836,11 +3983,11 @@ def get_daily_digest(filename: Optional[str] = None) -> str:
 
     # Build lookup sets for cross-referencing stale lines, outliers, and sharp movement
     stale_keys = set()
-    for stale in summary_data.get("stale_lines", {}).get("top_3", []):
+    for stale in line_quality_data.get("stale_lines", {}).get("top_3", []):
         stale_keys.add((stale.get("game_id"), stale.get("sportsbook")))
 
     outlier_lookup = {}
-    for outlier in summary_data.get("outliers", {}).get("top_3", []):
+    for outlier in line_quality_data.get("outliers", {}).get("top_3", []):
         key = (outlier.get("game_id"), outlier.get("sportsbook"), outlier.get("market_type"), outlier.get("side"))
         outlier_lookup[key] = outlier
 
@@ -3911,12 +4058,12 @@ def get_daily_digest(filename: Optional[str] = None) -> str:
             })
 
     avoid = []
-    for stale in summary_data.get("stale_lines", {}).get("top_3", []):
+    for stale in line_quality_data.get("stale_lines", {}).get("top_3", []):
         avoid.append({
             "action": f"Avoid {stale['sportsbook']} for {stale.get('away_team', '?')} @ {stale.get('home_team', '?')}",
             "reason": f"Line is {stale.get('staleness_minutes', 0)} minutes stale",
         })
-    for outlier in summary_data.get("outliers", {}).get("top_3", []):
+    for outlier in line_quality_data.get("outliers", {}).get("top_3", []):
         if outlier.get("direction") == "worse_for_bettor":
             avoid.append({
                 "action": f"Avoid {outlier['sportsbook']} {outlier['side']} {outlier['market_type']}",
@@ -3925,7 +4072,7 @@ def get_daily_digest(filename: Optional[str] = None) -> str:
             })
 
     interesting = []
-    for arb in summary_data.get("arbitrage_opportunities", {}).get("top_3", []):
+    for arb in opps_data.get("arbitrage_opportunities", {}).get("top_3", []):
         interesting.append({
             "type": "arbitrage",
             "description": arb.get("context", ""),
@@ -3967,8 +4114,8 @@ def get_daily_digest(filename: Optional[str] = None) -> str:
     result = {
         "digest": {
             "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-            "games_covered": summary_data.get("summary", {}).get("unique_games", 0),
-            "books_covered": summary_data.get("summary", {}).get("sportsbook_count", 0),
+            "games_covered": overview_data.get("summary", {}).get("unique_games", 0),
+            "books_covered": overview_data.get("summary", {}).get("sportsbook_count", 0),
         },
         "must_bet": must_bet,
         "avoid": avoid,
@@ -3993,15 +4140,16 @@ def get_daily_digest(filename: Optional[str] = None) -> str:
             {"rank": r["rank"], "team": r["team"], "strength": r["strength_pct"], "tier": r["tier"]}
             for r in power_data.get("power_rankings", [])
         ],
-        "context": f"Daily digest: {len(must_bet)} must-bet opps, {len(avoid)} lines to avoid, {len(interesting)} interesting situations, sharp movement on {movement_data.get('count', 0)} lines across {summary_data.get('summary', {}).get('unique_games', 0)} games.",
+        "context": f"Daily digest: {len(must_bet)} must-bet opps, {len(avoid)} lines to avoid, {len(interesting)} interesting situations, sharp movement on {movement_data.get('count', 0)} lines across {overview_data.get('summary', {}).get('unique_games', 0)} games.",
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
     _cache.set_analysis(filename, cache_key, result)
     return json.dumps(result, indent=2)
 
 
+@_with_intent
 @mcp.tool()
-def get_power_rankings(filename: Optional[str] = None) -> str:
+def get_power_rankings(filename: Optional[str] = None, intent: str = "") -> str:
     """Derive implied team strength ratings from moneyline odds and rank all teams.
 
     Aggregates each team's no-vig (fair) moneyline win probability across every
@@ -4137,8 +4285,9 @@ def get_power_rankings(filename: Optional[str] = None) -> str:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
+@_with_intent
 @mcp.tool()
-def get_sharpness_scores(filename: Optional[str] = None, benchmark_book: str = "Pinnacle") -> str:
+def get_sharpness_scores(filename: Optional[str] = None, benchmark_book: str = "Pinnacle", intent: str = "") -> str:
     """Score each sportsbook's sharpness by how closely their lines track a benchmark sharp book (default: Pinnacle).
 
     Pinnacle is widely considered the sharpest book -- their lines are set by
@@ -4347,8 +4496,9 @@ def get_sharpness_scores(filename: Optional[str] = None, benchmark_book: str = "
     return json.dumps(result, indent=2)
 
 
+@_with_intent
 @mcp.tool()
-def get_market_correlations(game_id: Optional[str] = None, filename: Optional[str] = None) -> str:
+def get_market_correlations(game_id: Optional[str] = None, filename: Optional[str] = None, intent: str = "") -> str:
     """Analyze correlations between spread, moneyline, and total markets across sportsbooks.
 
     Checks whether a book's pricing is internally consistent:
@@ -4538,8 +4688,9 @@ def get_market_correlations(game_id: Optional[str] = None, filename: Optional[st
 
 
 
+@_with_intent
 @mcp.tool()
-def get_synthetic_hold_free_market(game_id: Optional[str] = None, filename: Optional[str] = None) -> str:
+def get_synthetic_hold_free_market(game_id: Optional[str] = None, filename: Optional[str] = None, intent: str = "") -> str:
     """Build a synthetic "perfect book" by combining the best available odds across all sportsbooks for every side of every market.
 
     For each game and market, picks the highest (best-for-bettor) odds offered
@@ -4751,8 +4902,9 @@ def get_synthetic_hold_free_market(game_id: Optional[str] = None, filename: Opti
 # ═══════════════════════════════════════════════════════════════════════════
 
 
+@_with_intent
 @mcp.tool()
-def get_sportsbook_clusters(filename: Optional[str] = None) -> str:
+def get_sportsbook_clusters(filename: Optional[str] = None, intent: str = "") -> str:
     """Cluster sportsbooks by how similarly they price lines across all games.
 
     Groups books that consistently post near-identical odds — revealing which
@@ -5064,11 +5216,10 @@ def get_sportsbook_clusters(filename: Optional[str] = None) -> str:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
+@_with_intent
 @mcp.tool()
-def get_sportsbook_correlation_network(
-    market_type: Optional[str] = None,
-    filename: Optional[str] = None,
-) -> str:
+def get_sportsbook_correlation_network(market_type: Optional[str] = None,
+    filename: Optional[str] = None, intent: str = "") -> str:
     """Build a Pearson correlation matrix showing how closely each pair of sportsbooks tracks each other.
 
     For every pair of sportsbooks, computes the Pearson correlation of their
@@ -5605,10 +5756,11 @@ def _compute_game_integrity_score(all_market_anomalies: list[dict]) -> dict:
     }
 
 
+@_with_intent
 @mcp.tool()
 def get_odds_shape_analysis(game_id: Optional[str] = None,
                             filename: Optional[str] = None,
-                            stdev_threshold: float = 1.8) -> str:
+                            stdev_threshold: float = 1.8, intent: str = "") -> str:
     """Visualize odds across all sportsbooks as heatmaps and detect abnormal shapes.
 
     Converts each game's odds across all 8 sportsbooks into an ASCII heatmap
@@ -6032,11 +6184,10 @@ def _gamlss_analyze_game_market(records: list[dict], market_type: str) -> dict |
     }
 
 
+@_with_intent
 @mcp.tool()
-def get_gamlss_analysis(
-    game_id: Optional[str] = None,
-    filename: Optional[str] = None,
-) -> str:
+def get_gamlss_analysis(game_id: Optional[str] = None,
+    filename: Optional[str] = None, intent: str = "") -> str:
     """Apply GAMLSS (Generalized Additive Model for Location, Scale, Shape) to odds distributions.
 
     Standard anomaly detection assumes odds are normally distributed across
@@ -6181,12 +6332,11 @@ def get_gamlss_analysis(
 
 
 
+@_with_intent
 @mcp.tool()
-def get_zscore_anomalies(
-    game_id: Optional[str] = None,
+def get_zscore_anomalies(game_id: Optional[str] = None,
     filename: Optional[str] = None,
-    z_threshold: float = 2.0,
-) -> str:
+    z_threshold: float = 2.0, intent: str = "") -> str:
     """Detect anomalous odds using z-score analysis across sportsbooks.
 
     For each game's market (spread, moneyline, total), computes the mean and
@@ -6350,8 +6500,9 @@ def get_zscore_anomalies(
     return json.dumps(result, indent=2)
 
 
+@_with_intent
 @mcp.tool()
-def find_cross_market_arbitrage(filename: Optional[str] = None, min_edge_pct: float = 0.0) -> str:
+def find_cross_market_arbitrage(filename: Optional[str] = None, min_edge_pct: float = 0.0, intent: str = "") -> str:
     """Find arbitrage opportunities ACROSS different market types at different sportsbooks.
 
     Unlike standard arbitrage (which compares the same market across books), this
@@ -6922,15 +7073,14 @@ def _isolation_forest_scores(
     return scores
 
 
+@_with_intent
 @mcp.tool()
-def detect_knn_anomalies(
-    game_id: Optional[str] = None,
+def detect_knn_anomalies(game_id: Optional[str] = None,
     filename: Optional[str] = None,
     k: int = 5,
     n_trees: int = 100,
     top_n: int = 15,
-    anomaly_percentile: float = 80.0,
-) -> str:
+    anomaly_percentile: float = 80.0, intent: str = "") -> str:
     """Unsupervised anomaly detection using KNN distance + Isolation Forest on odds records.
 
     Extracts a 10-dimensional feature vector from each odds record and applies
@@ -7268,13 +7418,12 @@ def _get_bayesian_fair_probs(
     return result
 
 
+@_with_intent
 @mcp.tool()
-def get_bayesian_probabilities(
-    game_id: Optional[str] = None,
+def get_bayesian_probabilities(game_id: Optional[str] = None,
     prior_kappa: float = 20.0,
     evidence_kappa: float = 5.0,
-    filename: Optional[str] = None,
-) -> str:
+    filename: Optional[str] = None, intent: str = "") -> str:
     """Bayesian updating of true probabilities — starts with Pinnacle's no-vig
     line as a Beta prior and sequentially updates with each sportsbook's odds.
 
@@ -7430,12 +7579,11 @@ def get_bayesian_probabilities(
 # ═══════════════════════════════════════════════════════════════════════════
 
 
+@_with_intent
 @mcp.tool()
-def get_closing_line_value(
-    game_id: Optional[str] = None,
+def get_closing_line_value(game_id: Optional[str] = None,
     filename: Optional[str] = None,
-    closing_window_minutes: int = 15,
-) -> str:
+    closing_window_minutes: int = 15, intent: str = "") -> str:
     """Simulate Closing Line Value (CLV) analysis using last_updated timestamps.
 
     Consistently beating the closing line is the #1 indicator of a sharp bettor.
@@ -7682,13 +7830,12 @@ def get_closing_line_value(
 # ═══════════════════════════════════════════════════════════════════════════
 
 
+@_with_intent
 @mcp.tool()
-def get_shin_fair_odds(
-    game_id: str = "",
+def get_shin_fair_odds(game_id: str = "",
     market_type: str = "",
     sportsbook: str = "",
-    filename: str = "",
-) -> str:
+    filename: str = "", intent: str = "") -> str:
     """Decompose bookmaker margins using the Shin model (asymmetric vig allocation).
 
     Instead of splitting vig equally across both sides (naive proportional method),
@@ -7886,12 +8033,11 @@ def get_shin_fair_odds(
     return json.dumps(result, indent=2)
 
 
+@_with_intent
 @mcp.tool()
-def get_odds_elasticity(
-    game_id: Optional[str] = None,
+def get_odds_elasticity(game_id: Optional[str] = None,
     market_type: Optional[str] = None,
-    filename: Optional[str] = None,
-) -> str:
+    filename: Optional[str] = None, intent: str = "") -> str:
     """Odds Elasticity / Sensitivity Analysis — how much a 0.5-point line
     change impacts odds across sportsbooks.
 
@@ -8137,15 +8283,14 @@ def _build_score_matrix(home_lambda: float, away_lambda: float, max_score: int):
     return matrix, home_pmf, away_pmf
 
 
+@_with_intent
 @mcp.tool()
-def get_poisson_score_predictions(
-    game_id: Optional[str] = None,
+def get_poisson_score_predictions(game_id: Optional[str] = None,
     max_score: Optional[int] = None,
     top_n_scores: int = 15,
     alt_spreads: Optional[str] = None,
     alt_totals: Optional[str] = None,
-    filename: Optional[str] = None,
-) -> str:
+    filename: Optional[str] = None, intent: str = "") -> str:
     """Poisson model for score prediction -- derive every possible final-score probability
     from the consensus spread and total, then price alternative lines, props, and key numbers.
 
@@ -8717,11 +8862,10 @@ def _compute_information_flow(
     }
 
 
+@_with_intent
 @mcp.tool()
-def get_information_flow(
-    game_id: Optional[str] = None,
-    filename: Optional[str] = None,
-) -> str:
+def get_information_flow(game_id: Optional[str] = None,
+    filename: Optional[str] = None, intent: str = "") -> str:
     """Map information flow across sportsbooks using last_updated timestamps.
 
     Determines which sportsbook updates first (market leader / sharpest) and
