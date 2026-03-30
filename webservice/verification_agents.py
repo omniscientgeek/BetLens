@@ -158,17 +158,41 @@ def _parse_agent_response(raw_text: str, agent_name: str) -> dict:
     }
 
 
+def _smart_truncate(result_str: str, max_chars: int) -> str:
+    """Truncate a tool result string, preserving JSON ``summary`` if present.
+
+    Many MCP tools (GAMLSS, KNN, Poisson, etc.) return large JSON payloads
+    but include a compact ``summary`` key with the verifiable numbers.  When
+    the full result exceeds *max_chars*, we try to extract and keep just the
+    summary so audit agents can still verify claims against it.
+    """
+    if len(result_str) <= max_chars:
+        return result_str
+    # Try to parse and preserve the summary section
+    try:
+        data = json.loads(result_str)
+        if isinstance(data, dict) and "summary" in data:
+            summary = json.dumps({"summary": data["summary"]}, indent=2)
+            if len(summary) <= max_chars:
+                return summary + "\n... [full result truncated, summary preserved]"
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return result_str[:max_chars] + "\n... [truncated]"
+
+
 def _truncate_tool_results(tool_calls: list, max_result_len: int = 4000) -> list:
     """Truncate tool call results to keep payload sizes reasonable.
 
     Default limit lowered from 8000 to 4000 chars — audit agents receive
     pre-fetched reference data so individual tool results need less detail.
+    Uses summary-aware truncation so large results (e.g. GAMLSS) keep their
+    verifiable summary section.
     """
     truncated = []
     for tc in tool_calls:
         entry = {**tc}
         if isinstance(entry.get("result"), str) and len(entry["result"]) > max_result_len:
-            entry["result"] = entry["result"][:max_result_len] + "\n... [truncated]"
+            entry["result"] = _smart_truncate(entry["result"], max_result_len)
         truncated.append(entry)
     return truncated
 
@@ -177,23 +201,20 @@ def _truncate_tool_results(tool_calls: list, max_result_len: int = 4000) -> list
 # Reference data extraction — pre-fetch tool results to avoid duplicate calls
 # ---------------------------------------------------------------------------
 
-# MCP tool names that audit agents most frequently call (called 5-7× each
-# across the 6 audit agents in the last run).  We extract their results from
-# the analyze conversation's tool_calls so agents can verify claims directly
-# without making redundant MCP round-trips.
-_REFERENCE_TOOL_NAMES = {
-    "find_expected_value_bets",
-    "find_arbitrage_opportunities",
-    "get_vig_analysis",
-    "detect_stale_lines",
-    "get_book_rankings",
-    "get_market_entropy",
-    "find_middle_opportunities",
-    "detect_line_outliers",
-    "get_kelly_sizing",
-    "get_best_bets_today",
-    "get_fair_odds",
-    "get_odds_comparison",
+# MCP tool names to EXCLUDE from reference data extraction.
+# All other successful MCP tool results from the analyze phase are automatically
+# included as reference data for audit agents.  This ensures tools like
+# get_gamlss_analysis, detect_knn_anomalies, get_poisson_score_predictions, etc.
+# are available for verification without requiring manual updates here.
+_REFERENCE_TOOL_EXCLUDE = {
+    "arithmetic_add",
+    "arithmetic_subtract",
+    "arithmetic_multiply",
+    "arithmetic_divide",
+    "arithmetic_modulo",
+    "arithmetic_evaluate",
+    "list_data_files",
+    "calculate_odds",
 }
 
 # Max chars per reference tool result — keeps total reference block manageable
@@ -204,12 +225,16 @@ def build_reference_data(
     tool_calls: list[dict],
     max_chars_per_tool: int = _REF_MAX_CHARS,
 ) -> str:
-    """Extract commonly-needed MCP tool results from a prior conversation.
+    """Extract MCP tool results from a prior conversation for audit reference.
 
     Scans the ``tool_calls`` list (from the analyze phase conversation) and
-    collects the FIRST successful result for each tool in _REFERENCE_TOOL_NAMES.
-    Results are truncated to ``max_chars_per_tool`` to keep the reference block
-    compact.
+    collects the FIRST successful result for every MCP tool **not** in
+    ``_REFERENCE_TOOL_EXCLUDE``.  This is dynamic — any new tool the analyze
+    phase calls (GAMLSS, KNN, Poisson, Shin, etc.) is automatically available
+    as reference data without code changes.
+
+    Large results are smart-truncated: the ``summary`` JSON key is preserved
+    when possible so audit agents can still verify aggregate numbers.
 
     Returns a formatted string suitable for inclusion in audit agent prompts.
     """
@@ -220,7 +245,7 @@ def build_reference_data(
         # Strip MCP namespace prefix: "mcp__betstamp-intelligence__tool_name" → "tool_name"
         short_name = raw_name.split("__")[-1] if "__" in raw_name else raw_name
 
-        if short_name not in _REFERENCE_TOOL_NAMES:
+        if short_name in _REFERENCE_TOOL_EXCLUDE:
             continue
         if short_name in collected:
             continue  # keep first (analyze phase result, not a retry)
@@ -232,8 +257,7 @@ def build_reference_data(
             result = json.dumps(result, separators=(",", ":"))
         result = str(result)
 
-        if len(result) > max_chars_per_tool:
-            result = result[:max_chars_per_tool] + "\n... [truncated]"
+        result = _smart_truncate(result, max_chars_per_tool)
 
         collected[short_name] = result
 
@@ -281,6 +305,9 @@ CHECKLIST:
 3. Comparison validity — "X better than Y" claims match odds data
 4. Contradiction detection — recommendations vs risk flags are consistent
 5. Confidence alignment — confidence ratings match actual edge sizes
+6. Staleness-confidence alignment — HIGH confidence ratings must not apply to bets \
+   using lines identified as stale (>30 min old). Flag any HIGH confidence + stale \
+   line combination as a logical contradiction.
 
 Each issue MUST cite specific data evidence. Do NOT evaluate betting strategy \
 (another agent handles that). Do NOT flag issues based on suspicion alone.
@@ -319,11 +346,24 @@ PRIORITY ORDER (most error-prone first):
 3. Kelly sizing — verify against get_kelly_sizing / get_best_bets_today data.
 4. All remaining claims (odds, vig, rankings, staleness, etc.).
 
+TOOL CALL POLICY: If a claim references data from an MCP tool NOT in the \
+reference data (e.g., get_gamlss_analysis, detect_knn_anomalies, \
+get_poisson_score_predictions, get_shin_fair_odds, get_information_flow), \
+you MUST call that tool to verify. NEVER mark a claim as "cannot verify" \
+without attempting the tool call first. For large results, focus on the \
+"summary" section which contains the aggregate numbers.
+
 ACCURACY THRESHOLDS:
 - Odds: >3 pts = error, 1-3 = warning
 - EV/Vig %: >0.5% = error, 0.1-0.5% = warning
 - Arb profit: >1% = error, 0.1-1% = warning
 - Wrong sportsbook or direction = always error
+
+LINE SHOPPING GAPS: The brief uses "gap_pct" (implied probability edge) from \
+pre-computed line_shopping_pairs. Do NOT verify gaps by subtracting American odds \
+(e.g., +165 minus -121 = 286 is INVALID — American odds are non-linear). Instead, \
+verify gap_pct = (1 - combined_implied_prob) * 100. If the brief reports a "%  \
+implied edge" value, check it against the pre-computed line_shopping_pairs data.
 
 Each issue MUST cite specific data evidence. Do NOT evaluate strategy or logic \
 (other agents handle those).
