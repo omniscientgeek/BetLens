@@ -52,7 +52,7 @@ A standalone MCP server (`mcp-server/mcp_server.py`) that exposes betting intell
 
 **Run manually:** `python mcp-server/mcp_server.py`
 
-### Available MCP Tools (40 total)
+### Available MCP Tools (49 total)
 
 | Tool | Purpose |
 |------|---------|
@@ -69,7 +69,10 @@ A standalone MCP server (`mcp-server/mcp_server.py`) that exposes betting intell
 | `infer_odds_movement` | Compare stale vs fresh odds to infer sharp money direction (e.g., spread moved -4.5→-5.5 = sharps on favorite) |
 | `detect_line_outliers` | Odds AND lines that deviate significantly from consensus (spread/total line + odds outliers) |
 | `get_fair_odds` | Consensus no-vig "true" probability baseline per game/market — compare books against this |
-| `get_market_summary` | Full digest — start here for an overview (includes middles, fair odds, outliers) |
+| `get_market_overview` | Lightweight overview: event count, sports, books, vig rankings, hold, sharpness — start here |
+| `get_betting_opportunities` | Betting opportunities digest: arb, middles, +EV bets, cross-market arb |
+| `get_line_quality` | Line quality analysis: stale lines, outliers, sharp money movement |
+| `get_advanced_analytics` | Advanced analytics: fair odds, power rankings, correlations, entropy, synthetic hold-free |
 | `calculate_odds` | Quick calculator: American odds → probability, decimal, payout |
 | `get_best_bets_today` | Top-N ranked bets by composite score with Kelly bet sizing (EV + outlier + vig + freshness) |
 | `get_kelly_sizing` | Kelly Criterion bet sizing for all +EV opportunities — uses Pinnacle no-vig as true probability |

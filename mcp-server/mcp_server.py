@@ -1480,7 +1480,7 @@ def find_arbitrage_opportunities(filename: Optional[str] = None, min_profit_pct:
 
 @_with_intent
 @mcp.tool()
-def find_expected_value_bets(filename: Optional[str] = None, min_ev_pct: float = 0.0, intent: str = "") -> str:
+def find_expected_value_bets(filename: Optional[str] = None, min_ev_pct: float = 0.0, top_n: int = 25, intent: str = "") -> str:
     """Find +EV (positive expected value) bets with Kelly Criterion bet sizing.
 
     Uses Pinnacle's no-vig odds as the "true" probability reference (falls back
@@ -1493,10 +1493,11 @@ def find_expected_value_bets(filename: Optional[str] = None, min_ev_pct: float =
     Args:
         filename: Data file to load. Optional.
         min_ev_pct: Minimum EV % to report (default 0). E.g., 2.0 = only bets with 2%+ edge.
+        top_n: Maximum number of bets to return. Default 25. Set to 0 for all.
 
     Returns all +EV bets sorted by expected value, with Kelly bet sizing.
     """
-    cache_key = f"ev:{min_ev_pct}"
+    cache_key = f"ev:{min_ev_pct}:{top_n}"
     cached = _cache.get_analysis(filename, cache_key)
     if cached is not None:
         return json.dumps(cached, indent=2)
@@ -1580,9 +1581,12 @@ def find_expected_value_bets(filename: Optional[str] = None, min_ev_pct: float =
                         })
 
     ev_bets.sort(key=lambda b: b["ev_edge_pct"], reverse=True)
+    total_found = len(ev_bets)
+    if top_n > 0:
+        ev_bets = ev_bets[:top_n]
     result = {
         "ev_bets": ev_bets,
-        "count": len(ev_bets),
+        "count": total_found, "returned": len(ev_bets),
         "fair_prob_source": "Pinnacle no-vig (preferred) with consensus fallback",
         "kelly_note": "Quarter Kelly (25%) is recommended for most bettors to manage variance. Full Kelly maximizes long-term growth but has high volatility.",
         "context": f"Found {len(ev_bets)} +EV bets with Kelly sizing." + (f" Top: {ev_bets[0]['context']}" if ev_bets else ""),
@@ -1598,7 +1602,7 @@ def find_expected_value_bets(filename: Optional[str] = None, min_ev_pct: float =
 
 @_with_intent
 @mcp.tool()
-def detect_stale_lines(filename: Optional[str] = None, stale_threshold_minutes: int = 30, intent: str = "") -> str:
+def detect_stale_lines(filename: Optional[str] = None, stale_threshold_minutes: int = 30, top_n: int = 20, intent: str = "") -> str:
     """Detect sportsbook lines that haven't been updated recently (potentially stale).
 
     Stale lines may represent value opportunities if other books have moved.
@@ -1606,10 +1610,11 @@ def detect_stale_lines(filename: Optional[str] = None, stale_threshold_minutes: 
     Args:
         filename: Data file to load. Optional.
         stale_threshold_minutes: How old a line must be (vs the newest for that game) to be considered stale. Default 30 minutes.
+        top_n: Maximum number of stale lines to return. Default 20. Set to 0 for all.
 
     Returns records where last_updated is significantly older than peers.
     """
-    cache_key = f"stale:{stale_threshold_minutes}"
+    cache_key = f"stale:{stale_threshold_minutes}:{top_n}"
     cached = _cache.get_analysis(filename, cache_key)
     if cached is not None:
         return json.dumps(cached, indent=2)
@@ -1653,9 +1658,12 @@ def detect_stale_lines(filename: Optional[str] = None, stale_threshold_minutes: 
                 })
 
     stale.sort(key=lambda s: s["staleness_minutes"], reverse=True)
+    total_found = len(stale)
+    if top_n > 0:
+        stale = stale[:top_n]
     result = {
         "stale_lines": stale,
-        "count": len(stale),
+        "count": total_found, "returned": len(stale),
         "threshold_minutes": stale_threshold_minutes,
         "context": f"Found {len(stale)} stale lines (>{stale_threshold_minutes} min old)." + (f" Most stale: {stale[0]['context']}" if stale else ""),
     }
@@ -1665,7 +1673,7 @@ def detect_stale_lines(filename: Optional[str] = None, stale_threshold_minutes: 
 
 @_with_intent
 @mcp.tool()
-def infer_odds_movement(filename: Optional[str] = None, stale_threshold_minutes: int = 30, intent: str = "") -> str:
+def infer_odds_movement(filename: Optional[str] = None, stale_threshold_minutes: int = 30, top_n: int = 20, intent: str = "") -> str:
     """Infer where sharp money moved by comparing stale odds against fresh odds for the same game.
 
     When a sportsbook's line hasn't been updated but other books have moved,
@@ -1681,11 +1689,12 @@ def infer_odds_movement(filename: Optional[str] = None, stale_threshold_minutes:
         filename: Data file to load. Optional.
         stale_threshold_minutes: How old a line must be (vs the freshest for
             that game) to be compared. Default 30 minutes.
+        top_n: Maximum number of movement records to return. Default 20. Set to 0 for all.
 
     Returns inferred movement records sorted by staleness, with sharp-money
     direction labels.
     """
-    cache_key = f"odds_movement:{stale_threshold_minutes}"
+    cache_key = f"odds_movement:{stale_threshold_minutes}:{top_n}"
     cached = _cache.get_analysis(filename, cache_key)
     if cached is not None:
         return json.dumps(cached, indent=2)
@@ -1864,6 +1873,9 @@ def infer_odds_movement(filename: Optional[str] = None, stale_threshold_minutes:
                 })
 
     movements.sort(key=lambda m: m["staleness_minutes"], reverse=True)
+    total_found = len(movements)
+    if top_n > 0:
+        movements = movements[:top_n]
 
     # Summary stats
     sharp_counts: dict[str, int] = {}
@@ -1873,7 +1885,7 @@ def infer_odds_movement(filename: Optional[str] = None, stale_threshold_minutes:
 
     result = {
         "odds_movements": movements,
-        "count": len(movements),
+        "count": total_found, "returned": len(movements),
         "sharp_direction_summary": sharp_counts,
         "threshold_minutes": stale_threshold_minutes,
         "methodology": (
@@ -1894,7 +1906,7 @@ def infer_odds_movement(filename: Optional[str] = None, stale_threshold_minutes:
 
 @_with_intent
 @mcp.tool()
-def detect_line_outliers(filename: Optional[str] = None, threshold_odds: int = 15, intent: str = "") -> str:
+def detect_line_outliers(filename: Optional[str] = None, threshold_odds: int = 15, top_n: int = 25, intent: str = "") -> str:
     """Detect odds that are significant outliers compared to the consensus across books.
 
     An outlier is a line that deviates substantially from the average, which
@@ -1903,10 +1915,11 @@ def detect_line_outliers(filename: Optional[str] = None, threshold_odds: int = 1
     Args:
         filename: Data file to load. Optional.
         threshold_odds: Minimum deviation from average (in American odds points) to flag. Default 15.
+        top_n: Maximum number of outliers to return. Default 25. Set to 0 for all.
 
     Returns all outlier lines with deviation details.
     """
-    cache_key = f"outliers:{threshold_odds}"
+    cache_key = f"outliers:{threshold_odds}:{top_n}"
     cached = _cache.get_analysis(filename, cache_key)
     if cached is not None:
         return json.dumps(cached, indent=2)
@@ -2015,12 +2028,17 @@ def detect_line_outliers(filename: Optional[str] = None, threshold_odds: int = 1
                     })
 
     outliers.sort(key=lambda o: o["deviation"], reverse=True)
+    total_found = len(outliers)
+    total_odds_outliers = len([o for o in outliers if o.get("type") != "line_outlier"])
+    total_line_outliers = len([o for o in outliers if o.get("type") == "line_outlier"])
+    if top_n > 0:
+        outliers = outliers[:top_n]
     result = {
         "outliers": outliers,
-        "count": len(outliers),
+        "count": total_found, "returned": len(outliers),
         "threshold": threshold_odds,
-        "odds_outliers": len([o for o in outliers if o.get("type") != "line_outlier"]),
-        "line_outliers": len([o for o in outliers if o.get("type") == "line_outlier"]),
+        "odds_outliers": total_odds_outliers,
+        "line_outliers": total_line_outliers,
         "context": f"Found {len(outliers)} outlier lines (>{threshold_odds} pts from consensus for odds, >=1 pt for lines)." + (f" Biggest: {outliers[0]['context']}" if outliers else ""),
     }
     _cache.set_analysis(filename, cache_key, result)
@@ -2034,7 +2052,7 @@ def detect_line_outliers(filename: Optional[str] = None, threshold_odds: int = 1
 
 @_with_intent
 @mcp.tool()
-def get_fair_odds(game_id: Optional[str] = None, filename: Optional[str] = None, intent: str = "") -> str:
+def get_fair_odds(game_id: Optional[str] = None, filename: Optional[str] = None, top_n: int = 20, intent: str = "") -> str:
     """Get the consensus no-vig "fair" odds for each game and market.
 
     Removes the vig from each sportsbook's odds, then averages across all
@@ -2045,11 +2063,12 @@ def get_fair_odds(game_id: Optional[str] = None, filename: Optional[str] = None,
     Args:
         game_id: Filter to a specific game. Optional (shows all games).
         filename: Data file to load. Optional.
+        top_n: Maximum number of games to return (sorted by mispricing divergence). Default 20. Set to 0 for all. Ignored when game_id is specified.
 
     Returns consensus fair probabilities, fair American odds, and sharp vs crowd
     divergence data per game per market.
     """
-    cache_key = f"fair_odds:{game_id or 'all'}"
+    cache_key = f"fair_odds:{game_id or 'all'}:{top_n}"
     cached = _cache.get_analysis(filename, cache_key)
     if cached is not None:
         return json.dumps(cached, indent=2)
@@ -2161,9 +2180,25 @@ def get_fair_odds(game_id: Optional[str] = None, filename: Optional[str] = None,
                 })
     mispricing_alerts.sort(key=lambda x: x["divergence_pct"], reverse=True)
 
+
+    total_games = len(fair_odds_list)
+    if not game_id and top_n > 0:
+        # Sort by max mispricing divergence to prioritize interesting games
+        def _max_divergence(game):
+            max_div = 0
+            for mkt_data in game.get("markets", {}).values():
+                svc = mkt_data.get("sharp_vs_crowd", {})
+                div = svc.get("max_divergence_pct", 0)
+                if div > max_div:
+                    max_div = div
+            return max_div
+        fair_odds_list.sort(key=_max_divergence, reverse=True)
+        fair_odds_list = fair_odds_list[:top_n]
+
     result = {
         "games": fair_odds_list,
-        "count": len(fair_odds_list),
+        "count": total_games,
+        "returned": len(fair_odds_list),
         "mispricing_alerts": mispricing_alerts,
         "mispricing_count": len(mispricing_alerts),
         "context": (
@@ -2618,7 +2653,7 @@ def arithmetic_evaluate(expression: str, intent: str = "") -> str:
 
 @_with_intent
 @mcp.tool()
-def get_kelly_sizing(game_id: Optional[str] = None, filename: Optional[str] = None, kelly_fraction: float = 0.25, bankroll: float = 1000.0, intent: str = "") -> str:
+def get_kelly_sizing(game_id: Optional[str] = None, filename: Optional[str] = None, kelly_fraction: float = 0.25, bankroll: float = 1000.0, top_n: int = 25, intent: str = "") -> str:
     """Calculate Kelly Criterion bet sizing for every +EV opportunity.
 
     Uses Pinnacle's no-vig odds as the "true" probability baseline (falls back
@@ -2633,10 +2668,11 @@ def get_kelly_sizing(game_id: Optional[str] = None, filename: Optional[str] = No
         kelly_fraction: Kelly fraction to apply (default 0.25 = quarter Kelly, safest).
                         Common values: 1.0 (full), 0.5 (half), 0.25 (quarter).
         bankroll: Your bankroll in dollars for sizing examples. Default $1,000.
+        top_n: Maximum number of bets to return. Default 25. Set to 0 for all.
 
     Returns all +EV opportunities with Kelly bet sizes, sorted by recommended wager.
     """
-    cache_key = f"kelly:{game_id or 'all'}:{kelly_fraction}:{bankroll}"
+    cache_key = f"kelly:{game_id or 'all'}:{kelly_fraction}:{bankroll}:{top_n}"
     cached = _cache.get_analysis(filename, cache_key)
     if cached is not None:
         return json.dumps(cached, indent=2)
@@ -2709,11 +2745,14 @@ def get_kelly_sizing(game_id: Optional[str] = None, filename: Optional[str] = No
                     })
 
     kelly_bets.sort(key=lambda b: b["wager_raw"], reverse=True)
+    total_found = len(kelly_bets)
+    if top_n > 0:
+        kelly_bets = kelly_bets[:top_n]
     total_wagered = round(sum(b["wager_raw"] for b in kelly_bets), 2)
 
     result = {
         "kelly_bets": kelly_bets,
-        "count": len(kelly_bets),
+        "count": total_found, "returned": len(kelly_bets),
         "settings": {
             "kelly_fraction": kelly_fraction,
             "bankroll": f"${bankroll}",
@@ -2996,12 +3035,15 @@ def simulate_bankroll_kelly(filename: Optional[str] = None,
 
     for gs in game_summaries.values():
         gs["total_kelly_exposure_pct"] = round(gs["total_kelly_exposure_pct"], 3)
+        gs["bets"] = gs["bets"][:5]
+        if gs["bet_count"] > 5:
+            gs["bets"].append(f"... and {gs['bet_count'] - 5} more")
 
     game_list = sorted(
         game_summaries.values(),
         key=lambda g: g["best_ev_edge_pct"],
         reverse=True,
-    )
+    )[:10]
 
     # ── Step 5: Assemble result ──────────────────────────────────────────
     result = {
@@ -3023,6 +3065,17 @@ def simulate_bankroll_kelly(filename: Optional[str] = None,
             "unique_games": len(game_summaries),
             "total_wagered_on_starting_bankroll": f"${total_wagered}",
             "bankroll_pct_deployed": f"{round(total_wagered / bankroll * 100, 1)}%",
+            "top_10_bets": [
+                {
+                    "game": f"{b['away_team']} @ {b['home_team']}",
+                    "bet": f"{b['side']} {b['market_type']} at {b['sportsbook']}",
+                    "odds": b["odds"],
+                    "ev_edge_pct": b["ev_edge_pct"],
+                    "kelly_pct": b["fractional_kelly_pct"],
+                    "wager": f"${b['wager_on_starting_bankroll']}",
+                }
+                for b in bet_slate[:10]
+            ],
         },
         "expected_outcome": {
             "expected_final_bankroll": f"${round(expected_bankroll, 2)}",
@@ -3054,7 +3107,11 @@ def simulate_bankroll_kelly(filename: Optional[str] = None,
             "drawdown_note": "Max drawdown = largest peak-to-trough decline during the simulation.",
         },
         "per_game_breakdown": game_list,
-        "bet_plan": bet_plan,
+        "bet_plan_summary": {
+            "total_bets": len(bet_plan),
+            "total_wagered": f"${total_wagered}",
+            "top_10": bet_plan[:10],
+        },
         "kelly_comparison": {
             "note": "Comparing Kelly fractions. Higher fractions grow faster but with more variance and drawdown risk.",
             "fractions": [],
@@ -3912,6 +3969,15 @@ def get_implied_scores(game_id: Optional[str] = None, filename: Optional[str] = 
 
     results.sort(key=lambda r: r["margin_of_victory"], reverse=True)
 
+    # Compact book_matrix when returning all games (keep full detail for single-game queries)
+    if not game_id:
+        for r in results:
+            bm = r.get("book_matrix", [])
+            if len(bm) > 3:
+                r["book_matrix"] = bm[:3]
+                r["book_matrix_note"] = f"Showing 3 of {len(bm)} books. Use game_id filter for full matrix."
+
+
     # Find game with most divergent implied scores across books
     most_divergent = max(results, key=lambda r: (r.get("divergence") or {}).get("max_divergence", 0)) if results else None
 
@@ -4228,12 +4294,14 @@ def get_power_rankings(filename: Optional[str] = None, intent: str = "") -> str:
     for team, games in team_games.items():
         probs = [g["fair_win_prob"] for g in games]
         avg_prob = sum(probs) / len(probs)
+        sorted_games = sorted(games, key=lambda g: g["fair_win_prob"], reverse=True)
         rankings.append({
             "team": team,
             "strength_rating": round(avg_prob, 4),
             "strength_pct": f"{round(avg_prob * 100, 1)}%",
             "games_sampled": len(games),
-            "game_details": sorted(games, key=lambda g: g["fair_win_prob"], reverse=True),
+            "best_game": sorted_games[0] if sorted_games else None,
+            "worst_game": sorted_games[-1] if sorted_games else None,
         })
 
     # Sort strongest to weakest
