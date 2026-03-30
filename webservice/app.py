@@ -88,6 +88,19 @@ PHASES = [
 MAX_FIX_ATTEMPTS = 2
 
 
+def _count_audit_failures(verification: dict) -> int:
+    """Sum ``checks_failed`` across all verification agents.
+
+    Returns the total number of failed checks, which lets us detect whether a
+    re-audit *regressed* (more failures than before the fix attempt).
+    """
+    agents = verification.get("agents", {})
+    return sum(
+        (a.get("checks_failed", 0) if isinstance(a, dict) else 0)
+        for a in agents.values()
+    )
+
+
 @dataclasses.dataclass
 class PipelineState:
     """Tracks a pipeline's lifecycle independently of any WebSocket session.
@@ -453,6 +466,69 @@ async def run_processing_pipeline(filename: str, state: PipelineState):
                                 "from_cache": from_cache,
                             })
 
+                            # --- Regression guard: stop if re-audit has MORE failures ---
+                            if fix_attempt > 0 and not from_cache:
+                                prev_audits = [
+                                    h for h in fix_history
+                                    if h["type"] == "audit" and h["attempt"] < fix_attempt
+                                ]
+                                if prev_audits:
+                                    prev_failures = _count_audit_failures(prev_audits[-1]["verification"])
+                                    curr_failures = _count_audit_failures(verification)
+                                    if curr_failures > prev_failures:
+                                        run_logger.warning(
+                                            "Analysis re-audit REGRESSED: failures %d → %d "
+                                            "(attempt %d) — stopping self-heal loop and saving run log",
+                                            prev_failures, curr_failures, fix_attempt,
+                                        )
+                                        verification["regression_stopped"] = True
+                                        verification["regression_detail"] = {
+                                            "previous_failures": prev_failures,
+                                            "current_failures": curr_failures,
+                                            "fix_attempt": fix_attempt,
+                                        }
+                                        # Persist the run log path so the saved results
+                                        # include a direct pointer to the log file.
+                                        run_log_file = os.path.join(
+                                            RUNS_LOG_DIR, f"{run_id}.log",
+                                        )
+                                        verification["regression_detail"]["run_log"] = run_log_file
+                                        regression_payload = {
+                                            "filename": filename,
+                                            "phase": "analyze",
+                                            "fix_attempt": fix_attempt,
+                                            "previous_failures": prev_failures,
+                                            "current_failures": curr_failures,
+                                            "run_id": run_id,
+                                            "run_log": run_log_file,
+                                        }
+                                        state.replay_events.append({
+                                            "type": "audit_regression_stopped",
+                                            "payload": regression_payload,
+                                        })
+                                        await _safe_emit(state, "audit_regression_stopped", regression_payload)
+
+                                        # Early-save: persist results so far + run log
+                                        # before the pipeline continues (or stops).
+                                        try:
+                                            import copy as _cp
+                                            _snap = _cp.deepcopy(fix_history)
+                                            verification["fix_history"] = _snap
+                                            verification["fix_attempts"] = fix_attempt
+                                            analysis["verification"] = verification
+                                            pipeline_results["analyze"] = analysis
+                                            await _auto_save_results(
+                                                filename, pipeline_results, run_logger,
+                                            )
+                                            run_logger.info(
+                                                "Regression early-save complete (analyze)"
+                                            )
+                                        except Exception as _save_err:
+                                            run_logger.error(
+                                                "Regression early-save failed: %s", _save_err,
+                                            )
+                                        break
+
                             # Cached "fail" results should NOT trigger a fix cycle —
                             # the text hasn't changed so a fix would just repeat.
                             if from_cache:
@@ -721,6 +797,66 @@ async def run_processing_pipeline(filename: str, state: PipelineState):
                                 "text": current_brief_text,
                                 "from_cache": from_cache,
                             })
+
+                            # --- Regression guard: stop if re-audit has MORE failures ---
+                            if fix_attempt > 0 and not from_cache:
+                                prev_audits = [
+                                    h for h in fix_history
+                                    if h["type"] == "audit" and h["attempt"] < fix_attempt
+                                ]
+                                if prev_audits:
+                                    prev_failures = _count_audit_failures(prev_audits[-1]["verification"])
+                                    curr_failures = _count_audit_failures(verification)
+                                    if curr_failures > prev_failures:
+                                        run_logger.warning(
+                                            "Brief re-audit REGRESSED: failures %d → %d "
+                                            "(attempt %d) — stopping self-heal loop and saving run log",
+                                            prev_failures, curr_failures, fix_attempt,
+                                        )
+                                        verification["regression_stopped"] = True
+                                        run_log_file = os.path.join(
+                                            RUNS_LOG_DIR, f"{run_id}.log",
+                                        )
+                                        verification["regression_detail"] = {
+                                            "previous_failures": prev_failures,
+                                            "current_failures": curr_failures,
+                                            "fix_attempt": fix_attempt,
+                                            "run_log": run_log_file,
+                                        }
+                                        regression_payload = {
+                                            "filename": filename,
+                                            "phase": "brief",
+                                            "fix_attempt": fix_attempt,
+                                            "previous_failures": prev_failures,
+                                            "current_failures": curr_failures,
+                                            "run_id": run_id,
+                                            "run_log": run_log_file,
+                                        }
+                                        state.replay_events.append({
+                                            "type": "audit_regression_stopped",
+                                            "payload": regression_payload,
+                                        })
+                                        await _safe_emit(state, "audit_regression_stopped", regression_payload)
+
+                                        # Early-save: persist results so far + run log
+                                        try:
+                                            import copy as _cp
+                                            _snap = _cp.deepcopy(fix_history)
+                                            verification["fix_history"] = _snap
+                                            verification["fix_attempts"] = fix_attempt
+                                            brief["verification"] = verification
+                                            pipeline_results["brief"] = brief
+                                            await _auto_save_results(
+                                                filename, pipeline_results, run_logger,
+                                            )
+                                            run_logger.info(
+                                                "Regression early-save complete (brief)"
+                                            )
+                                        except Exception as _save_err:
+                                            run_logger.error(
+                                                "Regression early-save failed: %s", _save_err,
+                                            )
+                                        break
 
                             # Cached "fail" results should NOT trigger a fix cycle —
                             # the text hasn't changed so a fix would just repeat.
