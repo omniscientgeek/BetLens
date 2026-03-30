@@ -6,11 +6,14 @@ Agents:
   2. Factual Agent     — Cross-checks claims against MCP betting data tools
   3. Betting Agent     — Validates betting recommendations for soundness
 
-All three run concurrently via asyncio.gather(). Results are attached to the
-AI response for frontend display as verification badges.
+All three run concurrently via asyncio.gather(). Each parent agent extracts
+individual claims then fans out parallel sub-agents (one per claim) for
+faster verification. Results are attached to the AI response for frontend
+display as verification badges.
 """
 
 import json
+import hashlib
 import re
 import time
 import asyncio
@@ -20,6 +23,61 @@ from typing import Optional
 from ai_service import call_ai, call_ai_chat, call_ai_chat_stream
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Audit result cache — avoids re-verifying identical text
+# ---------------------------------------------------------------------------
+# Keyed by SHA-256 hash of the text being verified. Each entry stores the
+# full verification result and a timestamp for TTL expiration.
+
+_audit_cache: dict[str, dict] = {}
+AUDIT_CACHE_TTL = 1800  # 30 minutes — matches pipeline cache TTL
+
+
+def _audit_cache_key(text: str) -> str:
+    """Deterministic cache key from the text being audited."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _get_cached_audit(text: str) -> Optional[dict]:
+    """Return cached verification result if present and not expired."""
+    key = _audit_cache_key(text)
+    entry = _audit_cache.get(key)
+    if entry is None:
+        return None
+    if time.time() - entry["cached_at"] > AUDIT_CACHE_TTL:
+        del _audit_cache[key]
+        return None
+    return entry["result"]
+
+
+def _store_audit_cache(text: str, result: dict) -> None:
+    """Store a verification result in the cache."""
+    key = _audit_cache_key(text)
+    _audit_cache[key] = {
+        "result": result,
+        "cached_at": time.time(),
+    }
+
+
+def clear_audit_cache() -> int:
+    """Clear the entire audit cache. Returns the number of entries removed."""
+    count = len(_audit_cache)
+    _audit_cache.clear()
+    return count
+
+
+def get_audit_cache_stats() -> dict:
+    """Return cache statistics for diagnostics."""
+    now = time.time()
+    active = sum(1 for e in _audit_cache.values() if now - e["cached_at"] <= AUDIT_CACHE_TTL)
+    return {
+        "total_entries": len(_audit_cache),
+        "active_entries": active,
+        "expired_entries": len(_audit_cache) - active,
+        "ttl_seconds": AUDIT_CACHE_TTL,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -100,8 +158,12 @@ def _parse_agent_response(raw_text: str, agent_name: str) -> dict:
     }
 
 
-def _truncate_tool_results(tool_calls: list, max_result_len: int = 8000) -> list:
-    """Truncate tool call results to keep payload sizes reasonable."""
+def _truncate_tool_results(tool_calls: list, max_result_len: int = 4000) -> list:
+    """Truncate tool call results to keep payload sizes reasonable.
+
+    Default limit lowered from 8000 to 4000 chars — audit agents receive
+    pre-fetched reference data so individual tool results need less detail.
+    """
     truncated = []
     for tc in tool_calls:
         entry = {**tc}
@@ -112,500 +174,729 @@ def _truncate_tool_results(tool_calls: list, max_result_len: int = 8000) -> list
 
 
 # ---------------------------------------------------------------------------
+# Reference data extraction — pre-fetch tool results to avoid duplicate calls
+# ---------------------------------------------------------------------------
+
+# MCP tool names that audit agents most frequently call (called 5-7× each
+# across the 6 audit agents in the last run).  We extract their results from
+# the analyze conversation's tool_calls so agents can verify claims directly
+# without making redundant MCP round-trips.
+_REFERENCE_TOOL_NAMES = {
+    "find_expected_value_bets",
+    "find_arbitrage_opportunities",
+    "get_vig_analysis",
+    "detect_stale_lines",
+    "get_book_rankings",
+    "get_market_entropy",
+    "find_middle_opportunities",
+    "detect_line_outliers",
+    "get_kelly_sizing",
+    "get_best_bets_today",
+    "get_fair_odds",
+    "get_odds_comparison",
+}
+
+# Max chars per reference tool result — keeps total reference block manageable
+_REF_MAX_CHARS = 6000
+
+
+def build_reference_data(
+    tool_calls: list[dict],
+    max_chars_per_tool: int = _REF_MAX_CHARS,
+) -> str:
+    """Extract commonly-needed MCP tool results from a prior conversation.
+
+    Scans the ``tool_calls`` list (from the analyze phase conversation) and
+    collects the FIRST successful result for each tool in _REFERENCE_TOOL_NAMES.
+    Results are truncated to ``max_chars_per_tool`` to keep the reference block
+    compact.
+
+    Returns a formatted string suitable for inclusion in audit agent prompts.
+    """
+    collected: dict[str, str] = {}
+
+    for tc in (tool_calls or []):
+        raw_name = tc.get("name", "")
+        # Strip MCP namespace prefix: "mcp__betstamp-intelligence__tool_name" → "tool_name"
+        short_name = raw_name.split("__")[-1] if "__" in raw_name else raw_name
+
+        if short_name not in _REFERENCE_TOOL_NAMES:
+            continue
+        if short_name in collected:
+            continue  # keep first (analyze phase result, not a retry)
+        if tc.get("is_error"):
+            continue
+
+        result = tc.get("result", "")
+        if isinstance(result, dict):
+            result = json.dumps(result, separators=(",", ":"))
+        result = str(result)
+
+        if len(result) > max_chars_per_tool:
+            result = result[:max_chars_per_tool] + "\n... [truncated]"
+
+        collected[short_name] = result
+
+    if not collected:
+        return ""
+
+    lines = ["=== PRE-FETCHED REFERENCE DATA (from prior MCP tool calls) ===",
+             "Use this data to verify claims FIRST. Only call MCP tools for data NOT included below.\n"]
+    for tool_name, result in collected.items():
+        lines.append(f"--- {tool_name} ---")
+        lines.append(result)
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Sub-agent parallelism constants
+# ---------------------------------------------------------------------------
+
+MAX_CONCURRENT_SUB_AGENTS = 5   # semaphore limit per parent agent
+MIN_CLAIMS_FOR_PARALLEL = 2     # below this, fall back to single-call
+
+
+# ---------------------------------------------------------------------------
 # System prompts for each verification agent
 # ---------------------------------------------------------------------------
 
 REASONING_SYSTEM_PROMPT = """\
-You are a logical reasoning verification agent for sports betting analysis. \
-You receive an AI-generated betting analysis or briefing along with the source \
-data that was used to produce it.
+You are a logical reasoning verification agent for sports betting analysis.
 
-Your job is to verify LOGICAL CONSISTENCY by cross-referencing claims against \
-the actual data via MCP tools.
+TASK: Verify LOGICAL CONSISTENCY of claims against actual data. Use the \
+PRE-FETCHED REFERENCE DATA in the user prompt FIRST — only call MCP tools \
+for data not already provided.
 
-YOU MUST call MCP tools to verify EVERY claim in the analysis before rendering \
-your verdict. Do NOT rely solely on the text — verify against the source data. \
-Do NOT skip any verifiable claim — call as many tools as needed.
+ARITHMETIC: Use arithmetic_evaluate() for multi-step math. Simple two-number \
+operations (add, subtract, multiply, divide) may be done inline.
 
-MANDATORY — NO MENTAL MATH — ZERO TOLERANCE
-You must NEVER perform arithmetic, math, or statistical calculations yourself — \
-not even simple ones like adding two numbers or computing a percentage. Every \
-number you derive MUST come from calling an MCP arithmetic tool. If you produce \
-a calculated number without a tool call it is assumed WRONG. Do NOT estimate, \
-round in your head, or "quickly" compute anything. Use: arithmetic_add, \
-arithmetic_subtract, arithmetic_multiply, arithmetic_divide, arithmetic_modulo, \
-arithmetic_evaluate for ALL numerical work.
+FAIR ODDS: get_fair_odds() = consensus (canonical baseline). Pinnacle sharp \
+fields differ — do NOT flag consensus vs Pinnacle discrepancies as errors.
 
-NOTE ON FAIR ODDS SOURCES:
-- get_fair_odds(game_id) returns CONSENSUS-based fair odds (averaged across all books \
-after vig removal). This is the canonical "fair odds" baseline used throughout the system.
-- get_odds_comparison(game_id) includes Pinnacle-specific sharp_fair_prob fields, which \
-may differ slightly from consensus. When the analysis cites "fair odds" or "fair \
-probabilities", verify against get_fair_odds() (consensus), NOT Pinnacle-specific fields.
-- Do NOT flag a discrepancy between consensus fair odds and Pinnacle fair odds as an error \
-— they are different methodologies and both are valid depending on context.
+CHECKLIST:
+1. Mathematical consistency — vig %, implied probs, fair odds match data
+2. Ranking consistency — sportsbook rankings match get_book_rankings / get_vig_analysis
+3. Comparison validity — "X better than Y" claims match odds data
+4. Contradiction detection — recommendations vs risk flags are consistent
+5. Confidence alignment — confidence ratings match actual edge sizes
 
-VERIFICATION CHECKLIST (use MCP tools for each):
-1. **Mathematical consistency** — Call get_fair_odds() or get_vig_analysis() to verify \
-that stated vig percentages, implied probabilities, and fair odds are internally consistent \
-with the actual data.
-2. **Ranking consistency** — Call get_book_rankings() to confirm sportsbook rankings \
-(e.g., if Book A is ranked #1 for low vig, verify it actually has the lowest vig).
-3. **Comparison validity** — Call get_odds_comparison() to verify that "X is better \
-than Y" claims are supported by actual numbers in the data.
-4. **Contradiction detection** — Cross-check recommendations vs. risk flags. If a bet \
-is recommended in one section but flagged as risky/avoid in another, verify with \
-get_best_bets_today() or find_expected_value_bets() to see which framing is correct.
-5. **Confidence alignment** — Verify that confidence ratings match the evidence by \
-checking the actual edge sizes via get_best_odds() or find_expected_value_bets().
+Each issue MUST cite specific data evidence. Do NOT evaluate betting strategy \
+(another agent handles that). Do NOT flag issues based on suspicion alone.
 
-MCP TOOLS TO USE:
-- get_fair_odds(game_id) — verify fair odds and implied probabilities
-- get_vig_analysis() — verify vig percentages and rankings
-- get_book_rankings() — verify sportsbook ranking claims
-- get_odds_comparison(game_id, market_type) — verify specific odds comparisons
-- find_expected_value_bets() — verify EV claims and edge sizes
-- get_best_bets_today() — verify recommendation consistency
-- arithmetic_add(a, b), arithmetic_subtract(a, b), arithmetic_multiply(a, b), \
-arithmetic_divide(a, b), arithmetic_modulo(a, b), arithmetic_evaluate(expression) — \
-you MUST use these to independently verify ALL mathematical claims (vig calculations, \
-profit margins, implied probabilities, EV edges). NEVER compute numbers yourself.
-
-IMPORTANT: Each issue you report MUST cite the specific MCP tool result that \
-proves the inconsistency. Do not flag issues based on suspicion alone.
-
-Do NOT evaluate betting strategy quality — another agent handles that.
-
-Return ONLY valid JSON (no markdown fences, no extra text) with this exact structure:
+Return ONLY valid JSON:
 {
   "verdict": "pass" | "warn" | "fail",
   "confidence": 0.0-1.0,
-  "checks_total": <number of individual claims/facts you verified>,
-  "checks_failed": <number of checks that found errors or warnings>,
-  "issues": [
-    {"severity": "info"|"warning"|"error", "claim": "the specific claim", "finding": "MCP tool result proving the inconsistency"}
-  ],
-  "summary": "1-2 sentence summary of your verification"
+  "checks_total": <number verified including passes>,
+  "checks_failed": <warnings + errors only>,
+  "issues": [{"severity": "info"|"warning"|"error", "claim": "...", "finding": "..."}],
+  "summary": "1-2 sentence summary"
 }
-
-IMPORTANT: checks_total must reflect every individual claim you verified (including \
-ones that passed). checks_failed must count only checks that resulted in a "warning" \
-or "error" severity issue. For example, if you verified 12 claims and 3 had problems, \
-checks_total=12, checks_failed=3.
-
-If everything checks out, return verdict "pass" with an empty issues array and checks_failed=0.
-Use "warn" if there are minor inconsistencies. Use "fail" for clear logical errors.
-
-CRITICAL FINAL INSTRUCTION — OUTPUT FORMAT:
-After you have finished calling all MCP tools and gathered your evidence, you MUST \
-output your final answer as ONLY a valid JSON object (no markdown fences, no \
-preamble, no explanation outside the JSON). Your very last message must be the \
-JSON verdict. Do NOT end on a tool call or intermediate reasoning — always \
-conclude with the JSON verdict object as your final output.
+Verdict: "pass" = all consistent, "warn" = minor issues, "fail" = clear logical errors.
+Your final message MUST be the JSON verdict — no markdown fences or extra text.
 """
 
 
 FACTUAL_SYSTEM_PROMPT = """\
-You are a factual accuracy verification agent for sports betting analysis. \
-You receive an AI-generated betting analysis or briefing. Your job is to \
-FACT-CHECK specific claims by querying the betstamp-intelligence MCP tools.
+You are a factual accuracy verification agent for sports betting analysis.
 
-MANDATORY: You MUST verify ALL factual claims in the analysis — do not skip any. \
-Every factual claim you evaluate MUST be verified by calling the corresponding \
-MCP tool — never accept or reject a claim without tool evidence. Call as many \
-MCP tools as needed to check every claim.
+TASK: Fact-check ALL specific claims (odds, EV %, vig %, arb profit, rankings, \
+stale lines) against actual data. Use the PRE-FETCHED REFERENCE DATA in the \
+user prompt FIRST — only call MCP tools for data not already provided.
 
-MANDATORY — NO MENTAL MATH — ZERO TOLERANCE
-You must NEVER perform arithmetic, math, or statistical calculations yourself — \
-not even simple ones like adding two numbers or computing a percentage. Every \
-number you derive MUST come from calling an MCP arithmetic tool. If you produce \
-a calculated number without a tool call it is assumed WRONG. Do NOT estimate, \
-round in your head, or "quickly" compute anything. Use: arithmetic_add, \
-arithmetic_subtract, arithmetic_multiply, arithmetic_divide, arithmetic_modulo, \
-arithmetic_evaluate for ALL numerical work.
+ARITHMETIC: Use arithmetic_evaluate() for multi-step math. Simple two-number \
+operations may be done inline.
 
-For each specific factual claim in the text (odds values, line numbers, vig \
-percentages, sportsbook rankings, arbitrage opportunities, EV percentages), \
-use the appropriate MCP tool to verify:
+FAIR ODDS: get_fair_odds() = consensus baseline. Do NOT flag consensus vs \
+Pinnacle discrepancies unless text explicitly says "Pinnacle fair odds".
 
-- Specific odds/line claims → MUST call get_odds_comparison(game_id, market_type)
-- Best odds claims → MUST call get_best_odds(game_id, market_type, side)
-- Worst odds claims → MUST call get_worst_odds(game_id, market_type, side)
-- Arbitrage claims → MUST call find_arbitrage_opportunities()
-- EV bet claims → MUST call find_expected_value_bets()
-- Kelly sizing claims → MUST call get_kelly_sizing()
-- Vig / sportsbook ranking claims → MUST call get_vig_analysis() AND get_book_rankings()
-- Fair odds claims → MUST call get_fair_odds(game_id)
-- Best bet claims → MUST call get_best_bets_today()
-- Stale line claims → MUST call detect_stale_lines()
-- Middle opportunity claims → MUST call find_middle_opportunities()
-- Implied score claims → MUST call get_implied_scores(game_id)
-- Power ranking claims → MUST call get_power_rankings()
-
-ARITHMETIC TOOLS (MANDATORY for ALL math — NEVER compute numbers yourself):
-- arithmetic_add(a, b), arithmetic_subtract(a, b), arithmetic_multiply(a, b), \
-arithmetic_divide(a, b), arithmetic_modulo(a, b), arithmetic_evaluate(expression)
-You MUST use these to recompute any claimed percentages, profit margins, payouts, \
-or edges from the raw numbers returned by other MCP tools. NEVER accept calculated \
-values without independently verifying the math via these tools.
-
-NOTE ON FAIR ODDS SOURCES:
-- get_fair_odds(game_id) returns CONSENSUS-based fair odds (averaged across all books \
-after vig removal). This is the canonical "fair odds" baseline.
-- get_odds_comparison(game_id) includes Pinnacle-specific sharp_fair_prob fields, which \
-differ from consensus. When checking "fair odds" claims, use get_fair_odds() (consensus) \
-as the reference, NOT Pinnacle sharp fields — unless the text explicitly says "Pinnacle \
-fair odds".
-
-INSTRUCTIONS:
-1. Read the analysis text carefully and identify ALL factual claims — specific \
-odds values, arbitrage profit percentages, EV percentages, sportsbook rankings, \
-stale line times, middle opportunities, fair odds, and any other verifiable numbers.
-2. PRIORITY ORDER — check these claim types FIRST (most likely to contain errors):
-   a. +EV opportunity claims (edge percentages, which book, which side) — these are \
-      the most common source of fabrication and number drift. ALWAYS verify with \
-      find_expected_value_bets() and get_best_bets_today().
-   b. Arbitrage profit percentages — verify exact profit % with find_arbitrage_opportunities().
-   c. Kelly sizing claims — verify with get_kelly_sizing().
-   d. Then verify all remaining claims (odds, vig, rankings, staleness, etc.).
-3. For EACH claim, you MUST call the appropriate MCP tool to verify the data. \
-Do NOT skip any claim without tool verification.
-4. Compare the tool results against the claims in the text EXACTLY — check specific \
-numbers, percentages, sportsbook names, and directions (favorite/underdog).
-5. FABRICATION CHECK: For every +EV bet mentioned in the analysis, confirm it exists \
-in the find_expected_value_bets() output. If a +EV opportunity is claimed but does \
-NOT appear in the tool results, flag it as severity "error" with finding "Fabricated \
-+EV opportunity — not present in MCP tool results."
-6. Use the arithmetic tools to independently recompute ALL derived values (e.g., \
-call arithmetic_subtract(sum_of_implied_probs, 1.0) then arithmetic_multiply(result, 100) \
-to verify vig). NEVER do this math yourself.
-7. Report any discrepancies, citing the exact MCP tool output as evidence.
+PRIORITY ORDER (most error-prone first):
+1. +EV claims — verify against find_expected_value_bets reference data. Flag \
+   any +EV opportunity NOT in the data as "error: Fabricated +EV opportunity".
+2. Arbitrage profit % — verify against find_arbitrage_opportunities data.
+3. Kelly sizing — verify against get_kelly_sizing / get_best_bets_today data.
+4. All remaining claims (odds, vig, rankings, staleness, etc.).
 
 ACCURACY THRESHOLDS:
-- Odds: off by more than 3 points = error, 1-3 points = warning
-- EV percentages: off by more than 0.5% absolute = error, 0.1-0.5% = warning
-- Vig percentages: off by more than 0.5% = error, 0.1-0.5% = warning
-- Arbitrage profit: off by more than 1% = error, 0.1-1% = warning
-- Wrong sportsbook name or wrong direction (fav/dog) = always error
+- Odds: >3 pts = error, 1-3 = warning
+- EV/Vig %: >0.5% = error, 0.1-0.5% = warning
+- Arb profit: >1% = error, 0.1-1% = warning
+- Wrong sportsbook or direction = always error
 
-Return ONLY valid JSON (no markdown fences, no extra text) with this exact structure:
+Each issue MUST cite specific data evidence. Do NOT evaluate strategy or logic \
+(other agents handle those).
+
+Return ONLY valid JSON:
 {
   "verdict": "pass" | "warn" | "fail",
   "confidence": 0.0-1.0,
-  "checks_total": <number of individual claims/facts you verified>,
-  "checks_failed": <number of checks that found errors or warnings>,
-  "issues": [
-    {"severity": "info"|"warning"|"error", "claim": "the specific claim checked", "finding": "MCP tool name + exact result that proves/disproves the claim"}
-  ],
-  "summary": "1-2 sentence summary of fact-check results"
+  "checks_total": <number verified including passes>,
+  "checks_failed": <warnings + errors only>,
+  "issues": [{"severity": "info"|"warning"|"error", "claim": "...", "finding": "..."}],
+  "summary": "1-2 sentence summary"
 }
-
-IMPORTANT: checks_total must reflect every individual claim you verified (including \
-ones that passed). checks_failed must count only checks that resulted in a "warning" \
-or "error" severity issue. For example, if you verified 15 claims and 2 had problems, \
-checks_total=15, checks_failed=2.
-
-Use "pass" if all checked claims are accurate within thresholds. Use "warn" for \
-minor discrepancies within warning thresholds. Use "fail" for material errors that \
-would change betting decisions (wrong sportsbook, wrong direction, fabricated \
-opportunities, numbers outside error thresholds).
-
-CRITICAL FINAL INSTRUCTION — OUTPUT FORMAT:
-After you have finished calling all MCP tools and gathered your evidence, you MUST \
-output your final answer as ONLY a valid JSON object (no markdown fences, no \
-preamble, no explanation outside the JSON). Your very last message must be the \
-JSON verdict. Do NOT end on a tool call or intermediate reasoning — always \
-conclude with the JSON verdict object as your final output.
+Verdict: "pass" = accurate, "warn" = minor discrepancies, "fail" = material errors.
+Your final message MUST be the JSON verdict — no markdown fences or extra text.
 """
 
 
 BETTING_SYSTEM_PROMPT = """\
 You are a betting recommendation verification agent. You review AI-generated \
-betting analysis and recommendations for sound betting principles.
+betting analysis for sound betting principles.
 
-MANDATORY: You MUST call MCP tools to verify EVERY recommendation and claim in \
-the analysis against actual data. Do NOT evaluate recommendations in a vacuum — \
-cross-reference ALL of them against real edge sizes, Kelly sizing, and market data. \
-Do NOT skip any verifiable recommendation — call as many tools as needed.
+TASK: Verify ALL recommendations against actual data. Use the PRE-FETCHED \
+REFERENCE DATA in the user prompt FIRST — only call MCP tools for data not \
+already provided.
 
-MANDATORY — NO MENTAL MATH — ZERO TOLERANCE
-You must NEVER perform arithmetic, math, or statistical calculations yourself — \
-not even simple ones like adding two numbers or computing a percentage. Every \
-number you derive MUST come from calling an MCP arithmetic tool. If you produce \
-a calculated number without a tool call it is assumed WRONG. Do NOT estimate, \
-round in your head, or "quickly" compute anything. Use: arithmetic_add, \
-arithmetic_subtract, arithmetic_multiply, arithmetic_divide, arithmetic_modulo, \
-arithmetic_evaluate for ALL numerical work.
+ARITHMETIC: Use arithmetic_evaluate() for multi-step math. Simple two-number \
+operations may be done inline.
 
-VERIFICATION CHECKLIST (use MCP tools for each):
-1. **Bankroll management** — Call get_kelly_sizing() to verify that recommended bet \
-sizes are proportional to actual edges. Flag as "error" if the analysis suggests sizing \
-that exceeds Kelly optimal. Flag as "warning" if ANY recommended bet lacks Kelly sizing \
-guidance (quarter-Kelly percentage of bankroll). The analysis MUST include sizing for \
-every bet recommendation.
-2. **Risk assessment** — Call find_expected_value_bets() to check actual EV edges. \
-If cited edges are under 1%, verify that appropriate caution is included. Call \
-detect_stale_lines() to check if any recommended bets rely on stale data. ONLY flag \
-staleness if the line is >60 minutes stale AND the analysis includes NO staleness caveat \
-at all. If the analysis mentions staleness or includes any caveat (even brief), that is \
-sufficient — do NOT flag for "weak" or "insufficient" caveat language. Lines under 60 \
-minutes stale should NOT be flagged for staleness.
-3. **Diversification** — Call get_odds_comparison() for each recommended game to \
-check if multiple bets on the same game are truly independent or correlated. Flag \
-if opposite sides of the same market are recommended without explaining it as arb.
-4. **Value basis** — Call get_fair_odds() and get_best_bets_today() to verify that \
-recommendations are based on real quantifiable edges, not just narrative. Every \
-recommended bet should have a measurable edge above fair odds.
-5. **Realistic expectations** — Call find_arbitrage_opportunities() to verify any \
-"guaranteed profit" claims are actual arbitrage. Flag "lock", "sure thing", or \
-"guaranteed" language for non-arb bets.
-6. **Responsible gambling** — Check that high-risk or long-shot bets include \
-appropriate caution language. Verify via get_market_entropy() if markets show high \
-disagreement (which should increase caution language).
+CHECKLIST (verify against reference data or MCP tools):
+1. Bankroll management — Kelly sizing proportional to edges; flag if sizing \
+   exceeds Kelly optimal or if any bet lacks quarter-Kelly guidance.
+2. Risk assessment — verify EV edges. The analysis uses a relative staleness \
+   threshold (see stale_threshold_minutes in the data — typically 30 min behind \
+   the newest update for the same game). When verifying stale line counts, use \
+   detect_stale_lines with the SAME threshold. ONLY flag staleness as an issue \
+   if the analysis omits any mention of staleness for genuinely stale lines.
+3. Diversification — flag correlated bets on same game unless explained as arb.
+4. Value basis — every bet must have measurable edge above fair odds.
+5. Realistic expectations — "guaranteed profit" claims must be actual arbitrage.
+6. Responsible gambling — high-risk bets need caution language.
 
-MCP TOOLS TO USE:
-- get_kelly_sizing() — verify bet sizing recommendations
-- find_expected_value_bets() — verify actual EV edges
-- get_fair_odds(game_id) — verify value basis of recommendations
-- get_best_bets_today() — cross-check recommended bets vs. ranked opportunities
-- detect_stale_lines() — check if recommended bets use stale data
-- find_arbitrage_opportunities() — verify any guaranteed profit claims
-- get_odds_comparison(game_id, market_type) — check correlation of multiple bets
-- get_market_entropy() — assess market disagreement for risk framing
-- arithmetic_add(a, b), arithmetic_subtract(a, b), arithmetic_multiply(a, b), \
-arithmetic_divide(a, b), arithmetic_modulo(a, b), arithmetic_evaluate(expression) — \
-you MUST use these to verify ALL bet sizing math, ROI calculations, bankroll impact, \
-and Kelly fraction computations. NEVER compute numbers yourself. Always cross-check \
-recommended dollar amounts and percentages via these tool calls.
+Do NOT verify specific number accuracy or logical consistency (other agents do that).
+Each issue MUST cite specific data evidence.
 
-IMPORTANT: Each issue you report MUST cite the specific MCP tool result as evidence. \
-Do not flag issues based on suspicion alone.
-
-Do NOT verify the accuracy of specific numbers — another agent handles that.
-Do NOT verify logical consistency — another agent handles that.
-
-Return ONLY valid JSON (no markdown fences, no extra text) with this exact structure:
+Return ONLY valid JSON:
 {
   "verdict": "pass" | "warn" | "fail",
   "confidence": 0.0-1.0,
-  "checks_total": <number of individual recommendations/principles you verified>,
-  "checks_failed": <number of checks that found errors or warnings>,
-  "issues": [
-    {"severity": "info"|"warning"|"error", "claim": "the specific recommendation or pattern", "finding": "MCP tool evidence + your assessment"}
-  ],
-  "summary": "1-2 sentence summary of recommendation quality"
+  "checks_total": <number verified including passes>,
+  "checks_failed": <warnings + errors only>,
+  "issues": [{"severity": "info"|"warning"|"error", "claim": "...", "finding": "..."}],
+  "summary": "1-2 sentence summary"
 }
-
-IMPORTANT: checks_total must reflect every individual recommendation/principle you \
-verified (including ones that passed). checks_failed must count only checks that \
-resulted in a "warning" or "error" severity issue. For example, if you verified 8 \
-recommendations and 1 had a problem, checks_total=8, checks_failed=1.
-
-Use "pass" if recommendations follow sound betting principles and are backed by data. \
-Use "warn" for minor concerns (e.g., missing risk disclaimers, sizing not specified). \
-Use "fail" for dangerous advice (e.g., encouraging chasing losses, no value basis, \
-guaranteed profit claims for non-arb bets, recommending bets on stale lines without caveat).
-
-CRITICAL FINAL INSTRUCTION — OUTPUT FORMAT:
-After you have finished calling all MCP tools and gathered your evidence, you MUST \
-output your final answer as ONLY a valid JSON object (no markdown fences, no \
-preamble, no explanation outside the JSON). Your very last message must be the \
-JSON verdict. Do NOT end on a tool call or intermediate reasoning — always \
-conclude with the JSON verdict object as your final output.
+Verdict: "pass" = sound principles, "warn" = minor concerns, "fail" = dangerous advice.
+Your final message MUST be the JSON verdict — no markdown fences or extra text.
 """
 
 
 # ---------------------------------------------------------------------------
-# Individual agent runners
+# Claim extraction prompt — used to split text into individual claims
 # ---------------------------------------------------------------------------
+
+CLAIM_EXTRACTION_PROMPT = """\
+You are a claim extractor. Given a betting analysis text and an agent type, \
+extract every verifiable claim into a structured JSON array.
+
+AGENT TYPE: {agent_type}
+
+Agent-specific focus:
+- reasoning: Extract logical assertions, ranking claims, cross-references, \
+  and consistency claims (e.g., "Book X has lowest vig", "this contradicts \
+  the recommendation above").
+- factual: Extract specific numbers — odds values, EV percentages, vig \
+  percentages, arbitrage profit %, sportsbook names, line values, implied \
+  probabilities, Kelly sizing numbers, power rankings, stale line times.
+- betting: Extract recommendations — bet suggestions, sizing advice, risk \
+  assessments, guaranteed-profit claims, bankroll management guidance, \
+  responsible gambling statements.
+
+Return ONLY a valid JSON array (no markdown fences, no extra text):
+[
+  {{
+    "claim_text": "verbatim or near-verbatim claim from the text",
+    "claim_type": "short category label (e.g. ev_claim, odds_value, vig_ranking, \
+kelly_sizing, arb_profit, recommendation, risk_flag)",
+    "required_tools": ["list", "of", "MCP", "tool", "names", "to", "verify"],
+    "context": "1-2 sentences of surrounding context needed to understand the claim"
+  }},
+  ...
+]
+
+IMPORTANT:
+- Extract EVERY verifiable claim — do not skip any.
+- Each claim should be a single, atomic, verifiable statement.
+- Do NOT combine multiple facts into one claim.
+- Include 1-3 relevant MCP tool names in required_tools.
+- If the text has very few verifiable claims (e.g. just 1), still return them.
+"""
+
+
+# ---------------------------------------------------------------------------
+# Sub-agent prompt prefix — scopes a sub-agent to specific claims
+# ---------------------------------------------------------------------------
+
+SUB_AGENT_PROMPT_PREFIX = """\
+IMPORTANT SCOPE RESTRICTION:
+You are a focused sub-agent. Verify ONLY the specific claim(s) listed below. \
+Do NOT verify anything else in the analysis text. Your entire job is to check \
+these specific claims and return your verdict for them only.
+
+CLAIMS TO VERIFY:
+{claims_block}
+
+FULL ANALYSIS TEXT (for context only — verify ONLY the claims above):
+"""
+
+
+# ---------------------------------------------------------------------------
+# Sub-agent helpers — extract, verify, aggregate
+# ---------------------------------------------------------------------------
+
+async def _extract_claims(
+    text: str,
+    agent_type: str,
+    run_logger: Optional[logging.Logger] = None,
+) -> list[dict]:
+    """Use a lightweight LLM call (no MCP tools) to parse claims from text.
+
+    Returns a list of claim dicts, or an empty list on failure (triggering
+    fallback to the serial single-call approach).
+    """
+    prompt = CLAIM_EXTRACTION_PROMPT.format(agent_type=agent_type)
+    if run_logger:
+        run_logger.info("VERIFICATION [%s] extracting claims via LLM ...", agent_type)
+
+    try:
+        result = await call_ai(
+            system_prompt=prompt,
+            user_prompt=text,
+            run_logger=run_logger,
+            max_tokens=4096,
+        )
+        raw = result["text"].strip()
+
+        # Parse JSON — handle markdown fences
+        fence_match = re.search(r"```(?:json)?\s*\n?(.*?)```", raw, re.DOTALL)
+        if fence_match:
+            raw = fence_match.group(1).strip()
+
+        claims = json.loads(raw)
+        if not isinstance(claims, list):
+            raise ValueError("Expected JSON array of claims")
+
+        if run_logger:
+            run_logger.info(
+                "VERIFICATION [%s] extracted %d claims", agent_type, len(claims)
+            )
+        return claims
+
+    except Exception as exc:
+        logger.warning("Claim extraction failed for %s: %s", agent_type, exc)
+        if run_logger:
+            run_logger.warning(
+                "VERIFICATION [%s] claim extraction failed: %s — falling back to serial",
+                agent_type, exc,
+            )
+        return []
+
+
+async def _run_claim_sub_agent(
+    claim: dict,
+    sub_index: int,
+    agent_type: str,
+    parent_system_prompt: str,
+    text_to_verify: str,
+    semaphore: asyncio.Semaphore,
+    on_tool_event=None,
+    run_logger: Optional[logging.Logger] = None,
+) -> dict:
+    """Verify a single claim (or small batch) via a scoped LLM call with MCP tools."""
+    claim_text = claim.get("claim_text", str(claim))
+    claim_type = claim.get("claim_type", "unknown")
+    required_tools = claim.get("required_tools", [])
+    context = claim.get("context", "")
+
+    claims_block = (
+        f"Claim: {claim_text}\n"
+        f"Type: {claim_type}\n"
+        f"Suggested MCP tools: {', '.join(required_tools) if required_tools else 'use your judgment'}\n"
+        f"Context: {context}"
+    )
+
+    scoped_system = parent_system_prompt + "\n\n" + SUB_AGENT_PROMPT_PREFIX.format(
+        claims_block=claims_block
+    )
+
+    messages = [
+        {
+            "role": "user",
+            "content": (
+                f"Verify the following specific claim from a betting analysis. "
+                f"Use MCP tools to check it. Return your verdict as JSON.\n\n"
+                f"=== CLAIM TO VERIFY ===\n{claim_text}\n\n"
+                f"=== FULL ANALYSIS (for context) ===\n{text_to_verify}"
+            ),
+        }
+    ]
+
+    async with semaphore:
+        if run_logger:
+            run_logger.info(
+                "VERIFICATION [%s] sub-agent #%d starting — claim_type=%s",
+                agent_type, sub_index, claim_type,
+            )
+
+        sub_start = time.time()
+        try:
+            result = await call_ai_chat_stream(
+                messages=messages,
+                system_prompt=scoped_system,
+                on_tool_event=on_tool_event,
+                provider_id=None,
+                run_logger=run_logger,
+            )
+        except Exception as exc:
+            elapsed = round(time.time() - sub_start, 2)
+            logger.error(
+                "Sub-agent #%d [%s] failed: %s", sub_index, agent_type, exc
+            )
+            return {
+                "verdict": "error",
+                "confidence": 0.0,
+                "checks_total": 1,
+                "checks_failed": 1,
+                "issues": [
+                    {
+                        "severity": "error",
+                        "claim": claim_text[:200],
+                        "finding": f"Sub-agent failed: {exc}",
+                    }
+                ],
+                "summary": f"Sub-agent error: {exc}",
+                "ai_meta": {"elapsed_seconds": elapsed},
+                "tool_calls": [],
+                "assistant_response": "",
+            }
+
+        elapsed = round(time.time() - sub_start, 2)
+        if run_logger:
+            run_logger.info(
+                "VERIFICATION [%s] sub-agent #%d complete in %.2fs",
+                agent_type, sub_index, elapsed,
+            )
+
+        parsed = _parse_agent_response(result["text"], f"{agent_type}_sub{sub_index}")
+        issues = parsed.get("issues", [])
+        return {
+            "verdict": parsed.get("verdict", "warn"),
+            "confidence": parsed.get("confidence", 0.5),
+            "checks_total": parsed.get("checks_total") or max(len(issues), 1),
+            "checks_failed": parsed.get("checks_failed") or sum(
+                1 for i in issues if i.get("severity") in ("warning", "error")
+            ),
+            "issues": issues,
+            "summary": parsed.get("summary", ""),
+            "ai_meta": {
+                "provider": result.get("provider_name", ""),
+                "model": result.get("model", ""),
+                "elapsed_seconds": elapsed,
+                "usage": result.get("usage", {}),
+            },
+            "tool_calls": _truncate_tool_results(result.get("tool_calls", [])),
+            "assistant_response": result.get("text", ""),
+        }
+
+
+def _aggregate_sub_results(
+    sub_results: list[dict],
+    agent_name: str,
+    parent_system_prompt: str,
+    original_user_prompt: str,
+    wall_elapsed: float,
+) -> dict:
+    """Merge N sub-agent results into a single agent result dict.
+
+    Preserves the exact same schema as the original serial agent runner so
+    that callers (app.py, fix phase, cache, UI) see no difference.
+    """
+    verdict_priority = {"pass": 0, "warn": 1, "fail": 2, "error": 3}
+
+    # Worst verdict wins
+    verdicts = [r["verdict"] for r in sub_results]
+    worst = max(verdicts, key=lambda v: verdict_priority.get(v, 3))
+
+    # Sum checks
+    total_checks = sum(r.get("checks_total", 0) for r in sub_results)
+    failed_checks = sum(r.get("checks_failed", 0) for r in sub_results)
+
+    # Concatenate issues
+    all_issues = []
+    for r in sub_results:
+        all_issues.extend(r.get("issues", []))
+
+    # Weighted-average confidence
+    weighted_conf = 0.0
+    total_weight = 0
+    for r in sub_results:
+        w = max(r.get("checks_total", 1), 1)
+        weighted_conf += r.get("confidence", 0.5) * w
+        total_weight += w
+    avg_confidence = round(weighted_conf / total_weight, 3) if total_weight else 0.5
+
+    # Combine summaries
+    summaries = [r.get("summary", "") for r in sub_results if r.get("summary")]
+    combined_summary = " | ".join(summaries) if summaries else ""
+    # Truncate if very long
+    if len(combined_summary) > 500:
+        combined_summary = combined_summary[:497] + "..."
+
+    # Aggregate token usage
+    total_input = sum(r.get("ai_meta", {}).get("usage", {}).get("input_tokens", 0) for r in sub_results)
+    total_output = sum(r.get("ai_meta", {}).get("usage", {}).get("output_tokens", 0) for r in sub_results)
+    provider = sub_results[0].get("ai_meta", {}).get("provider", "") if sub_results else ""
+    model = sub_results[0].get("ai_meta", {}).get("model", "") if sub_results else ""
+
+    # Concatenate tool calls from all sub-agents
+    all_tool_calls = []
+    for r in sub_results:
+        all_tool_calls.extend(r.get("tool_calls", []))
+
+    # Combine assistant responses for conversation record
+    all_responses = [r.get("assistant_response", "") for r in sub_results if r.get("assistant_response")]
+    combined_response = "\n\n---\n\n".join(all_responses)
+
+    return {
+        "agent": agent_name,
+        "verdict": worst,
+        "confidence": avg_confidence,
+        "checks_total": total_checks,
+        "checks_failed": failed_checks,
+        "issues": all_issues,
+        "summary": combined_summary,
+        "ai_meta": {
+            "provider": provider,
+            "model": model,
+            "elapsed_seconds": wall_elapsed,
+            "usage": {
+                "input_tokens": total_input,
+                "output_tokens": total_output,
+            },
+            "sub_agent_count": len(sub_results),
+        },
+        "conversation": {
+            "system_prompt": parent_system_prompt,
+            "user_prompt": original_user_prompt,
+            "assistant_response": combined_response,
+            "tool_calls": all_tool_calls,
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Individual agent runners (parallel sub-agent pattern with serial fallback)
+# ---------------------------------------------------------------------------
+
+async def _run_agent_serial(
+    agent_name: str,
+    text_to_verify: str,
+    system_prompt: str,
+    user_prompt_text: str,
+    run_logger: Optional[logging.Logger] = None,
+    on_tool_event=None,
+) -> dict:
+    """Original serial single-LLM-call path — used as fallback when claim
+    extraction fails or yields fewer than 2 claims."""
+    agent_start = time.time()
+
+    messages = [{"role": "user", "content": user_prompt_text}]
+
+    if run_logger:
+        run_logger.info("VERIFICATION [%s] starting SERIAL (MCP-enabled)", agent_name)
+
+    result = await call_ai_chat_stream(
+        messages=messages,
+        system_prompt=system_prompt,
+        on_tool_event=on_tool_event,
+        provider_id=None,
+        run_logger=run_logger,
+    )
+
+    elapsed = round(time.time() - agent_start, 2)
+    if run_logger:
+        run_logger.info("VERIFICATION [%s] serial complete in %.2fs", agent_name, elapsed)
+
+    parsed = _parse_agent_response(result["text"], agent_name)
+    issues = parsed.get("issues", [])
+    return {
+        "agent": agent_name,
+        "verdict": parsed.get("verdict", "warn"),
+        "confidence": parsed.get("confidence", 0.5),
+        "checks_total": parsed.get("checks_total") or len(issues) or 0,
+        "checks_failed": parsed.get("checks_failed") or sum(1 for i in issues if i.get("severity") in ("warning", "error")),
+        "issues": issues,
+        "summary": parsed.get("summary", ""),
+        "ai_meta": {
+            "provider": result["provider_name"],
+            "model": result["model"],
+            "elapsed_seconds": elapsed,
+            "usage": result.get("usage", {}),
+        },
+        "conversation": {
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt_text,
+            "assistant_response": result["text"],
+            "tool_calls": _truncate_tool_results(result.get("tool_calls", [])),
+        },
+    }
+
+
+async def _run_agent_parallel(
+    agent_name: str,
+    text_to_verify: str,
+    system_prompt: str,
+    user_prompt_text: str,
+    run_logger: Optional[logging.Logger] = None,
+    on_tool_event=None,
+) -> dict:
+    """Extract claims, fan out parallel sub-agents, aggregate results.
+
+    Falls back to _run_agent_serial if claim extraction fails or returns < 2 claims.
+    """
+    agent_start = time.time()
+
+    # Step 1 — extract claims
+    claims = await _extract_claims(text_to_verify, agent_name, run_logger)
+
+    if len(claims) < 2:
+        if run_logger:
+            run_logger.info(
+                "VERIFICATION [%s] only %d claim(s) extracted — using serial fallback",
+                agent_name, len(claims),
+            )
+        return await _run_agent_serial(
+            agent_name, text_to_verify, system_prompt,
+            user_prompt_text, run_logger, on_tool_event,
+        )
+
+    # Step 2 — fan out sub-agents with semaphore
+    if run_logger:
+        run_logger.info(
+            "VERIFICATION [%s] launching %d parallel sub-agents (max_concurrent=%d)",
+            agent_name, len(claims), MAX_CONCURRENT_SUB_AGENTS,
+        )
+
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_SUB_AGENTS)
+
+    sub_coros = [
+        _run_claim_sub_agent(
+            claim=claim,
+            sub_index=i,
+            agent_type=agent_name,
+            parent_system_prompt=system_prompt,
+            text_to_verify=text_to_verify,
+            semaphore=semaphore,
+            on_tool_event=on_tool_event,
+            run_logger=run_logger,
+        )
+        for i, claim in enumerate(claims)
+    ]
+
+    sub_results = await asyncio.gather(*sub_coros, return_exceptions=True)
+
+    # Convert exceptions to error results
+    clean_results = []
+    for i, r in enumerate(sub_results):
+        if isinstance(r, BaseException):
+            logger.error("Sub-agent #%d [%s] raised: %s", i, agent_name, r)
+            clean_results.append({
+                "verdict": "error",
+                "confidence": 0.0,
+                "checks_total": 1,
+                "checks_failed": 1,
+                "issues": [{"severity": "error", "claim": claims[i].get("claim_text", "")[:200], "finding": f"Sub-agent exception: {r}"}],
+                "summary": f"Sub-agent error: {r}",
+                "ai_meta": {"elapsed_seconds": 0},
+                "tool_calls": [],
+                "assistant_response": "",
+            })
+        else:
+            clean_results.append(r)
+
+    # Step 3 — aggregate
+    wall_elapsed = round(time.time() - agent_start, 2)
+    aggregated = _aggregate_sub_results(
+        clean_results, agent_name, system_prompt, user_prompt_text, wall_elapsed,
+    )
+
+    if run_logger:
+        run_logger.info(
+            "VERIFICATION [%s] parallel complete — %d sub-agents, verdict=%s, elapsed=%.2fs",
+            agent_name, len(clean_results), aggregated["verdict"], wall_elapsed,
+        )
+
+    return aggregated
+
 
 async def _run_reasoning_agent(
     text_to_verify: str,
     source_data: str,
     run_logger: Optional[logging.Logger] = None,
     on_tool_event=None,
+    reference_data: str = "",
 ) -> dict:
-    """Verify logical consistency — uses call_ai_chat() with MCP tools."""
-    agent_start = time.time()
-
-    messages = [
-        {
-            "role": "user",
-            "content": (
-                "Verify the logical consistency of this betting analysis by "
-                "cross-referencing ALL claims against the actual data via MCP tools. "
-                "You MUST verify EVERY verifiable claim — call as many MCP tools as needed.\n\n"
-                "=== AI-GENERATED ANALYSIS TO VERIFY ===\n"
-                f"{text_to_verify}"
-            ),
-        }
-    ]
-
-    if run_logger:
-        run_logger.info("VERIFICATION [reasoning] starting (MCP-enabled)")
-
-    result = await call_ai_chat_stream(
-        messages=messages,
-        system_prompt=REASONING_SYSTEM_PROMPT,
-        on_tool_event=on_tool_event,
-        provider_id=None,  # Uses highest-priority enabled provider (Anthropic API or Claude SDK both support MCP)
-        run_logger=run_logger,
+    """Verify logical consistency — parallel sub-agents with serial fallback."""
+    ref_block = f"\n\n{reference_data}" if reference_data else ""
+    user_prompt = (
+        "Verify the logical consistency of this betting analysis. "
+        "Use the reference data below FIRST — only call MCP tools for data "
+        "not included in the reference.\n\n"
+        "=== AI-GENERATED ANALYSIS TO VERIFY ===\n"
+        f"{text_to_verify}"
+        f"{ref_block}"
     )
-
-    elapsed = round(time.time() - agent_start, 2)
-    if run_logger:
-        run_logger.info("VERIFICATION [reasoning] complete in %.2fs", elapsed)
-
-    parsed = _parse_agent_response(result["text"], "reasoning")
-    issues = parsed.get("issues", [])
-    return {
-        "agent": "reasoning",
-        "verdict": parsed.get("verdict", "warn"),
-        "confidence": parsed.get("confidence", 0.5),
-        "checks_total": parsed.get("checks_total") or len(issues) or 0,
-        "checks_failed": parsed.get("checks_failed") or sum(1 for i in issues if i.get("severity") in ("warning", "error")),
-        "issues": issues,
-        "summary": parsed.get("summary", ""),
-        "ai_meta": {
-            "provider": result["provider_name"],
-            "model": result["model"],
-            "elapsed_seconds": elapsed,
-            "usage": result.get("usage", {}),
-        },
-        "conversation": {
-            "system_prompt": REASONING_SYSTEM_PROMPT,
-            "user_prompt": messages[0]["content"],
-            "assistant_response": result["text"],
-            "tool_calls": _truncate_tool_results(result.get("tool_calls", [])),
-        },
-    }
+    return await _run_agent_parallel(
+        "reasoning", text_to_verify, REASONING_SYSTEM_PROMPT,
+        user_prompt, run_logger, on_tool_event,
+    )
 
 
 async def _run_factual_agent(
     text_to_verify: str,
     run_logger: Optional[logging.Logger] = None,
     on_tool_event=None,
+    reference_data: str = "",
 ) -> dict:
-    """Fact-check claims via MCP tools — uses call_ai_chat() with claude-sdk provider."""
-    agent_start = time.time()
-
-    messages = [
-        {
-            "role": "user",
-            "content": (
-                "Fact-check the following betting analysis by querying MCP tools "
-                "to verify EVERY factual claim made — do NOT skip any. Check every "
-                "verifiable number, odds value, percentage, ranking, and data point.\n\n"
-                "PRIORITY: Start by verifying ALL +EV claims and arbitrage profit "
-                "percentages FIRST — these are the most error-prone. Call "
-                "find_expected_value_bets() and find_arbitrage_opportunities() before "
-                "anything else. Flag any +EV opportunity that does not exist in the "
-                "tool results as a fabrication error.\n\n"
-                "=== AI-GENERATED ANALYSIS TO FACT-CHECK ===\n"
-                f"{text_to_verify}"
-            ),
-        }
-    ]
-
-    if run_logger:
-        run_logger.info("VERIFICATION [factual] starting (MCP-enabled)")
-
-    result = await call_ai_chat_stream(
-        messages=messages,
-        system_prompt=FACTUAL_SYSTEM_PROMPT,
-        on_tool_event=on_tool_event,
-        provider_id=None,  # Uses highest-priority enabled provider (Anthropic API or Claude SDK both support MCP)
-        run_logger=run_logger,
+    """Fact-check claims via parallel sub-agents with serial fallback."""
+    ref_block = f"\n\n{reference_data}" if reference_data else ""
+    user_prompt = (
+        "Fact-check the following betting analysis. Use the reference data "
+        "below FIRST — only call MCP tools for data not included.\n\n"
+        "PRIORITY: Verify ALL +EV claims and arb profits FIRST. Flag any "
+        "+EV opportunity NOT in the reference data as fabrication.\n\n"
+        "=== AI-GENERATED ANALYSIS TO FACT-CHECK ===\n"
+        f"{text_to_verify}"
+        f"{ref_block}"
     )
-
-    elapsed = round(time.time() - agent_start, 2)
-    if run_logger:
-        run_logger.info("VERIFICATION [factual] complete in %.2fs", elapsed)
-
-    parsed = _parse_agent_response(result["text"], "factual")
-    issues = parsed.get("issues", [])
-    return {
-        "agent": "factual",
-        "verdict": parsed.get("verdict", "warn"),
-        "confidence": parsed.get("confidence", 0.5),
-        "checks_total": parsed.get("checks_total") or len(issues) or 0,
-        "checks_failed": parsed.get("checks_failed") or sum(1 for i in issues if i.get("severity") in ("warning", "error")),
-        "issues": issues,
-        "summary": parsed.get("summary", ""),
-        "ai_meta": {
-            "provider": result["provider_name"],
-            "model": result["model"],
-            "elapsed_seconds": elapsed,
-            "usage": result.get("usage", {}),
-        },
-        "conversation": {
-            "system_prompt": FACTUAL_SYSTEM_PROMPT,
-            "user_prompt": messages[0]["content"],
-            "assistant_response": result["text"],
-            "tool_calls": _truncate_tool_results(result.get("tool_calls", [])),
-        },
-    }
+    return await _run_agent_parallel(
+        "factual", text_to_verify, FACTUAL_SYSTEM_PROMPT,
+        user_prompt, run_logger, on_tool_event,
+    )
 
 
 async def _run_betting_agent(
     text_to_verify: str,
     run_logger: Optional[logging.Logger] = None,
     on_tool_event=None,
+    reference_data: str = "",
 ) -> dict:
-    """Verify betting recommendation soundness — uses call_ai_chat_stream() with MCP tools."""
-    agent_start = time.time()
-
-    messages = [
-        {
-            "role": "user",
-            "content": (
-                "Review the following betting analysis and ALL recommendations for "
-                "sound betting principles. You MUST verify EVERY recommendation against "
-                "actual data via MCP tools — do NOT skip any.\n\n"
-                "=== AI-GENERATED ANALYSIS TO REVIEW ===\n"
-                f"{text_to_verify}"
-            ),
-        }
-    ]
-
-    if run_logger:
-        run_logger.info("VERIFICATION [betting] starting (MCP-enabled)")
-
-    result = await call_ai_chat_stream(
-        messages=messages,
-        system_prompt=BETTING_SYSTEM_PROMPT,
-        on_tool_event=on_tool_event,
-        provider_id=None,  # Uses highest-priority enabled provider (Anthropic API or Claude SDK both support MCP)
-        run_logger=run_logger,
+    """Verify betting recommendation soundness — parallel sub-agents with serial fallback."""
+    ref_block = f"\n\n{reference_data}" if reference_data else ""
+    user_prompt = (
+        "Review the following betting analysis for sound betting principles. "
+        "Use the reference data below FIRST — only call MCP tools for data "
+        "not included.\n\n"
+        "=== AI-GENERATED ANALYSIS TO REVIEW ===\n"
+        f"{text_to_verify}"
+        f"{ref_block}"
     )
-
-    elapsed = round(time.time() - agent_start, 2)
-    if run_logger:
-        run_logger.info("VERIFICATION [betting] complete in %.2fs", elapsed)
-
-    parsed = _parse_agent_response(result["text"], "betting")
-    issues = parsed.get("issues", [])
-    return {
-        "agent": "betting",
-        "verdict": parsed.get("verdict", "warn"),
-        "confidence": parsed.get("confidence", 0.5),
-        "checks_total": parsed.get("checks_total") or len(issues) or 0,
-        "checks_failed": parsed.get("checks_failed") or sum(1 for i in issues if i.get("severity") in ("warning", "error")),
-        "issues": issues,
-        "summary": parsed.get("summary", ""),
-        "ai_meta": {
-            "provider": result["provider_name"],
-            "model": result["model"],
-            "elapsed_seconds": elapsed,
-            "usage": result.get("usage", {}),
-        },
-        "conversation": {
-            "system_prompt": BETTING_SYSTEM_PROMPT,
-            "user_prompt": messages[0]["content"],
-            "assistant_response": result["text"],
-            "tool_calls": _truncate_tool_results(result.get("tool_calls", [])),
-        },
-    }
+    return await _run_agent_parallel(
+        "betting", text_to_verify, BETTING_SYSTEM_PROMPT,
+        user_prompt, run_logger, on_tool_event,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -618,6 +909,7 @@ async def run_verification(
     run_logger: Optional[logging.Logger] = None,
     on_agent_complete=None,
     on_tool_event=None,
+    reference_data: str = "",
 ) -> dict:
     """Run all three verification agents in parallel.
 
@@ -636,15 +928,44 @@ async def run_verification(
     on_tool_event : async callable, optional
         Called with (agent_name, event_type, data) each time an agent makes or
         receives a tool call — enables real-time streaming of MCP tool activity.
+    reference_data : str, optional
+        Pre-fetched MCP tool results (built via ``build_reference_data``).
+        When provided, agents use this data first and only call MCP tools
+        for data not already included — dramatically reducing duplicate calls.
 
     Returns
     -------
     dict
         VerificationReport with overall verdict and per-agent results.
     """
+    # ------------------------------------------------------------------
+    # Check audit cache — skip all 3 agents if we already verified this text
+    # ------------------------------------------------------------------
+    cached = _get_cached_audit(text_to_verify)
+    if cached is not None:
+        if run_logger:
+            run_logger.info("=" * 60)
+            run_logger.info("VERIFICATION PIPELINE — cache HIT (skipping 3 agents)")
+            run_logger.info("  cached verdict=%s  original_elapsed=%.2fs",
+                            cached["overall_verdict"], cached["elapsed_seconds"])
+            run_logger.info("=" * 60)
+
+        # Still fire on_agent_complete callbacks so the UI gets its updates
+        if on_agent_complete:
+            for agent_name in ["reasoning", "factual", "betting"]:
+                agent_result = cached.get("agents", {}).get(agent_name)
+                if agent_result:
+                    try:
+                        await on_agent_complete(agent_name, agent_result)
+                    except Exception as cb_err:
+                        logger.warning("on_agent_complete callback error for %s: %s", agent_name, cb_err)
+
+        # Return a shallow copy with cached flag so callers can distinguish
+        return {**cached, "from_cache": True}
+
     if run_logger:
         run_logger.info("=" * 60)
-        run_logger.info("VERIFICATION PIPELINE — starting 3 agents in parallel")
+        run_logger.info("VERIFICATION PIPELINE — cache MISS, starting 3 agents in parallel")
         run_logger.info("=" * 60)
 
     start = time.time()
@@ -678,11 +999,13 @@ async def run_verification(
                 logger.warning("on_agent_complete callback error for %s: %s", name, cb_err)
         return result
 
-    # Launch all 3 agents concurrently, each wrapped with notification
+    # Launch all 3 agents concurrently, each wrapped with notification.
+    # reference_data (pre-fetched tool results) is passed to all agents so
+    # they can verify claims without making redundant MCP tool calls.
     await asyncio.gather(
-        _run_and_notify("reasoning", _run_reasoning_agent(text_to_verify, source_data, run_logger, on_tool_event=_make_agent_tool_cb("reasoning"))),
-        _run_and_notify("factual", _run_factual_agent(text_to_verify, run_logger, on_tool_event=_make_agent_tool_cb("factual"))),
-        _run_and_notify("betting", _run_betting_agent(text_to_verify, run_logger, on_tool_event=_make_agent_tool_cb("betting"))),
+        _run_and_notify("reasoning", _run_reasoning_agent(text_to_verify, source_data, run_logger, on_tool_event=_make_agent_tool_cb("reasoning"), reference_data=reference_data)),
+        _run_and_notify("factual", _run_factual_agent(text_to_verify, run_logger, on_tool_event=_make_agent_tool_cb("factual"), reference_data=reference_data)),
+        _run_and_notify("betting", _run_betting_agent(text_to_verify, run_logger, on_tool_event=_make_agent_tool_cb("betting"), reference_data=reference_data)),
     )
 
     # Compute overall verdict — worst of (pass < warn < fail < error)
@@ -719,9 +1042,14 @@ async def run_verification(
                 )
         run_logger.info("=" * 60)
 
-    return {
+    result = {
         "verified": worst == "pass",
         "overall_verdict": worst,
         "elapsed_seconds": elapsed,
         "agents": agents,
     }
+
+    # Store in cache for future lookups on the same text
+    _store_audit_cache(text_to_verify, result)
+
+    return result
